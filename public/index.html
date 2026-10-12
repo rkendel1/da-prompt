@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>da-prompt · Software Factory</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter+Tight:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#/">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 29 9.5v13L16 30 3 22.5v-13z" fill="currentColor"/><path d="M16 2 29 9.5 16 17 3 9.5z" fill="var(--paper)" opacity=".85"/><path d="M16 17v13l13-7.5v-13z" fill="var(--accent)"/></svg>
+        <span>
+          <strong>da-prompt</strong>
+          <small>software factory</small>
+        </span>
+      </a>
+      <a class="new-run" href="#/">+ New run</a>
+      <nav class="runs" id="runs" aria-label="Runs"></nav>
+      <a class="side-link" href="#/prompt">&lt;prompt&gt; operating prompt</a>
+    </aside>
+
+    <main class="main" id="main" tabindex="-1"></main>
+  </div>
+
+  <template id="tpl-new">
+    <section class="page new">
+      <p class="eyebrow">research note · software factory · 7 layers</p>
+      <h1>Turn an idea into a working app.</h1>
+      <p class="lede">The factory plans a task graph, spins up specialized agents, runs them in parallel, verifies every step, fixes what fails, deploys, and hands you the code.</p>
+
+      <div class="new-grid">
+        <form id="new-form" class="card prompt-card" autocomplete="off">
+          <div class="tag">&lt;inputs&gt;</div>
+          <label class="field">
+            <span>Idea <em>required</em></span>
+            <textarea name="idea" rows="3" required maxlength="4000" placeholder="A shared reading list for book clubs…"></textarea>
+          </label>
+          <div class="examples" id="examples" aria-label="Example ideas"></div>
+          <label class="field"><span>Requirements</span><textarea name="requirements" rows="2" placeholder="Members add books, vote on the next pick, mark books as read"></textarea></label>
+          <label class="field"><span>Stack / constraints</span><input name="stack" placeholder="Node.js ≥ 20, minimal dependencies"></label>
+          <label class="field"><span>Budget / limits</span><input name="limits" placeholder="Solid v1 in one run"></label>
+          <label class="field"><span>Access / keys</span><input name="tools" placeholder="Describe access; put real secrets in the server environment"></label>
+          <div class="tag">&lt;/inputs&gt;</div>
+
+          <details class="advanced">
+            <summary>Factory settings</summary>
+            <div class="settings">
+              <label class="field"><span>Provider</span><select name="provider" id="provider"></select></label>
+              <label class="field"><span>Parallel agents</span><input name="maxParallel" type="number" min="1" max="8" value="3"></label>
+              <label class="field"><span>Attempts per task</span><input name="maxAttempts" type="number" min="1" max="5" value="3"></label>
+              <label class="field"><span>Token budget</span><input name="tokenBudget" type="number" min="10000" step="10000" value="2000000"></label>
+              <label class="field check"><input name="deploy" type="checkbox" checked> <span>Deploy a live preview</span></label>
+              <label class="field wide" id="repo-field" hidden><span>Push result to repo (https)</span><input name="repoUrl" placeholder="https://github.com/you/new-app.git"></label>
+            </div>
+          </details>
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+          <button class="primary" type="submit">Start the factory →</button>
+        </form>
+
+        <ol class="card layers-explainer" aria-label="How a run works">
+          <li><b>Plan</b><span>A task graph with dependencies, risks and success criteria.</span></li>
+          <li><b>Agents</b><span>Product, engineer, design, QA, DevOps, research — only those needed.</span></li>
+          <li><b>Execution</b><span>Each agent gets only its task's context and real tools.</span></li>
+          <li><b>Artifacts</b><span>Files, commands, logs and a summary for every task.</span></li>
+          <li><b>Verification</b><span>The factory runs each task's checks before moving on.</span></li>
+          <li><b>Feedback</b><span>Errors go back to the agent; 3 tries, then escalate. Lessons land in CLAUDE.md.</span></li>
+          <li><b>Completion</b><span>Full tests, security review, live deploy, docs, final summary.</span></li>
+        </ol>
+      </div>
+    </section>
+  </template>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
