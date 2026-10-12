@@ -237,3 +237,32 @@ pre.out { background: var(--paper); border: 1px solid var(--line); border-radius
   .feed li { grid-template-columns: 1fr; gap: 0; }
   .task-detail .kv { grid-template-columns: 1fr; }
 }
+
+/* Model picker */
+.model-picker { display: grid; gap: 12px; }
+.picker-row { display: flex; gap: 8px; align-items: flex-end; }
+.picker-row .grow { flex: 1; min-width: 0; }
+.btn.icon { padding: 9px 12px; font-size: 15px; }
+.picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.picker-status { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.hint { font: 12px/1.5 var(--mono); color: var(--muted); margin: 0; }
+.hint a, .field a { color: var(--accent); }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.field > span em { color: var(--muted); }
+optgroup { font-style: normal; color: var(--muted); }
+
+/* Providers page */
+.pv-list { align-items: start; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 14px; margin-bottom: 20px; }
+.pv-card { display: grid; gap: 10px; align-content: start; }
+.pv-card.is-ready { border-color: var(--line-2); }
+.pv-card .settings { margin-top: 0; }
+.pv-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.pv-head h3 { margin: 0 0 2px; }
+.pv-actions { align-items: center; }
+.pv-add { display: grid; gap: 12px; max-width: 760px; }
+.pv-add h2 { margin: 0; }
+@media (max-width: 560px) { .picker-grid { grid-template-columns: 1fr; } }
+.pv-setup summary { cursor: pointer; font: 12px var(--mono); color: var(--accent); }
+.pv-setup[open] summary { margin-bottom: 10px; }
+.pv-actions:empty { display: none; }

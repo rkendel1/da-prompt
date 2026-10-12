@@ -84,3 +84,22 @@ test('FACTORY_PASSWORD enables basic auth', async () => {
   assert.equal(ok.status, 200);
   await locked.close();
 });
+
+test('providers API: discovery, add, update without leaking keys, remove', async () => {
+  const d = await (await fetch(`${base}/api/providers`)).json();
+  assert.ok(d.providers.find((p) => p.id === 'offline').status === 'ready');
+  assert.ok(d.providers.some((p) => p.id === 'ollama'));
+  const bad = await post('/api/providers', { label: 'x', baseUrl: 'not a url at all' });
+  assert.equal(bad.status, 400);
+  const added = await post('/api/providers', { label: 'My Gateway', type: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-secret-abcdefghijklmnop' });
+  assert.equal(added.status, 201);
+  const { provider } = await added.json();
+  assert.equal(provider.status, 'unreachable');
+  assert.equal(provider.keyHint, '…mnop');
+  const patched = await fetch(`${base}/api/providers/my-gateway`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ toolMode: 'json' }) });
+  assert.equal((await patched.json()).provider.toolMode, 'json');
+  const all = await (await fetch(`${base}/api/providers`)).text();
+  assert.ok(!all.includes('sk-secret'));
+  assert.equal((await fetch(`${base}/api/providers/my-gateway`, { method: 'DELETE' })).status, 200);
+  assert.equal((await fetch(`${base}/api/providers/my-gateway`)).status, 404);
+});

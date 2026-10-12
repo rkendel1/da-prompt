@@ -8,7 +8,7 @@ import { normalizeInputs } from './prompt.js';
 import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from './graph.js';
 import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
 import { scanWorkspace, redact } from './security.js';
-import { createProvider, PROVIDERS } from './providers/index.js';
+import { ProviderRegistry } from './providers/registry.js';
 import { packageDelivery, pushToGit } from './deliver.js';
 
 export const LAYERS = ['plan', 'agents', 'execution', 'artifacts', 'verification', 'feedback', 'completion'];
@@ -21,7 +21,11 @@ export class Factory {
     this.store = store;
     this.previews = previews;
     this.active = new Map(); // runId -> { controller, promise }
-    this.makeProvider = (name) => cfg.providerFactory?.(name, cfg) || createProvider(name, cfg);
+    this.providers = new ProviderRegistry(cfg);
+    // cfg.providerFactory lets tests inject a provider instance.
+    this.makeProvider = (run) =>
+      cfg.providerFactory?.(run.provider, cfg, run) ||
+      this.providers.create(run.provider, { model: run.model, plannerModel: run.plannerModel, options: run.providerOptions });
   }
 
   /** Mark runs that were mid-flight when the process stopped so they can be resumed. */
@@ -38,9 +42,7 @@ export class Factory {
 
   async createRun(body = {}) {
     const inputs = normalizeInputs(body);
-    const provider = body.provider || this.cfg.defaultProvider;
-    if (!PROVIDERS.includes(provider)) throw new Error(`unknown provider "${provider}"`);
-    this.makeProvider(provider); // fail fast (e.g. missing API key)
+    const choice = await this.resolveModelChoice(body);
     const d = this.cfg.defaults;
     const s = body.settings || {};
     const clamp = (v, lo, hi, def) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.round(Number(v)))) : def);
@@ -61,8 +63,11 @@ export class Factory {
       title: inputs.idea.split('\n')[0].slice(0, 90),
       createdAt: new Date().toISOString(),
       status: 'queued',
-      provider,
-      model: provider === 'anthropic' ? this.cfg.anthropic.model : 'offline-template-agent',
+      provider: choice.provider,
+      providerLabel: choice.label,
+      model: choice.model,
+      plannerModel: choice.plannerModel,
+      providerOptions: choice.options,
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
       repoUrl,
@@ -73,8 +78,46 @@ export class Factory {
       checklist: [],
     };
     await this.store.create(run);
-    this.store.event(id, 'run.created', { title: run.title, provider, settings });
+    this.store.event(id, 'run.created', { title: run.title, provider: run.provider, model: run.model, plannerModel: run.plannerModel, settings });
+    if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
     return run;
+  }
+
+  /** Validate the requested provider/model, filling in discovered defaults. */
+  async resolveModelChoice(body = {}) {
+    const str = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : '');
+    let providerId = str(body.provider);
+    let model = str(body.model);
+    let plannerModel = str(body.plannerModel);
+    if (!providerId) {
+      providerId = (await this.providers.discover()).defaultProvider;
+      if (!model && this.cfg.defaultProvider === providerId) model = this.cfg.defaultModel;
+    }
+    let spec;
+    try {
+      spec = this.providers.get(providerId);
+    } catch (err) {
+      if (!this.cfg.providerFactory) throw err;
+      spec = { id: providerId, label: providerId, type: 'injected' };
+    }
+    if (spec.type === 'offline') {
+      model = 'offline-template-agent';
+      plannerModel = model;
+    } else if (!model && spec.type !== 'injected') {
+      const probe = await this.providers.probe(spec);
+      if (probe.status !== 'ready') throw new Error(`${spec.label} is not ready: ${probe.message || probe.status}`);
+      model = probe.defaultModel;
+      if (!model) throw new Error(`${spec.label} has no models available`);
+    }
+    if (!plannerModel && providerId === this.cfg.defaultProvider && this.cfg.defaultPlannerModel) plannerModel = this.cfg.defaultPlannerModel;
+    const o = body.providerOptions || {};
+    const options = {};
+    if (Number(o.numCtx) > 0) options.numCtx = Math.max(2048, Math.min(1_048_576, Math.round(Number(o.numCtx))));
+    if (o.temperature !== undefined && o.temperature !== '' && Number.isFinite(Number(o.temperature))) options.temperature = Math.max(0, Math.min(2, Number(o.temperature)));
+    if (['auto', 'native', 'json'].includes(o.toolMode)) options.toolMode = o.toolMode;
+    const choice = { provider: providerId, label: spec.label, model: model || 'default', plannerModel: plannerModel || model || 'default', options };
+    this.makeProvider(choice); // fail fast: missing key, disabled provider, missing model
+    return choice;
   }
 
   isActive(id) {
@@ -170,7 +213,7 @@ export class Factory {
       await save();
       emit('layer', { layer: name, state });
     };
-    const provider = this.makeProvider(run.provider);
+    const provider = this.makeProvider(run);
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -191,7 +234,8 @@ export class Factory {
       if (!run.plan) {
         await setStatus('planning');
         await layer('plan', 'active');
-        emit('log', { text: `Planning with ${provider.describe().plannerModel || provider.describe().model}…` });
+        const desc = provider.describe();
+        emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
         const plan = await runPlanner({ provider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));

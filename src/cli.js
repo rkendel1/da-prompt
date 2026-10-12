@@ -13,7 +13,12 @@ const { values, positionals } = parseArgs({
     stack: { type: 'string' },
     limits: { type: 'string' },
     tools: { type: 'string' },
-    provider: { type: 'string' },
+    provider: { type: 'string', short: 'p' },
+    model: { type: 'string', short: 'm' },
+    'planner-model': { type: 'string' },
+    'num-ctx': { type: 'string' },
+    'tool-mode': { type: 'string' },
+    providers: { type: 'boolean' },
     parallel: { type: 'string' },
     'no-deploy': { type: 'boolean' },
     'keep-alive': { type: 'boolean' },
@@ -21,16 +26,28 @@ const { values, positionals } = parseArgs({
   },
 });
 
-if (values.help || positionals.length === 0) {
-  console.log(`Usage: da-prompt "<idea>" [--requirements ..] [--stack ..] [--limits ..] [--tools ..]
-                 [--provider anthropic|offline] [--parallel N] [--no-deploy] [--keep-alive]`);
-  process.exit(values.help ? 0 : 1);
-}
-
 const cfg = loadConfig();
 const store = new RunStore(cfg.dataDir);
 const previews = new PreviewManager({ max: cfg.maxPreviews });
 const factory = new Factory({ cfg, store, previews });
+
+if (values.providers) {
+  const { providers, defaultProvider } = await factory.providers.discover({ refresh: true });
+  for (const p of providers) {
+    const mark = p.status === 'ready' ? '✓' : '·';
+    console.log(`${mark} ${p.id.padEnd(11)} ${p.label.padEnd(22)} ${p.status}${p.message ? ` — ${p.message}` : ''}${p.id === defaultProvider ? '  (default)' : ''}`);
+    for (const m of (p.models || []).slice(0, 25)) console.log(`      ${m.id === p.defaultModel ? '*' : ' '} ${m.id}${m.params ? ` (${m.params})` : ''}${m.tools === false ? '  [no native tools → JSON mode]' : ''}`);
+  }
+  process.exit(0);
+}
+
+if (values.help || positionals.length === 0) {
+  console.log(`Usage: da-prompt "<idea>" [--requirements ..] [--stack ..] [--limits ..] [--tools ..]
+                 [--provider ID] [--model NAME] [--planner-model NAME] [--num-ctx N] [--tool-mode auto|native|json]
+                 [--parallel N] [--no-deploy] [--keep-alive]
+       da-prompt --providers        list providers and models that are available right now`);
+  process.exit(values.help ? 0 : 1);
+}
 
 const run = await factory.createRun({
   idea: positionals.join(' '),
@@ -39,6 +56,9 @@ const run = await factory.createRun({
   limits: values.limits,
   tools: values.tools,
   provider: values.provider,
+  model: values.model,
+  plannerModel: values['planner-model'],
+  providerOptions: { numCtx: values['num-ctx'], toolMode: values['tool-mode'] },
   settings: { maxParallel: values.parallel, deploy: !values['no-deploy'] },
 });
 
@@ -61,7 +81,8 @@ store.subscribe(run.id, (e) => {
   }
 });
 
-console.log(`Run ${run.id} · provider ${run.provider} · workspace ${store.workspaceDir(run.id)}`);
+console.log(`Run ${run.id} · ${run.providerLabel || run.provider} · ${run.model}${run.plannerModel !== run.model ? ` (planner ${run.plannerModel})` : ''}`);
+console.log(`Workspace ${store.workspaceDir(run.id)}`);
 const final = await factory.start(run.id);
 console.log(`\n${final.summary || ''}\n`);
 console.log(`Report:  ${store.deliveryDir(run.id)}/FACTORY_REPORT.md`);

@@ -23,26 +23,70 @@ cd da-prompt
 npm start                     # http://localhost:3000 — no install step, zero dependencies
 ```
 
-Open the app, describe an idea, and press **Start the factory**. Without an API key the
-factory uses its **offline demo agents**, which build a real full-stack app (API + UI +
-tests + Dockerfile + docs) from templates so you can watch every layer work end to end,
-including a deliberately injected bug that the feedback loop catches and fixes.
-
-To build arbitrary ideas with Claude:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export FACTORY_PASSWORD=choose-something   # agents run shell commands — protect the server
-npm start
-```
+Open the app, describe an idea, pick a provider and model, and press **Start the factory**.
+The provider and model lists fill themselves from what you have: any provider with a key
+configured, and any local server that is running right now.
 
 Requires Node.js 20 or newer.
+
+## Providers and models
+
+The factory works with any LLM that can chat. Pick the provider and model per run in the
+UI (or with `--provider` / `--model` on the CLI); your last choice is remembered.
+
+| Provider | How it is detected |
+| --- | --- |
+| **Ollama** (local) | Running at `127.0.0.1:11434` or `OLLAMA_HOST`. No key. Installed models are listed with size, context length and tool support. |
+| **LM Studio**, **llama.cpp server**, **vLLM** (local) | Running at their default ports (`1234`, `8080`, `8000`) or `LMSTUDIO_BASE_URL` / `LLAMACPP_BASE_URL` / `VLLM_BASE_URL`. No key. |
+| **Anthropic** | `ANTHROPIC_API_KEY` |
+| **OpenAI** | `OPENAI_API_KEY` (and optional `OPENAI_BASE_URL`) |
+| **OpenRouter**, **Google Gemini**, **Groq**, **Mistral**, **DeepSeek**, **xAI**, **Together** | `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `TOGETHER_API_KEY` |
+| **Anything else** | Add it on the **Providers** page: any OpenAI-compatible endpoint, another machine's Ollama, or an Anthropic-compatible gateway, with or without a key. |
+| **Offline demo agents** | Always available. Build a template app with no LLM, so you can watch every layer work (including a deliberate bug the feedback loop fixes). |
+
+Keys can come from environment variables or be pasted on the Providers page (saved to
+`data/providers.json` with owner-only permissions and never sent back to the browser).
+The Providers page also lets you change base URLs, set a default model, set Ollama's
+context window, and **Test** a model with a real tool call.
+
+### Running with Ollama
+
+```bash
+ollama pull qwen2.5-coder:14b        # or qwen3-coder, devstral, gpt-oss, llama3.1 …
+npm start                            # Ollama appears automatically with your models
+# or headless:
+npm run factory -- "A habit tracker" --provider ollama --model qwen2.5-coder:14b --num-ctx 32768
+npm run factory -- --providers       # list everything that is available right now
+```
+
+Notes for local models:
+
+- **Context window.** Ollama's default context is small and silently truncates long prompts.
+  The factory talks to Ollama's native `/api/chat` and sets `num_ctx` (32k by default,
+  adjustable per run). Use a value your RAM/VRAM can hold.
+- **Tool calling.** Models with native tool support use it. Models without it (or that
+  reject the `tools` field) automatically switch to **JSON tool calls in text**, and tool
+  calls that a model writes into its reply instead of the structured field are recovered.
+  You can force either mode per run or per provider.
+- **Model choice matters.** Agents write and fix real code over many turns. Coding models of
+  roughly 14B parameters and up do much better than small chat models. You can use a larger
+  model for planning only (the *Planner model* setting).
+- **No timeouts on slow hardware.** Requests to local models may take as long as they need
+  (up to 30 minutes per call).
+
+### Protect the server
+
+```bash
+export FACTORY_PASSWORD=choose-something   # agents run shell commands
+npm start
+```
 
 ### Headless
 
 ```bash
 npm run factory -- "A shared reading list for book clubs" \
-  --requirements "members add books, vote on the next pick" --parallel 3
+  --requirements "members add books, vote on the next pick" \
+  --provider openai --model gpt-5 --planner-model gpt-5 --parallel 3
 # add --keep-alive to leave the built app running
 ```
 
@@ -55,13 +99,18 @@ container is the sandbox:
 docker build -t da-prompt .
 docker run -p 3000:3000 -v da-prompt-data:/data \
   -e ANTHROPIC_API_KEY -e FACTORY_PASSWORD=change-me da-prompt
+
+# Ollama running on the host machine:
+docker run -p 3000:3000 -v da-prompt-data:/data --add-host=host.docker.internal:host-gateway \
+  -e OLLAMA_HOST=http://host.docker.internal:11434 -e FACTORY_PASSWORD=change-me da-prompt
 ```
+(Ollama must listen on more than localhost for this: `OLLAMA_HOST=0.0.0.0 ollama serve`.)
 
 ## What each layer does
 
 | Layer | Implementation |
 | --- | --- |
-| **1 Plan** | The planner (Claude, forced `submit_plan` tool) returns product summary, users, success criteria, tasks with roles, dependencies, acceptance criteria and `verify` commands, risks, open questions, a final test command and a deploy command. The plan is validated as a DAG (unknown deps, duplicates, cycles, roles) and sent back for fixes up to 3 times. Written to `PLAN.md`. |
+| **1 Plan** | The planner (the run's planner model, forced `submit_plan` tool) returns product summary, users, success criteria, tasks with roles, dependencies, acceptance criteria and `verify` commands, risks, open questions, a final test command and a deploy command. The plan is validated as a DAG (unknown deps, duplicates, cycles, roles) and sent back for fixes up to 3 times. Written to `PLAN.md`. |
 | **2 Agents** | Only the roles the plan uses are spun up: product, engineer, design, QA, DevOps, research. Each gets a role brief on top of the shared operating prompt. |
 | **3 Execution** | Ready tasks (all deps done) run in parallel up to the run's limit. Each agent sees only its task spec, acceptance criteria, upstream task summaries/files and recorded lessons — and works with real tools: `list_files`, `read_file`, `write_file`, `run_command`, `complete_task`. |
 | **4 Artifacts** | Every task returns files, commands run, a summary and next steps. Tool calls, outputs and messages are streamed to the UI and stored in `events.jsonl`. |
@@ -72,7 +121,7 @@ docker run -p 3000:3000 -v da-prompt-data:/data \
 
 ## The UI
 
-- **New run** — the prompt's `<inputs>` (idea, requirements, stack, limits, access) plus factory settings: provider, parallel agents, attempts per task, token budget, live preview, target repo.
+- **New run** — the prompt's `<inputs>` (idea, requirements, stack, limits, access) the `<model>` picker (provider, agent model, planner model, context window, tool-calling mode — prepopulated from discovery), and factory settings: parallel agents, attempts per task, token budget, live preview, target repo.
 - **Run view** — live status of the seven layers, and tabs for:
   - **Overview** — product, success criteria, escalations with action buttons, completion checklist, deployment, lessons, final summary.
   - **Task graph** — the DAG by level (parallel tasks share a column); click a task for its spec, attempts, verification output and feedback.
@@ -87,10 +136,12 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | — | Enables the Claude provider (default when set) |
-| `FACTORY_MODEL` | `claude-sonnet-5-5` | Model for agents and the summary |
-| `FACTORY_PLANNER_MODEL` | `claude-opus-5-5` | Model for planning |
-| `FACTORY_PROVIDER` | auto | Force `anthropic` or `offline` |
+| Provider keys / URLs | — | See *Providers and models* above |
+| `FACTORY_PROVIDER` | auto | Force the default provider id (e.g. `ollama`) |
+| `FACTORY_MODEL` | auto | Default model for that provider |
+| `FACTORY_PLANNER_MODEL` | same | Default planner model for that provider |
+| `FACTORY_MAX_OUTPUT_TOKENS` | `8192` | Max tokens per model reply |
+| `FACTORY_HIDE_OFFLINE` | — | `1` hides the offline demo agents |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Server address |
 | `FACTORY_DATA_DIR` | `./data` | Runs, workspaces, deliveries |
 | `FACTORY_PASSWORD` | — | HTTP basic auth for the whole server |
@@ -109,9 +160,12 @@ See `.env.example`.
 
 | Method | Path | |
 | --- | --- | --- |
-| GET | `/api/config` | Providers, defaults, layers |
+| GET | `/api/config` | Defaults, layers |
+| GET / POST | `/api/providers[?refresh=1]` | Discover providers + models / add a custom provider |
+| GET / PATCH / DELETE | `/api/providers/:id` | One provider / update URL, key, default model, context, tool mode / remove or reset |
+| POST | `/api/providers/:id/test` | Tool-calling check against `{ model }` |
 | GET | `/api/prompt?idea=…` | Operating prompt, raw and rendered |
-| GET / POST | `/api/runs` | List runs / start a run `{ idea, requirements, stack, limits, tools, provider, settings, repoUrl }` |
+| GET / POST | `/api/runs` | List runs / start a run `{ idea, requirements, stack, limits, tools, provider, model, plannerModel, providerOptions: { numCtx, temperature, toolMode }, settings, repoUrl }` |
 | GET / DELETE | `/api/runs/:id` | Run state / delete run |
 | GET | `/api/runs/:id/events` | Server-sent events (replays history, then live) |
 | POST | `/api/runs/:id/resume` · `/cancel` · `/deploy` | Control the run / restart the preview |
@@ -135,7 +189,7 @@ See `.env.example`.
 ## Development
 
 ```bash
-npm test          # 20 tests: graph, sandbox, prompt, provider, full factory runs, HTTP API
+npm test          # graph, sandbox, prompt, providers (incl. full runs through mock Ollama/OpenAI servers), factory, HTTP API
 npm run dev       # restart on change
 ```
 
@@ -150,7 +204,8 @@ src/sandbox.js     workspace file + command sandbox
 src/security.js    secret scan and redaction
 src/deploy.js      live preview processes and health checks
 src/deliver.js     report, archive, optional git push
-src/providers/     anthropic (Messages API + tools) and offline (deterministic demo)
+src/providers/     registry (presets, discovery, saved keys), anthropic, openai (OpenAI-compatible
+                   + Ollama native), tooltext (JSON tool-call fallback), offline (deterministic demo)
 src/server.js      HTTP API, SSE, preview proxy, static UI
 src/cli.js         headless runner
 public/            the web app

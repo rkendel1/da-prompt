@@ -21,6 +21,7 @@
       </a>
       <a class="new-run" href="#/">+ New run</a>
       <nav class="runs" id="runs" aria-label="Runs"></nav>
+      <a class="side-link" href="#/providers">&lt;providers&gt; models &amp; keys</a>
       <a class="side-link" href="#/prompt">&lt;prompt&gt; operating prompt</a>
     </aside>
 
@@ -47,10 +48,13 @@
           <label class="field"><span>Access / keys</span><input name="tools" placeholder="Describe access; put real secrets in the server environment"></label>
           <div class="tag">&lt;/inputs&gt;</div>
 
+          <div class="tag">&lt;model&gt;</div>
+          <div id="model-picker" class="model-picker"></div>
+          <div class="tag">&lt;/model&gt;</div>
+
           <details class="advanced">
             <summary>Factory settings</summary>
             <div class="settings">
-              <label class="field"><span>Provider</span><select name="provider" id="provider"></select></label>
               <label class="field"><span>Parallel agents</span><input name="maxParallel" type="number" min="1" max="8" value="3"></label>
               <label class="field"><span>Attempts per task</span><input name="maxAttempts" type="number" min="1" max="5" value="3"></label>
               <label class="field"><span>Token budget</span><input name="tokenBudget" type="number" min="10000" step="10000" value="2000000"></label>

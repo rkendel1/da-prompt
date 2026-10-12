@@ -1,4 +1,5 @@
 // da-prompt factory UI. No framework: hash routing, fetch, EventSource.
+import { mountModelPicker, renderProvidersPage } from './providers.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const main = $('#main');
@@ -74,6 +75,9 @@ function route() {
   } else if (hash === '/prompt') {
     current = null;
     renderPrompt();
+  } else if (hash === '/providers') {
+    current = null;
+    renderProvidersPage(main, api, toast);
   } else {
     current = null;
     renderNew();
@@ -95,10 +99,7 @@ function renderNew() {
       form.idea.focus();
     }
   });
-  const sel = $('#provider');
-  sel.innerHTML = config.providers
-    .map((p) => `<option value="${esc(p.name)}" ${p.name === config.defaultProvider ? 'selected' : ''} ${p.available ? '' : 'disabled'}>${p.name === 'anthropic' ? `Claude (${esc(p.model)})` : 'Offline demo agents'}${p.available ? '' : ' — set ANTHROPIC_API_KEY'}</option>`)
-    .join('');
+  const picker = mountModelPicker($('#model-picker'), api);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
   form.tokenBudget.value = config.defaults.tokenBudget;
@@ -111,13 +112,14 @@ function renderNew() {
     const btn = form.querySelector('button[type=submit]');
     btn.disabled = true;
     const fd = new FormData(form);
+    const choice = (await picker).getChoice();
     const body = {
+      ...choice,
       idea: fd.get('idea'),
       requirements: fd.get('requirements'),
       stack: fd.get('stack'),
       limits: fd.get('limits'),
       tools: fd.get('tools'),
-      provider: fd.get('provider'),
       repoUrl: fd.get('repoUrl') || undefined,
       settings: {
         maxParallel: Number(fd.get('maxParallel')),
@@ -207,7 +209,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.provider)}${run.model ? ` · ${esc(run.model)}` : ''}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${run.plannerModel && run.plannerModel !== run.model ? ` · planner ${esc(run.plannerModel)}` : ''}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
@@ -448,7 +450,7 @@ function renderTaskDetail(el, t, run) {
 function describe(e) {
   const who = e.taskId ? `${e.taskId}${e.role ? ` · ${e.role}` : ''}` : 'factory';
   switch (e.type) {
-    case 'run.created': return [who, `Run created (${e.provider})`];
+    case 'run.created': return [who, `Run created · ${esc(e.provider)} · ${esc(e.model || '')}${e.plannerModel && e.plannerModel !== e.model ? ` (planner ${esc(e.plannerModel)})` : ''}`];
     case 'run.status': return [who, `Status → <b>${esc(statusLabel(e.status))}</b>${e.note ? ` — ${esc(e.note)}` : ''}`];
     case 'layer': return [who, `Layer <b>${esc(LAYER_NAMES[e.layer] || e.layer)}</b>: ${esc(e.state)}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'warn' : ''];
     case 'plan': return [who, `Plan ready: ${e.tasks} tasks across ${e.levels} levels`, 'ok'];

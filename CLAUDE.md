@@ -14,6 +14,8 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - Anything persisted or shown in the UI that might contain secrets goes through `redact()`.
 - Every new factory behaviour should be covered in `test/factory.test.js` via the offline provider.
 - The UI (`public/`) is plain HTML/CSS/JS; escape every dynamic string with `esc()`.
+- Provider calls go through `src/providers/http.js` (node:http, no fetch headers timeout — local models are slow).
+- New provider presets go in `PRESETS` in `src/providers/registry.js`; cover new adapters with `test/mock-llm.js`.
 - Offline agent output lives in `templates/offline-app/*.tpl`; keep its tests passing.
 
 ## Lessons

@@ -9,21 +9,20 @@ function int(name, fallback) {
 }
 
 export function loadConfig(overrides = {}) {
-  const apiKey = process.env.ANTHROPIC_API_KEY || '';
   const cfg = {
     root: ROOT,
     port: int('PORT', 3000),
     host: process.env.HOST || '0.0.0.0',
     dataDir: path.resolve(process.env.FACTORY_DATA_DIR || path.join(ROOT, 'data')),
-    // Provider: "anthropic" when a key is present, otherwise the deterministic offline provider.
-    defaultProvider: process.env.FACTORY_PROVIDER || (apiKey ? 'anthropic' : 'offline'),
-    anthropic: {
-      apiKey,
-      model: process.env.FACTORY_MODEL || 'claude-sonnet-5-5',
-      plannerModel: process.env.FACTORY_PLANNER_MODEL || process.env.FACTORY_MODEL || 'claude-opus-5-5',
-      baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
-      maxTokens: int('FACTORY_MAX_OUTPUT_TOKENS', 8192),
-    },
+    // Optional: force a default provider/model. Otherwise the factory picks the first provider
+    // that is ready (a configured key, or a local server such as Ollama that is running) and
+    // remembers your last choice. Providers, keys and URLs are managed in src/providers/registry.js
+    // presets, environment variables, and the Providers page.
+    defaultProvider: process.env.FACTORY_PROVIDER || '',
+    defaultModel: process.env.FACTORY_MODEL || '',
+    defaultPlannerModel: process.env.FACTORY_PLANNER_MODEL || '',
+    maxOutputTokens: int('FACTORY_MAX_OUTPUT_TOKENS', 8192),
+    hideOffline: process.env.FACTORY_HIDE_OFFLINE === '1',
     // Offline provider faults: "on" injects one bug that the feedback loop fixes, "persistent"
     // keeps failing for a full round of attempts so escalation can be demonstrated, "off" disables.
     offlineFaults: ['on', 'off', 'persistent'].includes(process.env.FACTORY_OFFLINE_FAULTS) ? process.env.FACTORY_OFFLINE_FAULTS : 'on',

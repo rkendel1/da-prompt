@@ -42,6 +42,6 @@ test('AnthropicProvider requires a key and surfaces non-retryable errors', async
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const p = new AnthropicProvider({ apiKey: 'k', model: 'm', baseUrl: `http://127.0.0.1:${server.address().port}`, maxTokens: 10 });
-  await assert.rejects(p.chat({ system: 's', messages: [{ role: 'user', content: 'x' }] }), /Anthropic API 400/);
+  await assert.rejects(p.chat({ system: 's', messages: [{ role: 'user', content: 'x' }] }), /Anthropic API \(m\): HTTP 400/);
   server.close();
 });

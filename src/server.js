@@ -9,7 +9,6 @@ import { RunStore } from './store.js';
 import { Factory, LAYERS } from './factory.js';
 import { PreviewManager } from './deploy.js';
 import { Workspace } from './sandbox.js';
-import { availableProviders } from './providers/index.js';
 import { renderPrompt, PROMPT_TEMPLATE, INPUT_FIELDS } from './prompt.js';
 import { buildReport } from './deliver.js';
 
@@ -100,8 +99,9 @@ export async function createServer(overrides = {}) {
     // /api/...
     if (parts[1] === 'health') return json(res, 200, { ok: true, active: factory.active.size });
     if (parts[1] === 'config' && method === 'GET') {
-      return json(res, 200, { defaultProvider: cfg.defaultProvider, providers: availableProviders(cfg), defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken) });
+      return json(res, 200, { defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken) });
     }
+    if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
       return json(res, 200, { template: PROMPT_TEMPLATE, rendered: renderPrompt(inputs) });
@@ -189,6 +189,48 @@ export async function createServer(overrides = {}) {
       const downloadName = name === 'project.tar.gz' ? `${slug}-${id}.tar.gz` : name;
       res.writeHead(200, { 'content-type': TYPES[path.extname(name)] || 'application/gzip', 'content-disposition': `attachment; filename="${downloadName}"`, ...SECURITY_HEADERS });
       return fs.createReadStream(file).pipe(res);
+    }
+    throw new HttpError(404, 'not found');
+  }
+
+  async function providersApi(req, res, parts, url) {
+    const reg = factory.providers;
+    const method = req.method;
+    const refresh = url.searchParams.get('refresh') === '1';
+    const id = parts[2];
+    const wrap = async (fn, status = 200) => {
+      try {
+        return json(res, status, await fn());
+      } catch (err) {
+        throw new HttpError(/unknown provider/.test(err.message) ? 404 : 400, err.message);
+      }
+    };
+    if (!id) {
+      if (method === 'GET') return json(res, 200, await reg.discover({ refresh }));
+      if (method === 'POST') {
+        const body = await readBody(req);
+        return wrap(async () => {
+          const view = reg.addCustom(body);
+          return { provider: { ...view, ...(await reg.probe(reg.get(view.id), { refresh: true })) } };
+        }, 201);
+      }
+      throw new HttpError(405, 'method not allowed');
+    }
+    if (!parts[3]) {
+      if (method === 'GET') return wrap(async () => ({ provider: { ...reg.view(reg.get(id)), ...(await reg.probe(reg.get(id), { refresh })) } }));
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        return wrap(async () => {
+          const view = reg.update(id, body);
+          return { provider: { ...view, ...(await reg.probe(reg.get(id), { refresh: true })) } };
+        });
+      }
+      if (method === 'DELETE') return wrap(async () => ({ ok: reg.remove(id) }));
+      throw new HttpError(405, 'method not allowed');
+    }
+    if (parts[3] === 'test' && method === 'POST') {
+      const body = await readBody(req);
+      return wrap(() => reg.test(id, body.model));
     }
     throw new HttpError(404, 'not found');
   }
@@ -293,9 +335,12 @@ export async function createServer(overrides = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await createServer();
   app.server.listen(app.cfg.port, app.cfg.host, () => {
-    const p = availableProviders(app.cfg).find((x) => x.name === app.cfg.defaultProvider);
-    console.log(`da-prompt software factory on http://localhost:${app.cfg.port}`);
-    console.log(`provider: ${app.cfg.defaultProvider} (${p.model})  data: ${app.cfg.dataDir}`);
+    console.log(`da-prompt software factory on http://localhost:${app.cfg.port}  (data: ${app.cfg.dataDir})`);
+    app.factory.providers.discover().then(({ providers, defaultProvider }) => {
+      for (const p of providers.filter((x) => x.status === 'ready')) console.log(`  ✓ ${p.label}: ${p.models.length} model(s)${p.id === defaultProvider ? '  ← default' : ''}`);
+      const off = providers.filter((x) => x.status !== 'ready').map((x) => x.label);
+      if (off.length) console.log(`  · not available: ${off.join(', ')}`);
+    });
     if (!app.cfg.password && app.cfg.host !== '127.0.0.1') console.log('note: set FACTORY_PASSWORD before exposing this server; agents run shell commands.');
   });
   const stop = async () => {
