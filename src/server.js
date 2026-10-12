@@ -99,7 +99,7 @@ export async function createServer(overrides = {}) {
     // /api/...
     if (parts[1] === 'health') return json(res, 200, { ok: true, active: factory.active.size });
     if (parts[1] === 'config' && method === 'GET') {
-      return json(res, 200, { defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken) });
+      return json(res, 200, { defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null });
     }
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {

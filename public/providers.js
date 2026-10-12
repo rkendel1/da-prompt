@@ -56,6 +56,7 @@ function modelLabel(m) {
 export async function mountModelPicker(root, api) {
   root.innerHTML = '<p class="muted mono">Checking which providers and models are available…</p>';
   const state = { data: null, provider: null, pref: readPref() };
+  const usable = (id) => Boolean(state.data?.providers.some((x) => x.id === id && x.status === 'ready' && x.enabled));
 
   const render = () => {
     const { providers } = state.data;
@@ -67,7 +68,11 @@ export async function mountModelPicker(root, api) {
     const pref = state.pref.provider === pid ? state.pref : {};
     const model = state.model ?? (pref.model && (models.some((m) => m.id === pref.model) || !models.length) ? pref.model : p?.defaultModel || models[0]?.id || '');
     const custom = state.customModel ?? (model && models.length && !models.some((m) => m.id === model));
-    const planner = state.planner ?? pref.plannerModel ?? '';
+    const plannerProv = state.plannerProvider ?? (usable(pref.plannerProvider) && pref.plannerProvider !== pid ? pref.plannerProvider : '');
+    const pp = plannerProv ? providers.find((x) => x.id === plannerProv) : p;
+    const plannerModels = pp?.models || [];
+    const planner = state.planner ?? (pref.plannerProvider === plannerProv || (!pref.plannerProvider && !plannerProv) ? pref.plannerModel : '') ?? '';
+    const plannerCustom = state.plannerCustom ?? Boolean(planner && plannerModels.length && !plannerModels.some((m) => m.id === planner));
     const selected = models.find((m) => m.id === model);
     const offline = p?.type === 'offline';
 
@@ -94,12 +99,6 @@ export async function mountModelPicker(root, api) {
           </select>` : ''}
           ${custom || !models.length ? `<input id="pk-model-custom" placeholder="model id, e.g. qwen2.5-coder:14b" value="${esc(custom || !models.length ? model : '')}" ${models.length ? 'style="margin-top:6px"' : ''}>` : ''}
         </label>
-        <label class="field"><span>Planner model</span>
-          <select id="pk-planner">
-            <option value="">Same as agent model</option>
-            ${models.map((m) => `<option value="${esc(m.id)}" ${m.id === planner ? 'selected' : ''}>${esc(m.id)}</option>`).join('')}
-          </select>
-        </label>
         ${p?.type === 'ollama' ? `<label class="field"><span>Context window (tokens)</span>
           <input id="pk-numctx" type="number" min="2048" step="1024" value="${esc(state.numCtx ?? pref.numCtx ?? p.numCtx ?? 32768)}">
         </label>` : ''}
@@ -110,6 +109,22 @@ export async function mountModelPicker(root, api) {
           </select>
         </label>
       </div>
+      <div class="picker-grid planner-grid">
+        <label class="field"><span>Planner provider <em>design &amp; task graph</em></span>
+          <select id="pk-planner-provider">
+            <option value="">Same as agents</option>
+            ${ready.filter((x) => x.type !== 'offline' && x.id !== pid).map((x) => `<option value="${esc(x.id)}" ${x.id === plannerProv ? 'selected' : ''}>${esc(x.label)}${x.local ? ' · local' : ''}</option>`).join('')}
+          </select>
+        </label>
+        <label class="field"><span>Planner model</span>
+          <select id="pk-planner">
+            <option value="">${plannerProv ? 'Provider default' : 'Same as agent model'}</option>
+            ${plannerModels.map((m) => `<option value="${esc(m.id)}" ${!plannerCustom && m.id === planner ? 'selected' : ''}>${esc(m.id)}</option>`).join('')}
+            <option value="__custom" ${plannerCustom ? 'selected' : ''}>Other model id…</option>
+          </select>
+          ${plannerCustom ? `<input id="pk-planner-custom" placeholder="model id" value="${esc(planner)}" style="margin-top:6px">` : ''}
+        </label>
+      </div>
       <div class="picker-status">
         <span id="pk-note" class="hint">${selected?.tools === false ? `${esc(selected.id)} doesn't advertise tool support; the factory will use JSON tool calls. Larger coding models work best.` : p?.local ? `Runs locally at ${esc(p.baseUrl)} — no API key needed.` : `Using ${esc(p?.label)}${p?.keySource ? ` · key from ${esc(p.keySource === 'saved' ? 'Providers page' : p.keySource)}` : ''}.`}</span>
         <button type="button" class="btn" id="pk-test">Test model</button>
@@ -118,7 +133,7 @@ export async function mountModelPicker(root, api) {
 
     $('#pk-provider', root).onchange = (e) => {
       state.provider = e.target.value;
-      state.model = state.customModel = state.planner = state.numCtx = state.toolMode = undefined;
+      state.model = state.customModel = state.planner = state.plannerCustom = state.plannerProvider = state.numCtx = state.toolMode = undefined;
       render();
     };
     $('#pk-refresh', root).onclick = async () => {
@@ -140,8 +155,21 @@ export async function mountModelPicker(root, api) {
     };
     const customInput = $('#pk-model-custom', root);
     if (customInput) customInput.oninput = () => (state.model = customInput.value.trim());
+    const plannerProvSel = $('#pk-planner-provider', root);
+    if (plannerProvSel) plannerProvSel.onchange = () => {
+      state.plannerProvider = plannerProvSel.value;
+      state.planner = '';
+      state.plannerCustom = false;
+      render();
+    };
     const plannerSel = $('#pk-planner', root);
-    if (plannerSel) plannerSel.onchange = () => (state.planner = plannerSel.value);
+    if (plannerSel) plannerSel.onchange = () => {
+      state.plannerCustom = plannerSel.value === '__custom';
+      state.planner = state.plannerCustom ? '' : plannerSel.value;
+      render();
+    };
+    const plannerCustomInput = $('#pk-planner-custom', root);
+    if (plannerCustomInput) plannerCustomInput.oninput = () => (state.planner = plannerCustomInput.value.trim());
     const ctx = $('#pk-numctx', root);
     if (ctx) ctx.oninput = () => (state.numCtx = ctx.value);
     const tm = $('#pk-toolmode', root);
@@ -167,16 +195,19 @@ export async function mountModelPicker(root, api) {
     const modelSel = $('#pk-model', root);
     const customInput = $('#pk-model-custom', root);
     const model = customInput?.value.trim() || (modelSel && modelSel.value !== '__custom' ? modelSel.value : '') || '';
+    const pSel = $('#pk-planner', root)?.value;
+    const plannerModel = $('#pk-planner-custom', root)?.value.trim() || (pSel && pSel !== '__custom' ? pSel : '') || undefined;
+    const plannerProvider = $('#pk-planner-provider', root)?.value || undefined;
     const choice = {
       provider: state.provider,
       model: p?.type === 'offline' ? undefined : model,
-      plannerModel: $('#pk-planner', root)?.value || undefined,
+      planner: p?.type === 'offline' ? undefined : { provider: plannerProvider, model: plannerModel },
       providerOptions: {
         numCtx: $('#pk-numctx', root)?.value || undefined,
         toolMode: $('#pk-toolmode', root)?.value || undefined,
       },
     };
-    writePref({ provider: choice.provider, model: choice.model, plannerModel: choice.plannerModel, numCtx: choice.providerOptions.numCtx });
+    writePref({ provider: choice.provider, model: choice.model, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
     return choice;
   }
 
@@ -186,7 +217,6 @@ export async function mountModelPicker(root, api) {
     root.innerHTML = `<p class="form-error">Could not load providers: ${esc(err.message)}</p>`;
     return { getChoice: () => ({}) };
   }
-  const usable = (id) => state.data.providers.some((x) => x.id === id && x.status === 'ready' && x.enabled);
   state.provider = usable(state.pref.provider) ? state.pref.provider : state.data.defaultProvider;
   render();
   return { getChoice };

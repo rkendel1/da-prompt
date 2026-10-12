@@ -1,6 +1,7 @@
 // <deliver>: package the working application, test results and a factory report.
 
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { safeEnv } from './sandbox.js';
@@ -16,11 +17,69 @@ function sh(cmd, args, opts = {}) {
   });
 }
 
+// ── Output location ───────────────────────────────────────────────────────────────────────────
+const MARKER = '.da-prompt-run';
+const NOT_EXPORTED = new Set(['node_modules', '.home', '.git']);
+const within = (child, parent) => child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
+
+/**
+ * Turn the user's requested output directory into a safe absolute path (or null for "none").
+ * Throws a user-readable error for locations the factory must never write into.
+ */
+export function resolveOutputDir(cfg, input) {
+  const raw = typeof input === 'string' ? input.trim() : '';
+  if (!raw) return null;
+  if (raw.includes('\0')) throw new Error('outputDir is not a valid path');
+  const expanded = raw === '~' || raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(1)) : raw;
+  const dir = path.resolve(cfg.outputRoot || process.cwd(), expanded);
+  if (cfg.outputRoot && (dir === cfg.outputRoot || !within(dir, cfg.outputRoot))) throw new Error(`outputDir must be inside ${cfg.outputRoot}`);
+  const protectedDirs = [path.parse(dir).root, os.homedir(), cfg.root, cfg.dataDir];
+  if (protectedDirs.some((p) => dir === p || within(p, dir)) || within(dir, cfg.dataDir)) throw new Error(`outputDir ${dir} is a protected location; choose a new project folder`);
+  return dir;
+}
+
+/** Fail early when the target can't be used: a file, or a folder holding someone else's work. */
+export async function checkOutputDir(dir, runId) {
+  let st;
+  try {
+    st = await fsp.stat(dir);
+  } catch (err) {
+    if (err.code === 'ENOENT') return;
+    throw new Error(`cannot use outputDir ${dir}: ${err.message}`);
+  }
+  if (!st.isDirectory()) throw new Error(`outputDir ${dir} exists and is not a directory`);
+  const entries = await fsp.readdir(dir);
+  if (!entries.length) return;
+  const marker = await fsp.readFile(path.join(dir, MARKER), 'utf8').catch(() => '');
+  if (marker.trim() !== runId) throw new Error(`outputDir ${dir} already has files in it; choose a new or empty folder`);
+}
+
+/** Copy the finished project (minus dependencies and internals) into the requested directory. */
+export async function exportProject(ws, dir, runId) {
+  try {
+    await checkOutputDir(dir, runId);
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.cp(ws.root, dir, {
+      recursive: true,
+      filter: async (src) => {
+        if (NOT_EXPORTED.has(path.basename(src))) return false;
+        return !(await fsp.lstat(src)).isSymbolicLink();
+      },
+    });
+    await fsp.writeFile(path.join(dir, MARKER), `${runId}\n`);
+    return { ok: true, dir };
+  } catch (err) {
+    return { ok: false, dir, error: err.message };
+  }
+}
+
 export function buildReport(run) {
   const p = run.plan;
   const L = [];
   L.push(`# ${p?.product?.name || run.title} — Factory Report`, '');
   L.push(`- Run: \`${run.id}\``, `- Status: **${run.status}**`, `- Provider: ${run.provider}${run.model ? ` (${run.model})` : ''}`);
+  if (run.plannerProvider && (run.plannerProvider !== run.provider || run.plannerModel !== run.model)) L.push(`- Planner: ${run.plannerProvider} (${run.plannerModel})`);
+  if (run.outputDir) L.push(`- Delivered to: \`${run.outputDir}\``);
   L.push(`- Tokens: ${(run.usage?.input || 0) + (run.usage?.output || 0)} (${run.usage?.input || 0} in / ${run.usage?.output || 0} out), ${run.usage?.calls || 0} model calls`);
   if (run.startedAt && run.finishedAt) L.push(`- Duration: ${Math.round((Date.parse(run.finishedAt) - Date.parse(run.startedAt)) / 1000)}s`);
   L.push('', '## Idea', run.inputs.idea, '');
@@ -74,7 +133,10 @@ export async function packageDelivery(run, ws, deliveryDir) {
   await fsp.writeFile(path.join(deliveryDir, 'test-results.json'), JSON.stringify(tests, null, 2));
   const archive = path.join(deliveryDir, 'project.tar.gz');
   const name = (run.plan?.product?.name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
-  const r = await sh('tar', ['-czf', archive, '--exclude=node_modules', '--exclude=.home', '--exclude=.git', `--transform=s,^\\.,${name},`, '.'], { cwd: ws.root });
+  const base = ['-czf', archive, '--exclude=node_modules', '--exclude=.home', '--exclude=.git'];
+  // GNU tar renames with --transform; bsdtar (macOS) uses -s.
+  let r = await sh('tar', [...base, `--transform=s,^\\.,${name},`, '.'], { cwd: ws.root });
+  if (r.code !== 0) r = await sh('tar', [...base, '-s', `,^\\.,${name},`, '.'], { cwd: ws.root });
   return { report: 'FACTORY_REPORT.md', tests: 'test-results.json', archive: r.code === 0 ? 'project.tar.gz' : null, archiveError: r.code === 0 ? null : r.out };
 }
 

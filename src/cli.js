@@ -16,6 +16,8 @@ const { values, positionals } = parseArgs({
     provider: { type: 'string', short: 'p' },
     model: { type: 'string', short: 'm' },
     'planner-model': { type: 'string' },
+    'planner-provider': { type: 'string' },
+    output: { type: 'string', short: 'o' },
     'num-ctx': { type: 'string' },
     'tool-mode': { type: 'string' },
     providers: { type: 'boolean' },
@@ -43,7 +45,8 @@ if (values.providers) {
 
 if (values.help || positionals.length === 0) {
   console.log(`Usage: da-prompt "<idea>" [--requirements ..] [--stack ..] [--limits ..] [--tools ..]
-                 [--provider ID] [--model NAME] [--planner-model NAME] [--num-ctx N] [--tool-mode auto|native|json]
+                 [--provider ID] [--model NAME] [--planner-provider ID] [--planner-model NAME] [--num-ctx N] [--tool-mode auto|native|json]
+                 [--output DIR]  copy the finished project to DIR (must be new or empty)
                  [--parallel N] [--no-deploy] [--keep-alive]
        da-prompt --providers        list providers and models that are available right now`);
   process.exit(values.help ? 0 : 1);
@@ -57,7 +60,8 @@ const run = await factory.createRun({
   tools: values.tools,
   provider: values.provider,
   model: values.model,
-  plannerModel: values['planner-model'],
+  planner: { provider: values['planner-provider'], model: values['planner-model'] },
+  outputDir: values.output,
   providerOptions: { numCtx: values['num-ctx'], toolMode: values['tool-mode'] },
   settings: { maxParallel: values.parallel, deploy: !values['no-deploy'] },
 });
@@ -76,17 +80,20 @@ store.subscribe(run.id, (e) => {
     case 'escalation': return console.log(c(31, `  ESCALATED ${e.taskId}: ${e.reason}`));
     case 'checklist': return e.items.forEach((i) => console.log(`  ${i.ok ? c(32, '✓') : c(31, '✗')} ${i.label} — ${i.detail}`));
     case 'deploy': return console.log(e.ok ? c(32, `  deployed (preview port running)`) : c(31, `  deploy failed: ${e.error}`));
+    case 'output': return console.log(e.ok ? c(32, `  delivered to ${e.dir}`) : c(31, `  delivery to ${e.dir} failed: ${e.error}`));
     case 'error': return console.log(c(31, `  error: ${e.message}`));
     default: return undefined;
   }
 });
 
-console.log(`Run ${run.id} · ${run.providerLabel || run.provider} · ${run.model}${run.plannerModel !== run.model ? ` (planner ${run.plannerModel})` : ''}`);
+const plannerDiffers = run.plannerProvider !== run.provider || run.plannerModel !== run.model;
+console.log(`Run ${run.id} · agents ${run.providerLabel || run.provider} · ${run.model}${plannerDiffers ? ` · planner ${run.plannerProviderLabel || run.plannerProvider} · ${run.plannerModel}` : ''}`);
 console.log(`Workspace ${store.workspaceDir(run.id)}`);
 const final = await factory.start(run.id);
 console.log(`\n${final.summary || ''}\n`);
 console.log(`Report:  ${store.deliveryDir(run.id)}/FACTORY_REPORT.md`);
 console.log(`Archive: ${store.deliveryDir(run.id)}/project.tar.gz`);
+if (final.delivery?.output) console.log(final.delivery.output.ok ? `Project:  ${final.delivery.output.dir}` : `Project NOT delivered to ${final.delivery.output.dir}: ${final.delivery.output.error}`);
 const p = previews.get(run.id);
 if (p && values['keep-alive']) {
   console.log(`App running at http://127.0.0.1:${p.port}/ — Ctrl+C to stop`);

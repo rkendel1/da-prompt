@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { tmpDir } from './helpers.js';
 import { loadConfig } from '../src/config.js';
@@ -128,4 +129,37 @@ test('persistent faults escalate the engineer task; "retry" from the escalation 
   assert.equal(run.status, 'completed');
   assert.equal(run.plan.tasks.find((t) => t.id === 'core').attempts.length, 4);
   assert.ok(run.lessons.some((l) => /fixed on attempt 4/.test(l.text)));
+});
+
+test('the finished project is delivered to the requested folder, and unsafe folders are refused', async () => {
+  const { cfg, factory } = setup();
+  const out = path.join(tmpDir(), 'my-app');
+  const created = await factory.createRun({ idea: 'A bookmark manager', provider: 'offline', outputDir: out, settings: { deploy: false } });
+  assert.equal(created.outputDir, out);
+  const run = await factory.start(created.id);
+  assert.equal(run.status, 'completed', run.error);
+  assert.deepEqual(run.delivery.output, { ok: true, dir: out });
+  for (const f of ['package.json', 'src/app.js', 'FACTORY_REPORT.md', 'CLAUDE.md']) assert.ok(fs.existsSync(path.join(out, f)), f);
+  assert.ok(!fs.existsSync(path.join(out, 'node_modules')));
+  assert.match(fs.readFileSync(path.join(out, 'FACTORY_REPORT.md'), 'utf8'), /Delivered to/);
+
+  // A folder holding other work is refused up front; the run's own folder is fine to re-deliver into.
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'offline', outputDir: out }), /already has files/);
+  const nonEmpty = tmpDir();
+  fs.writeFileSync(path.join(nonEmpty, 'mine.txt'), 'keep me');
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'offline', outputDir: nonEmpty }), /already has files/);
+  assert.equal(fs.readFileSync(path.join(nonEmpty, 'mine.txt'), 'utf8'), 'keep me');
+  for (const bad of ['/', os.homedir(), cfg.dataDir, path.join(cfg.dataDir, 'x'), cfg.root]) {
+    await assert.rejects(factory.createRun({ idea: 'x', provider: 'offline', outputDir: bad }), /protected location/, bad);
+  }
+});
+
+test('FACTORY_OUTPUT_ROOT confines output folders and resolves relative names inside it', async () => {
+  const root = tmpDir();
+  const cfg = loadConfig({ dataDir: tmpDir(), outputRoot: root });
+  const factory = new Factory({ cfg, store: new RunStore(cfg.dataDir), previews });
+  const run = await factory.createRun({ idea: 'A tiny app', provider: 'offline', outputDir: 'tiny', start: false });
+  assert.equal(run.outputDir, path.join(root, 'tiny'));
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'offline', outputDir: '../escape' }), /must be inside/);
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'offline', outputDir: os.tmpdir() }), /must be inside/);
 });

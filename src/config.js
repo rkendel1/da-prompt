@@ -21,6 +21,11 @@ export function loadConfig(overrides = {}) {
     defaultProvider: process.env.FACTORY_PROVIDER || '',
     defaultModel: process.env.FACTORY_MODEL || '',
     defaultPlannerModel: process.env.FACTORY_PLANNER_MODEL || '',
+    // Optional: plan with a different provider than the one that executes (e.g. frontier planner, local agents).
+    defaultPlannerProvider: process.env.FACTORY_PLANNER_PROVIDER || '',
+    // Where finished projects are copied. When set, every run's output directory must be inside it
+    // (relative paths resolve against it). Unset: any path is allowed, relative ones against the cwd.
+    outputRoot: process.env.FACTORY_OUTPUT_ROOT ? path.resolve(process.env.FACTORY_OUTPUT_ROOT) : '',
     maxOutputTokens: int('FACTORY_MAX_OUTPUT_TOKENS', 8192),
     hideOffline: process.env.FACTORY_HIDE_OFFLINE === '1',
     // Offline provider faults: "on" injects one bug that the feedback loop fixes, "persistent"

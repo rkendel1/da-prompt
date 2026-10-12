@@ -104,6 +104,7 @@ function renderNew() {
   form.maxAttempts.value = config.defaults.maxAttempts;
   form.tokenBudget.value = config.defaults.tokenBudget;
   $('#repo-field').hidden = !config.gitPush;
+  if (config.outputRoot) $('#output-dir').placeholder = `folder name inside ${config.outputRoot}`;
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -121,6 +122,7 @@ function renderNew() {
       limits: fd.get('limits'),
       tools: fd.get('tools'),
       repoUrl: fd.get('repoUrl') || undefined,
+      outputDir: fd.get('outputDir') || undefined,
       settings: {
         maxParallel: Number(fd.get('maxParallel')),
         maxAttempts: Number(fd.get('maxAttempts')),
@@ -209,7 +211,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${run.plannerModel && run.plannerModel !== run.model ? ` · planner ${esc(run.plannerModel)}` : ''}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
@@ -447,10 +449,17 @@ function renderTaskDetail(el, t, run) {
 }
 
 // Activity ----------------------------------------------------------------------------------
+function plannerLabel(r) {
+  const other = r.plannerProvider && r.plannerProvider !== r.provider;
+  if (!other && (!r.plannerModel || r.plannerModel === r.model)) return '';
+  return ` · planner ${esc(other ? `${r.plannerProviderLabel || r.plannerProvider} ` : '')}${esc(r.plannerModel)}`;
+}
+
 function describe(e) {
   const who = e.taskId ? `${e.taskId}${e.role ? ` · ${e.role}` : ''}` : 'factory';
   switch (e.type) {
-    case 'run.created': return [who, `Run created · ${esc(e.provider)} · ${esc(e.model || '')}${e.plannerModel && e.plannerModel !== e.model ? ` (planner ${esc(e.plannerModel)})` : ''}`];
+    case 'run.created': return [who, `Run created · ${esc(e.provider)} · ${esc(e.model || '')}${plannerLabel(e)}${e.outputDir ? ` · output ${esc(e.outputDir)}` : ''}`];
+    case 'output': return [who, e.ok ? `Project delivered to ${esc(e.dir)}` : `Delivery to ${esc(e.dir)} failed: ${esc(e.error)}`, e.ok ? 'ok' : 'bad'];
     case 'run.status': return [who, `Status → <b>${esc(statusLabel(e.status))}</b>${e.note ? ` — ${esc(e.note)}` : ''}`];
     case 'layer': return [who, `Layer <b>${esc(LAYER_NAMES[e.layer] || e.layer)}</b>: ${esc(e.state)}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'warn' : ''];
     case 'plan': return [who, `Plan ready: ${e.tasks} tasks across ${e.levels} levels`, 'ok'];
@@ -557,6 +566,7 @@ async function renderDelivery(el, run) {
   el.innerHTML = `<div class="grid-2">
     <div class="card md">${md(report)}</div>
     <div class="stack">
+      ${run.outputDir ? `<div class="card"><h2>Project folder</h2>${run.delivery.output?.ok ? `<p>Delivered to <code>${esc(run.outputDir)}</code> (dependencies not included — run <code>npm install</code> there).</p>` : `<p class="form-error">Could not deliver to <code>${esc(run.outputDir)}</code>: ${esc(run.delivery.output?.error || 'not delivered')}. Download the archive instead.</p>`}</div>` : ''}
       <div class="card"><h2>Downloads</h2><div class="actions">
         ${run.delivery.archive ? `<a class="btn accent" href="api/runs/${esc(run.id)}/download/project.tar.gz">Source code (.tar.gz)</a>` : ''}
         <a class="btn" href="api/runs/${esc(run.id)}/download/FACTORY_REPORT.md">Factory report</a>

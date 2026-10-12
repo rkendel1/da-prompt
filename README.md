@@ -87,6 +87,10 @@ npm start
 npm run factory -- "A shared reading list for book clubs" \
   --requirements "members add books, vote on the next pick" \
   --provider openai --model gpt-5 --planner-model gpt-5 --parallel 3
+
+# Frontier model plans, a local model builds, and the project lands in ~/Projects/habits
+npm run factory -- "a habit tracker" --planner-provider anthropic --planner-model claude-opus-5-5 \
+  --provider ollama --model qwen2.5-coder:14b --output ~/Projects/habits
 # add --keep-alive to leave the built app running
 ```
 
@@ -139,7 +143,9 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 | Provider keys / URLs | — | See *Providers and models* above |
 | `FACTORY_PROVIDER` | auto | Force the default provider id (e.g. `ollama`) |
 | `FACTORY_MODEL` | auto | Default model for that provider |
-| `FACTORY_PLANNER_MODEL` | same | Default planner model for that provider |
+| `FACTORY_PLANNER_PROVIDER` | same as agents | Plan with a different provider than the agents (e.g. `anthropic` for design, `ollama` for execution) |
+| `FACTORY_PLANNER_MODEL` | same | Default planner model |
+| `FACTORY_OUTPUT_ROOT` | — | Confine run output folders to this directory (relative names resolve inside it) |
 | `FACTORY_MAX_OUTPUT_TOKENS` | `8192` | Max tokens per model reply |
 | `FACTORY_HIDE_OFFLINE` | — | `1` hides the offline demo agents |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Server address |
@@ -165,7 +171,7 @@ See `.env.example`.
 | GET / PATCH / DELETE | `/api/providers/:id` | One provider / update URL, key, default model, context, tool mode / remove or reset |
 | POST | `/api/providers/:id/test` | Tool-calling check against `{ model }` |
 | GET | `/api/prompt?idea=…` | Operating prompt, raw and rendered |
-| GET / POST | `/api/runs` | List runs / start a run `{ idea, requirements, stack, limits, tools, provider, model, plannerModel, providerOptions: { numCtx, temperature, toolMode }, settings, repoUrl }` |
+| GET / POST | `/api/runs` | List runs / start a run `{ idea, requirements, stack, limits, tools, provider, model, planner: { provider, model, providerOptions }, plannerModel, providerOptions: { numCtx, temperature, toolMode }, settings, repoUrl, outputDir }` |
 | GET / DELETE | `/api/runs/:id` | Run state / delete run |
 | GET | `/api/runs/:id/events` | Server-sent events (replays history, then live) |
 | POST | `/api/runs/:id/resume` · `/cancel` · `/deploy` | Control the run / restart the preview |

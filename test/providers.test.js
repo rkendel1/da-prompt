@@ -142,6 +142,39 @@ test('a full run through an OpenAI-compatible API with a key, planner and agent 
   assert.equal(run.plannerModel, 'big-planner');
 });
 
+test('the planner can use a different provider than the agents (frontier plan, local execution)', async () => {
+  const frontier = await mock({ flavor: 'openai', models: ['big-planner'], apiKey: 'sk-test-abcdefghijkl' });
+  const local = await mock({ flavor: 'ollama', models: ['fast-coder:7b'] });
+  const { factory } = setup({ OPENAI_API_KEY: 'sk-test-abcdefghijkl', OPENAI_BASE_URL: frontier.url, OLLAMA_HOST: local.url });
+  const created = await factory.createRun({
+    idea: 'A reading list',
+    provider: 'ollama',
+    model: 'fast-coder:7b',
+    planner: { provider: 'openai', model: 'big-planner' },
+    settings: { deploy: false },
+  });
+  assert.equal(created.plannerProvider, 'openai');
+  assert.equal(created.provider, 'ollama');
+  const run = await factory.start(created.id);
+  assert.equal(run.status, 'completed', run.error);
+  const planCalls = frontier.log.filter((r) => r.url === '/v1/chat/completions');
+  assert.equal(planCalls.length, 1); // the frontier model was only asked to plan
+  assert.equal(planCalls[0].body.model, 'big-planner');
+  assert.deepEqual(planCalls[0].body.tool_choice, { type: 'function', function: { name: 'submit_plan' } });
+  const localChats = local.log.filter((r) => r.url === '/api/chat');
+  assert.ok(localChats.length > 1);
+  assert.ok(localChats.every((r) => r.body.model === 'fast-coder:7b'));
+  assert.ok(localChats.every((r) => !JSON.stringify(r.body.tools || []).includes('submit_plan')));
+  assert.match((await factory.store.events(run.id)).find((e) => e.type === 'log').text, /Planning with .*big-planner/);
+});
+
+test('a planner on another provider must be usable, and offline cannot be mixed with real LLMs', async () => {
+  const local = await mock({ flavor: 'ollama', models: ['fast-coder:7b'] });
+  const { factory } = setup({ OLLAMA_HOST: local.url });
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'ollama', planner: { provider: 'anthropic' } }), /API key|not ready/);
+  await assert.rejects(factory.createRun({ idea: 'x', provider: 'ollama', planner: { provider: 'offline' } }), /offline/);
+});
+
 test('createRun rejects providers that are not usable, and the connection test reports tool support', async () => {
   const ollama = await mock({ flavor: 'ollama', models: ['tiny-chat:1b'], noTools: true });
   const { factory } = setup({ OLLAMA_HOST: ollama.url });

@@ -9,7 +9,7 @@ import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from 
 import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
 import { scanWorkspace, redact } from './security.js';
 import { ProviderRegistry } from './providers/registry.js';
-import { packageDelivery, pushToGit } from './deliver.js';
+import { packageDelivery, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
 export const LAYERS = ['plan', 'agents', 'execution', 'artifacts', 'verification', 'feedback', 'completion'];
 const ACTIVE = new Set(['queued', 'planning', 'running', 'completing']);
@@ -26,6 +26,13 @@ export class Factory {
     this.makeProvider = (run) =>
       cfg.providerFactory?.(run.provider, cfg, run) ||
       this.providers.create(run.provider, { model: run.model, plannerModel: run.plannerModel, options: run.providerOptions });
+    // The planner may use a different provider (e.g. a frontier API) than the agents (e.g. a local model).
+    this.makePlannerProvider = (run) => {
+      const own = run.plannerProvider && (run.plannerProvider !== run.provider || run.plannerOptions);
+      if (!own) return this.makeProvider(run);
+      const planRun = { ...run, provider: run.plannerProvider, model: run.plannerModel, plannerModel: run.plannerModel, providerOptions: run.plannerOptions || {} };
+      return this.makeProvider(planRun);
+    };
   }
 
   /** Mark runs that were mid-flight when the process stopped so they can be resumed. */
@@ -58,6 +65,8 @@ export class Factory {
     const repoUrl = typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
     const id = this.store.newId();
+    const outputDir = resolveOutputDir(this.cfg, body.outputDir);
+    if (outputDir) await checkOutputDir(outputDir, id);
     const run = {
       id,
       title: inputs.idea.split('\n')[0].slice(0, 90),
@@ -66,8 +75,12 @@ export class Factory {
       provider: choice.provider,
       providerLabel: choice.label,
       model: choice.model,
+      plannerProvider: choice.plannerProvider,
+      plannerProviderLabel: choice.plannerLabel,
       plannerModel: choice.plannerModel,
+      plannerOptions: choice.plannerProvider === choice.provider ? null : choice.plannerOptions,
       providerOptions: choice.options,
+      outputDir,
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
       repoUrl,
@@ -78,17 +91,16 @@ export class Factory {
       checklist: [],
     };
     await this.store.create(run);
-    this.store.event(id, 'run.created', { title: run.title, provider: run.provider, model: run.model, plannerModel: run.plannerModel, settings });
+    this.store.event(id, 'run.created', { title: run.title, provider: run.provider, model: run.model, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings });
     if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
     return run;
   }
 
-  /** Validate the requested provider/model, filling in discovered defaults. */
-  async resolveModelChoice(body = {}) {
+  /** Validate one provider/model pair, filling in discovered defaults. */
+  async resolveEndpoint({ provider, model, providerOptions }) {
     const str = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : '');
-    let providerId = str(body.provider);
-    let model = str(body.model);
-    let plannerModel = str(body.plannerModel);
+    let providerId = str(provider);
+    model = str(model);
     if (!providerId) {
       providerId = (await this.providers.discover()).defaultProvider;
       if (!model && this.cfg.defaultProvider === providerId) model = this.cfg.defaultModel;
@@ -102,21 +114,57 @@ export class Factory {
     }
     if (spec.type === 'offline') {
       model = 'offline-template-agent';
-      plannerModel = model;
     } else if (!model && spec.type !== 'injected') {
       const probe = await this.providers.probe(spec);
       if (probe.status !== 'ready') throw new Error(`${spec.label} is not ready: ${probe.message || probe.status}`);
       model = probe.defaultModel;
       if (!model) throw new Error(`${spec.label} has no models available`);
     }
-    if (!plannerModel && providerId === this.cfg.defaultProvider && this.cfg.defaultPlannerModel) plannerModel = this.cfg.defaultPlannerModel;
-    const o = body.providerOptions || {};
+    const o = providerOptions || {};
     const options = {};
     if (Number(o.numCtx) > 0) options.numCtx = Math.max(2048, Math.min(1_048_576, Math.round(Number(o.numCtx))));
     if (o.temperature !== undefined && o.temperature !== '' && Number.isFinite(Number(o.temperature))) options.temperature = Math.max(0, Math.min(2, Number(o.temperature)));
     if (['auto', 'native', 'json'].includes(o.toolMode)) options.toolMode = o.toolMode;
-    const choice = { provider: providerId, label: spec.label, model: model || 'default', plannerModel: plannerModel || model || 'default', options };
-    this.makeProvider(choice); // fail fast: missing key, disabled provider, missing model
+    return { provider: providerId, label: spec.label, type: spec.type, model: model || 'default', options };
+  }
+
+  /**
+   * Validate the requested provider/model for the agents and, separately, for the planner.
+   * The planner defaults to the agents' provider; `planner: { provider, model, providerOptions }`
+   * (or the older flat `plannerModel`) picks something else, such as a frontier model for design.
+   */
+  async resolveModelChoice(body = {}) {
+    const str = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : '');
+    const main = await this.resolveEndpoint(body);
+    const pb = body.planner && typeof body.planner === 'object' ? body.planner : {};
+    let plannerProvider = str(pb.provider) || str(body.plannerProvider);
+    let plannerModel = str(pb.model) || str(body.plannerModel);
+    let pOptions = pb.providerOptions;
+    if (!plannerProvider && !plannerModel && this.cfg.defaultPlannerProvider) {
+      plannerProvider = this.cfg.defaultPlannerProvider;
+      plannerModel = this.cfg.defaultPlannerModel;
+    }
+    let planner;
+    if (!plannerProvider || plannerProvider === main.provider) {
+      if (!plannerModel && main.provider === this.cfg.defaultProvider) plannerModel = this.cfg.defaultPlannerModel;
+      planner = { ...main, model: main.type === 'offline' ? main.model : plannerModel || main.model };
+    } else {
+      planner = await this.resolveEndpoint({ provider: plannerProvider, model: plannerModel, providerOptions: pOptions });
+      if ((planner.type === 'offline') !== (main.type === 'offline')) throw new Error('the built-in offline agents cannot be combined with a real LLM provider; use offline for both or neither');
+    }
+    const choice = {
+      provider: main.provider,
+      label: main.label,
+      model: main.model,
+      options: main.options,
+      plannerProvider: planner.provider,
+      plannerLabel: planner.label,
+      plannerModel: planner.model,
+      plannerOptions: planner.options,
+    };
+    // fail fast: missing key, disabled provider, missing model
+    this.makeProvider({ ...choice, providerOptions: choice.options });
+    this.makePlannerProvider({ ...choice, providerOptions: choice.options });
     return choice;
   }
 
@@ -214,6 +262,7 @@ export class Factory {
       emit('layer', { layer: name, state });
     };
     const provider = this.makeProvider(run);
+    const plannerProvider = this.makePlannerProvider(run);
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -234,9 +283,9 @@ export class Factory {
       if (!run.plan) {
         await setStatus('planning');
         await layer('plan', 'active');
-        const desc = provider.describe();
+        const desc = plannerProvider.describe();
         emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
-        const plan = await runPlanner({ provider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
+        const plan = await runPlanner({ provider: plannerProvider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));
         run.plan = plan;
@@ -275,6 +324,11 @@ export class Factory {
       run.finishedAt = new Date().toISOString();
       run.status = ok ? 'completed' : 'needs_attention';
       run.delivery = await packageDelivery(run, ws, this.store.deliveryDir(id));
+      if (run.outputDir) {
+        run.delivery.output = await exportProject(ws, run.outputDir, run.id);
+        emit('output', run.delivery.output);
+        if (!run.delivery.output.ok) run.status = 'needs_attention';
+      }
       if (run.repoUrl && this.cfg.githubToken) {
         run.git = await pushToGit(ws, { repoUrl: run.repoUrl, token: this.cfg.githubToken, message: `${run.plan.product.name}: built by da-prompt factory run ${run.id}` });
         emit('git', run.git);
