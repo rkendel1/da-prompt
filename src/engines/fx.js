@@ -12,6 +12,7 @@ const MAX_ROUNDS = 3;
 // retry, and it drops the failed prompt from its history, so we start the attempt's prompt again. Earlier tool effects are
 // in the workspace, so the retry says so.
 const MAX_MALFORMED_RETRIES = 4;
+export const FX_TIMEOUT_MESSAGE = 'FX model error (LIBFX_MODEL_TIMEOUT): the model did not start answering in time. The FX engine allows about 120 seconds for the first response byte (@appport/fx 0.1.2) and offers no setting to change that, so a slow local model (a long prompt on CPU) can exceed it even though the built-in engine would wait. Switch this run to the built-in engine (\`--engine builtin\`; it waits up to 30 minutes per request), use a smaller or faster model, or use a hosted provider.';
 const RECOVER = 'NOTE: your previous reply in this attempt wrote a tool call as plain text instead of using the tool-calling interface, so it could not run. Files you already wrote are still in the workspace — inspect it first (list_files / read_file) instead of redoing finished work. Always call tools through the structured tool-calling interface, and finish by calling complete_task.';
 
 export function makeFxRunner(cfg) {
@@ -22,6 +23,8 @@ export function makeFxRunner(cfg) {
     // matches the secret filter in safeEnv(), so agent shells never see it.
     const envName = ep.apiKey ? `DA_PROMPT_FX_KEY_${crypto.randomBytes(6).toString('hex')}` : '';
     if (envName) process.env[envName] = ep.apiKey;
+    // FACTORY_MAX_OUTPUT_TOKENS, like the built-in adapters (fx's own default is "unset", i.e. the server's).
+    const outputTokens = Number.isSafeInteger(provider?.maxTokens) && provider.maxTokens > 0 ? provider.maxTokens : cfg.maxOutputTokens;
     const state = { completion: null, files: new Set(), commands: [], budget: null, turn: null, steps: 0 };
     let agent;
     try {
@@ -51,7 +54,7 @@ export function makeFxRunner(cfg) {
           return out.text.slice(0, 12_000);
         },
       }));
-      agent = await fx.createFxAgent({ model, tools, instructions: agentSystem(run, task, lessons).slice(0, 60_000), maxSteps: settings.maxAgentTurns });
+      agent = await fx.createFxAgent({ model, tools, instructions: agentSystem(run, task, lessons).slice(0, 60_000), maxSteps: settings.maxAgentTurns, maxOutputTokens: outputTokens });
 
       let lastStop = null;
       let malformed = 0;
@@ -84,6 +87,7 @@ export function makeFxRunner(cfg) {
             emit('agent.message', { taskId: task.id, role: task.role, text: `The model wrote a tool call as plain text (retry ${malformed} of ${MAX_MALFORMED_RETRIES}).` });
             continue;
           }
+          if (e.code === 'LIBFX_MODEL_TIMEOUT') return { ok: false, error: FX_TIMEOUT_MESSAGE };
           return { ok: false, error: redact(`FX model error${e.kind || e.code ? ` (${e.kind || e.code})` : ''}: ${String(e.message || e).split('\n')[0]}`).slice(0, 600) };
         }
         track?.add({ input_tokens: result?.usage?.inputTokens || 0, output_tokens: result?.usage?.outputTokens || 0 });

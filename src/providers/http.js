@@ -181,7 +181,7 @@ export async function requestWithRetry(url, opts = {}, { retries = 4 } = {}) {
   throw last;
 }
 
-/** Turn provider/network errors into one readable line. */
+/** Turn provider/network errors into one readable line that says what kind of failure it was. */
 export function describeError(err) {
   if (err instanceof HttpError) {
     let msg = err.body;
@@ -191,10 +191,11 @@ export function describeError(err) {
     } catch {
       /* not JSON */
     }
-    return `HTTP ${err.status}: ${String(typeof msg === 'string' ? msg : JSON.stringify(msg)).slice(0, 300)}`;
+    const kind = err.status === 401 || err.status === 403 ? 'authentication failed (check the API key)' : err.status === 404 ? 'model or endpoint not found' : err.status === 429 ? 'rate limited' : err.status >= 500 ? 'provider-side error' : '';
+    return `${kind ? `${kind}: ` : ''}HTTP ${err.status}: ${String(typeof msg === 'string' ? msg : JSON.stringify(msg)).slice(0, 300)}`;
   }
-  if (err?.code === 'ECONNREFUSED') return 'connection refused (is the server running?)';
-  if (err?.code === 'ENOTFOUND' || err?.code === 'EAI_AGAIN') return 'host not found';
-  if (err?.code === 'ETIMEDOUT') return 'timed out';
+  if (err?.code === 'ECONNREFUSED') return 'connection failed: connection refused (is the server running?)';
+  if (err?.code === 'ENOTFOUND' || err?.code === 'EAI_AGAIN') return 'connection failed: host not found';
+  if (err?.code === 'ETIMEDOUT') return 'inference timed out: no response in time';
   return err?.message || String(err);
 }

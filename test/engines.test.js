@@ -47,6 +47,7 @@ function fakeFx(script) {
             async *[Symbol.asyncIterator]() {
               for (const step of script({ prompt: input, round: log.prompts.length, tools: opts.tools })) {
                 if (cancelled || signal?.aborted) break;
+                if (step.throw) { fail(step.throw); return; }
                 if (step.fail) { fail(Object.assign(new Error(`model request failed: ${step.fail}`), { code: 'LIBFX_MODEL_FAILED', kind: step.fail })); return; }
                 if (step.text) yield { type: 'text_delta', delta: step.text };
                 if (step.tool) {
@@ -183,6 +184,29 @@ test('retries are bounded, and other model failures are reported as they are', a
   const rb = await b.factory.start((await create(b.factory, { engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
   assert.equal(limited.log.prompts.length, 1, 'a rate limit is not retried blindly');
   assert.match(rb.plan.tasks[0].attempts[0].error, /rate_limited/);
+});
+
+test('the configured output-token limit reaches the FX agent, and a first-response timeout is explained', async () => {
+  const done = () => [{ tool: 'complete_task', input: { summary: 'x', files: [] } }];
+  const dflt = fakeFx(done);
+  const a = makeEnv({ fx: dflt, provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  await a.factory.start((await create(a.factory, { engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
+  assert.equal(dflt.log.agents[0].maxOutputTokens, 8192, 'FACTORY_MAX_OUTPUT_TOKENS default');
+  const custom = fakeFx(done);
+  const b = makeEnv({ fx: custom, cfg: { maxOutputTokens: 3000 }, provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  await b.factory.start((await create(b.factory, { engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
+  assert.equal(custom.log.agents[0].maxOutputTokens, 3000);
+  assert.equal(custom.log.agents[0].maxSteps, 40, 'the turn limit is still passed as before');
+
+  const slow = fakeFx(() => [{ throw: Object.assign(new Error('model call timed out'), { code: 'LIBFX_MODEL_TIMEOUT' }) }]);
+  const c = makeEnv({ fx: slow, provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  const rc = await c.factory.start((await create(c.factory, { engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
+  const err = rc.plan.tasks[0].attempts[0].error;
+  assert.match(err, /LIBFX_MODEL_TIMEOUT/);
+  assert.match(err, /about 120 seconds/);
+  assert.match(err, /--engine builtin/);
+  assert.equal(slow.log.prompts.length, 1, 'a timeout is not retried blindly inside the attempt');
+  assert.notEqual(rc.status, 'completed');
 });
 
 test('an agent that never calls complete_task is nudged, then the attempt fails with the usual message', async () => {

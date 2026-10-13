@@ -570,6 +570,48 @@ Keys can come from environment variables or be pasted on the Providers page (sav
 The Providers page also lets you change base URLs, set a default model, set Ollama's
 context window, and **Test** a model with a real tool call.
 
+### Using a hosted provider (no local model needed)
+
+Nothing in the factory requires Ollama: it is one provider among those above, and it is only the *automatic* default when no
+hosted provider is ready and nothing else was chosen. To run on a hosted provider:
+
+```bash
+export OPENAI_API_KEY=…                       # or ANTHROPIC_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY … (see the table)
+da-prompt providers list                      # status, where each URL/key comes from, and which provider is the default and why
+da-prompt providers test openai --model <model>   # connectivity → discovery → a real tool-calling request
+da-prompt providers use openai --model <model>    # saves it as the default (validated first); or set FACTORY_PROVIDER / FACTORY_MODEL
+da-prompt run "…" --provider openai --model <model>   # or choose it for one run
+```
+
+Default precedence (unchanged): `FACTORY_PROVIDER` / the saved default setting, then the provider the last run used, then the
+first ready provider (hosted presets are listed before Ollama). The model follows the same order: an explicit `--model`, then
+`FACTORY_MODEL` / the saved default model, then the model the last run used on that provider (if the provider still lists it),
+then the provider's preferred model. `da-prompt providers list` and the Providers page show the default provider, its model and
+what chose it. Ollama stays available as an optional local provider: leave it running and pick it per run
+(`--provider ollama`), or use `--planner-provider` to plan on a hosted model while agents run locally. There is **no automatic
+fallback** between providers: a failed call fails the attempt, and the failure message names its kind (authentication, model not
+found, rate limit, provider-side error, connection, timeout).
+
+The built-in agent engine is the default (`FACTORY_AGENT_ENGINE=builtin`) and works with every provider. Verification, the
+sandbox, evidence and delivery are the factory's own and do not depend on which provider or engine ran the task.
+
+**Mocked versus real.** `npm test` runs complete factory runs against *mock* OpenAI-compatible and Ollama servers
+(`test/mock-llm.js`, `test/providers.test.js`). They prove the wiring: selection, tool calls, verification and delivery. They say
+nothing about a real model's tool-calling quality, speed or rate limits; that needs a real-model run.
+
+**Real hosted-provider smoke test (operator, needs a key):**
+
+```bash
+export OPENAI_API_KEY=…                       # any hosted preset's key
+npm start &                                   # or: da-prompt server start
+da-prompt providers test openai --model <model>                 # expect connectivity ✓ discovery ✓ inference ✓
+da-prompt run "A one-page habit tracker with tests" --provider openai --model <model> --new --engine builtin       # follows the run to the end
+da-prompt runs show <run-id>                  # verdict, checklist and token usage; the first line shows provider / model
+```
+
+A run only counts as certified for that model if the run completes with every checklist item passing; record the model, the
+date and the token usage. This repository's tests do not include such a run.
+
 ### Agent engines (experimental): built-in or FX
 
 Planning, verification, feedback, review and delivery are always da-prompt's own. The *engine* only decides who runs one
@@ -589,6 +631,20 @@ FACTORY_AGENT_ENGINE=fx               # or set the default (Settings → Models 
 
 In the browser it is the **Agent engine** selector under the model picker; engines that are not installed or cannot use the
 chosen provider are greyed out with the reason (`GET /api/engines`). The run page and report show a non-default engine.
+
+| | `builtin` (default) | `fx` (experimental, optional) |
+| --- | --- | --- |
+| Providers | all, including Anthropic | OpenAI-compatible endpoints and Ollama's `/v1` API only |
+| Wait for a model's first response | up to 30 minutes per request | **about 120 seconds** (`@appport/fx` 0.1.2); not configurable from da-prompt |
+| Ollama `num_ctx` (context window) | set by da-prompt (32k default, per run) | not available: Ollama's server default applies |
+| Request timeout and transport retries | configurable in da-prompt; transient errors retried | no setting; a failure fails the attempt and the factory's attempt retries apply |
+| Text-written tool calls | recovered | refused (retried up to four times) |
+| Output-token limit | `FACTORY_MAX_OUTPUT_TOKENS` | `FACTORY_MAX_OUTPUT_TOKENS`, passed to the agent as `maxOutputTokens` |
+| Tools, sandbox, verification, token budget | da-prompt's | the same: da-prompt's |
+
+Prefer the **built-in engine for slow local models**: a long prompt processed on CPU can exceed fx's first-response window, which
+fails the attempt with a `LIBFX_MODEL_TIMEOUT` message that says so. Keep fx for hosted or fast OpenAI-compatible endpoints where
+you want to try the fx loop. fx's real-model tool quality is not certified by its own report (scripted tests only).
 
 Things to know: fx executes only structured tool calls. Local models that write a call as plain text (qwen3-coder does this
 often) are retried by the adapter up to four times, but the built-in engine's text-call fallback is more forgiving, so compare
@@ -622,8 +678,10 @@ Notes for local models:
 - **Model choice matters.** Agents write and fix real code over many turns. Coding models of
   roughly 14B parameters and up do much better than small chat models. You can use a larger
   model for planning only (the *Planner model* setting).
-- **No timeouts on slow hardware.** Requests to local models may take as long as they need
-  (up to 30 minutes per call).
+- **No timeouts on slow hardware (built-in engine).** Requests to local models may take as long as they need
+  (up to 30 minutes per call). The experimental `fx` engine does not: it gives a model about 120 seconds to start answering.
+- **Too slow or too heavy on your machine?** Use a hosted provider (see *Using a hosted provider*), or a hosted planner with local
+  agents. Ollama is the automatic default only while nothing else is ready or remembered.
 
 ### Protect the server
 

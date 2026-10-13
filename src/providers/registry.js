@@ -157,7 +157,23 @@ export class ProviderRegistry {
     const list = this.all();
     const results = await Promise.all(list.map((p) => this.probe(p, { refresh })));
     const providers = list.map((p, i) => ({ ...this.view(p), ...results[i] }));
-    return { providers, defaultProvider: this.pickDefault(providers) };
+    const defaultProvider = this.pickDefault(providers);
+    return { providers, defaultProvider, ...this.defaultChoice(defaultProvider, providers) };
+  }
+
+  /**
+   * Where the default came from and which model it implies, for display. The precedence is unchanged (see pickDefault):
+   * FACTORY_PROVIDER / the saved setting, then the last provider a run used, then the first ready non-offline provider.
+   */
+  defaultChoice(id, providers) {
+    const p = providers.find((x) => x.id === id);
+    const saved = this.settings.defaults || {};
+    const configured = this.cfg.defaultProvider === id;
+    const source = configured ? 'configured' : saved.provider === id ? 'last run' : 'first ready provider';
+    const listed = (m) => (p?.models || []).some((x) => x.id === m);
+    let model = configured && this.cfg.defaultModel ? this.cfg.defaultModel : '';
+    if (!model && saved.provider === id && saved.model && !this.all().find((x) => x.id === id)?.defaultModel && listed(saved.model)) model = saved.model;
+    return { defaultModel: model || p?.defaultModel || null, defaultSource: source };
   }
 
   pickDefault(providers) {

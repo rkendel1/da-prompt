@@ -179,6 +179,12 @@ test('providers: discovery, connectivity and inference are reported as separate 
     assert.equal((await cli(['config', 'get', 'defaultProvider', '--json'], { backend: be3 })).json.value, id);
     assert.equal((await cli(['config', 'get', 'defaultModel', '--json'], { backend: be3 })).json.value, 'mock-coder');
 
+    // The default, its model and who chose it are shown in both forms of the output.
+    const shown = await cli(['providers', 'list', '--json'], { backend: be3 });
+    assert.deepEqual([shown.json.default.provider, shown.json.default.model, shown.json.defaultProvider], [id, 'mock-coder', id]);
+    assert.ok('defaultSource' in shown.json);
+    assert.match((await cli(['providers', 'list'], { backend: be3 })).out, new RegExp(`Default: ${id} / mock-coder`));
+
     const planner = await cli(['providers', 'planner', id, '--model', 'mock-small'], { backend: be3 });
     assert.equal(planner.code, 0, planner.err);
     assert.equal((await cli(['config', 'get', 'defaultPlannerModel', '--json'], { backend: be3 })).json.value, 'mock-small');

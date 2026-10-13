@@ -200,6 +200,10 @@ export class Factory {
       const probe = await this.providers.probe(spec);
       if (probe.status !== 'ready') throw new Error(`${spec.label} is not ready: ${probe.message || probe.status}`);
       model = probe.defaultModel;
+      // The model the last run used on this provider is remembered with it (providers.json "defaults"); honour it unless
+      // a configured default model or a per-provider default already decided, and only if the provider still lists it.
+      const saved = this.providers.settings.defaults || {};
+      if (!spec.defaultModel && saved.provider === providerId && saved.model && (probe.models || []).some((m) => m.id === saved.model)) model = saved.model;
       if (!model) throw new Error(`${spec.label} has no models available`);
     }
     const o = providerOptions || {};
