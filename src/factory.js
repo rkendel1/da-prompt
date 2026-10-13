@@ -19,6 +19,7 @@ import { collectPaxEvidence } from './pax.js';
 import { PAX_STEP_IDS } from './settings.js';
 import crypto from 'node:crypto';
 import { ProviderRegistry } from './providers/registry.js';
+import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
 export const LAYERS = ['plan', 'agents', 'execution', 'artifacts', 'verification', 'feedback', 'completion'];
@@ -26,8 +27,9 @@ const ACTIVE = new Set(['queued', 'planning', 'running', 'completing']);
 const RESUMABLE = new Set(['needs_attention', 'interrupted', 'failed', 'cancelled']);
 
 export class Factory {
-  constructor({ cfg, store, previews }) {
+  constructor({ cfg, store, previews, registry }) {
     this.cfg = cfg;
+    this.registry = registry || new ProjectRegistry(cfg); // the durable project registry (see src/registry.js)
     this.store = store;
     this.previews = previews;
     this.active = new Map(); // runId -> { controller, promise }
@@ -45,6 +47,21 @@ export class Factory {
     };
   }
 
+  /**
+   * The canonical directory an existing-project run applies back to. A run made from a registered project follows the
+   * project's *current* location (so moving the folder does not strand the run), and is blocked while the project is
+   * archived, missing, inaccessible or needs attention. Older runs fall back to their recorded directoryId.
+   */
+  async sourceDir(run, { purpose, writable = false }) {
+    if (run.projectId) {
+      const known = await this.registry.find(run.projectId).catch(() => null);
+      if (known) return (await this.registry.locate(run.projectId, { purpose, writable })).dir;
+    }
+    const dir = resolveDirectory(this.cfg, run.source.directoryId); // re-authorized on every use
+    if (writable && dir.readOnly) throw new ProjectError(403, 'this directory is in a read-only root; download the patch instead');
+    return dir;
+  }
+
   /** Mark runs that were mid-flight when the process stopped so they can be resumed. */
   async recover() {
     for (const r of await this.store.list()) {
@@ -60,8 +77,19 @@ export class Factory {
   /** Validate the source descriptor and (for GitHub) check that the repository and ref are reachable. */
   async resolveSource(raw) {
     let source;
+    let project = null;
     try {
+      if (raw && typeof raw === 'object' && raw.projectId) {
+        // A registered project is the common workspace reference: its location is re-resolved and re-authorized now.
+        const located = await this.registry.locate(raw.projectId, { purpose: 'start a task' });
+        project = located.project;
+        const st = project.settings || {};
+        raw = project.kind === 'local'
+          ? { mode: 'local', directoryId: located.dir.id, workingMode: raw.workingMode || st.workingMode || '', allowInstall: raw.allowInstall, publish: raw.publish }
+          : { mode: 'github', repoUrl: project.remote.url, ref: raw.ref || st.defaultRef || '', publish: raw.publish, allowInstall: raw.allowInstall };
+      }
       source = normalizeSource(this.cfg, raw);
+      if (project) Object.assign(source, { projectId: project.id });
       if (source.mode !== 'new') {
         const g = await runGit(['--version'], {});
         if (g.code !== 0) throw new ProjectError(500, 'git is not working on the server');
@@ -126,6 +154,7 @@ export class Factory {
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
       repoUrl,
+      ...(source.projectId ? { projectId: source.projectId, projectName: (await this.registry.find(source.projectId).catch(() => null))?.name } : {}),
       ...(existing ? { source, project: { stages: {} } } : {}),
       layers: Object.fromEntries(LAYERS.map((l) => [l, 'pending'])),
       plan: null,
@@ -134,6 +163,7 @@ export class Factory {
       checklist: [],
     };
     await this.store.create(run);
+    if (run.projectId) this.registry.touch(run.projectId);
     this.store.event(id, 'run.created', {
       title: run.title, provider: run.provider, model: run.model, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings,
       ...(existing ? { source: { mode: source.mode, label: source.label, ref: source.ref || null, workingMode: source.workingMode || null, publish: Boolean(source.publish) } } : {}),
@@ -755,6 +785,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!isExisting(run) || run.source.mode !== 'github') throw new ProjectError(409, 'only GitHub-backed runs can be published');
     if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
+    if (run.projectId && (await this.registry.find(run.projectId).catch(() => null))) await this.registry.locate(run.projectId, { purpose: 'publish changes' });
     await this.assertApproved(run, 'publish them');
     const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true });
     run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
@@ -769,8 +800,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!isExisting(run) || run.source.mode !== 'local') throw new ProjectError(409, 'only local-directory runs can be applied');
     if (!run.delivery?.integrity?.ok) throw new ProjectError(409, 'the run has not been delivered with a clean source-protection check');
-    const dir = resolveDirectory(this.cfg, run.source.directoryId); // re-authorized on every use
-    if (dir.readOnly) throw new ProjectError(403, 'this directory is in a read-only root; download the patch instead');
+    const dir = await this.sourceDir(run, { purpose: 'apply changes', writable: true });
     await this.assertApproved(run, mode === 'branch' ? 'add them to your repository' : 'apply them to your directory');
     const wsDir = this.store.workspaceDir(id);
     const emit = (t, d) => this.store.event(id, t, d);
