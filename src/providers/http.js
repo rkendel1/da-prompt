@@ -76,6 +76,88 @@ export function requestJson(url, { method = 'GET', headers = {}, body, signal, t
   });
 }
 
+
+/**
+ * POST and stream the response body: `onChunk(string)` is called for every piece as it arrives. Resolves when the
+ * body ends; rejects with HttpError for non-2xx (after reading the error body) or an Error with `code` for network
+ * failures. Aborting `signal` ends the request with Error('cancelled'). No retries: a half-delivered stream is not retried.
+ */
+export function requestStream(url, { method = 'POST', headers = {}, body, signal, timeoutMs = 15 * 60_000, idleMs = 5 * 60_000 } = {}, onChunk) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      reject(Object.assign(new Error(`invalid URL: ${url}`), { code: 'EINVALIDURL' }));
+      return;
+    }
+    const lib = u.protocol === 'https:' ? https : http;
+    const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+    let done = false;
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      clearTimeout(idle);
+      signal?.removeEventListener('abort', onAbort);
+      fn(v);
+    };
+    const req = lib.request(u, { method, headers: { accept: 'text/event-stream, application/x-ndjson, application/json', ...(payload !== undefined ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}), ...headers } }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => finish(reject, new HttpError(res.statusCode, Buffer.concat(chunks).toString('utf8'), res.headers)));
+        return;
+      }
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        resetIdle();
+        try {
+          onChunk(c);
+        } catch (e) {
+          req.destroy(e);
+        }
+      });
+      res.on('end', () => finish(resolve));
+      res.on('error', (e) => finish(reject, e));
+      res.on('aborted', () => finish(reject, Object.assign(new Error('the connection closed before the response finished'), { code: 'ECONNRESET' })));
+    });
+    const timer = setTimeout(() => req.destroy(Object.assign(new Error(`request timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' })), timeoutMs);
+    let idle;
+    const resetIdle = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => req.destroy(Object.assign(new Error(`no data for ${Math.round(idleMs / 1000)}s`), { code: 'ETIMEDOUT' })), idleMs);
+    };
+    const onAbort = () => req.destroy(Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' }));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.on('error', (e) => finish(reject, signal?.aborted ? Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' }) : e));
+    if (signal?.aborted) onAbort();
+    if (payload !== undefined) req.write(payload);
+    req.end();
+    resetIdle();
+  });
+}
+
+/** Split a stream into complete lines (handles chunks that end mid-line). */
+export function lineSplitter(onLine) {
+  let buf = '';
+  return {
+    push(chunk) {
+      buf += chunk;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).replace(/\r$/, '');
+        buf = buf.slice(i + 1);
+        onLine(line);
+      }
+    },
+    end() {
+      if (buf.trim()) onLine(buf.replace(/\r$/, ''));
+      buf = '';
+    },
+  };
+}
+
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 const NET_RETRYABLE = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_SOCKET']);
 

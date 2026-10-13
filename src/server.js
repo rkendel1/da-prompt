@@ -10,7 +10,7 @@ import { Factory, LAYERS } from './factory.js';
 import { PreviewManager } from './deploy.js';
 import { Workspace } from './sandbox.js';
 import { renderPrompt, PROMPT_TEMPLATE, INPUT_FIELDS } from './prompt.js';
-import { buildReport } from './deliver.js';
+import { buildReport, verdictOf } from './deliver.js';
 import { SettingsError } from './settings.js';
 import { runHealth, describeEnvironment } from './health.js';
 import { probePax, listEvidence, STEPS as PAX_STEPS, SEMANTICS as PAX_SEMANTICS } from './pax.js';
@@ -18,6 +18,8 @@ import { buildEvidence } from './evidence.js';
 import { redact } from './security.js';
 import { redactUrl } from './gitutil.js';
 import { ProjectRegistry } from './registry.js';
+import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
+import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -123,6 +125,8 @@ export async function createServer(overrides = {}) {
   const factory = new Factory({ cfg, store, previews, registry });
   await factory.recover();
   // Earlier runs that worked on an existing project get a registered project (once per location/repository).
+  const tasks = new TaskStore(cfg);
+  const chat = new ChatService({ cfg, registry, tasks, store, factory });
   await registry.adoptRuns(store).catch((e) => console.error(`project migration skipped: ${redactUrl(redact(String(e.message)))}`));
   const publicDir = path.join(cfg.root, 'public');
   cfg.settings.onChange('maxPreviews', (v) => (previews.max = v));
@@ -148,6 +152,8 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'settings') return settingsApi(req, res, parts);
     if (parts[1] === 'system') return systemApi(req, res, parts, url);
     if (parts[1] === 'pax') return paxApi(req, res, parts);
+    if (parts[1] === 'chat') return chatApi(req, res, parts, url);
+    if (parts[1] === 'tasks') return tasksApi(req, res, parts, url);
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
@@ -709,6 +715,186 @@ export async function createServer(overrides = {}) {
     throw new HttpError(404, 'not found');
   }
 
+
+  // ── Chat (advisory, project-scoped) and the backlog (one ordered task list) ─────────────────────
+  const idOr404 = (re, v, what) => {
+    if (!re.test(String(v || ''))) throw new HttpError(404, `${what} not found`);
+    return v;
+  };
+
+  async function chatApi(req, res, parts, url) {
+    try {
+      const method = req.method;
+      if (parts[2] !== 'conversations') throw new HttpError(404, 'not found');
+      if (!parts[3]) {
+        if (method === 'GET') return json(res, 200, { conversations: await chat.list({ projectId: url.searchParams.get('projectId') || undefined }) });
+        if (method === 'POST') return json(res, 201, { conversation: await chat.create(await readBody(req, 16 * 1024)) });
+        throw new HttpError(405, 'method not allowed');
+      }
+      const id = idOr404(CONVERSATION_ID_RE, parts[3], 'conversation');
+      const sub = parts[4];
+      if (!sub) {
+        if (method === 'GET') return json(res, 200, { conversation: await chat.view(id) });
+        if (method === 'PATCH') return json(res, 200, { conversation: await chat.update(id, await readBody(req, 16 * 1024)) });
+        throw new HttpError(405, 'method not allowed');
+      }
+      if (sub === 'stream' && method === 'GET') {
+        await chat.load(id);
+        return chatStream(req, res, id);
+      }
+      if (method !== 'POST') throw new HttpError(405, 'method not allowed');
+      if (sub === 'messages' && !parts[5]) return json(res, 202, await chat.send(id, await readBody(req, 128 * 1024)));
+      if (sub === 'messages' && parts[6] === 'retry') return json(res, 202, await chat.retry(id, idOr404(MESSAGE_ID_RE, parts[5], 'message'), await readBody(req, 4 * 1024)));
+      if (sub === 'stop') return json(res, 200, { stopped: chat.stop(id) });
+      if (sub === 'task-draft') return json(res, 200, { draft: await chat.draftTask(id, await readBody(req, 16 * 1024)) });
+      throw new HttpError(404, 'not found');
+    } catch (err) {
+      throw asHttp(err);
+    }
+  }
+
+  /** Server-sent events for one conversation: `sync` (state of any running response), then `delta`/`message`/… events. */
+  function chatStream(req, res, id) {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no', ...SECURITY_HEADERS });
+    res.write('retry: 1500\n\n');
+    const send = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+    const unsub = chat.subscribe(id, (e) => send(e.type, e));
+    send('sync', { active: chat.syncState(id) });
+    const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
+    const end = () => { clearInterval(ping); unsub(); res.end(); };
+    req.on('close', end);
+    res.on('close', end);
+  }
+
+  /** A backlog row: the stored task plus the CURRENT project/product, the run's live status and the origin conversation. */
+  async function taskRow(t) {
+    const p = await registry.find(t.projectId).catch(() => null);
+    let run = null;
+    if (t.currentRunId) {
+      try {
+        const r = await store.load(t.currentRunId);
+        run = { id: r.id, status: r.status, executing: factory.isActive(r.id), verdict: r.source && r.finalVerification ? verdictOf(r) : null, review: r.review?.decision || null, error: r.error ? String(r.error).slice(0, 200) : null };
+      } catch { run = { id: t.currentRunId, status: 'missing' }; }
+    }
+    let origin = t.origin;
+    if (origin?.type === 'chat') {
+      const c = await chat.load(origin.conversationId).catch(() => null);
+      origin = { ...origin, conversationTitle: c?.title || null, conversationExists: Boolean(c) };
+    }
+    return {
+      ...t, origin,
+      project: p ? { id: p.id, name: p.name, product: p.product || null, status: p.validation?.status || 'attention', archived: Boolean(p.archived) } : { id: t.projectId, name: t.projectName, product: null, status: 'removed', archived: false, removed: true },
+      run, startable: STARTABLE.has(t.status) && Boolean(p) && !p.archived,
+    };
+  }
+
+  async function activeProject(projectId, purpose) {
+    let p;
+    try { p = await registry.find(projectId); } catch { throw new HttpError(404, 'project not found: choose a registered project'); }
+    if (p.archived) throw new HttpError(409, `Project "${p.name}" is archived. Restore it to ${purpose}.`);
+    return p;
+  }
+
+  async function tasksApi(req, res, parts, url) {
+    try {
+      const method = req.method;
+      if (!parts[2]) {
+        if (method === 'GET') {
+          const { rev, tasks: all } = await tasks.list();
+          const q = (url.searchParams.get('q') || '').toLowerCase();
+          const f = { projectId: url.searchParams.get('projectId'), status: url.searchParams.get('status'), product: url.searchParams.get('product') };
+          const rows = [];
+          for (const t of all) rows.push(await taskRow(t));
+          const view = rows.filter((r) => (!f.projectId || r.projectId === f.projectId)
+            && (!f.product || r.project.product === f.product)
+            && (!f.status || (f.status === 'open' ? OPEN.has(r.status) : f.status === 'finished' ? !OPEN.has(r.status) : r.status === f.status))
+            && (!q || `${r.title} ${r.description} ${r.project.name}`.toLowerCase().includes(q)));
+          return json(res, 200, { rev, total: all.length, tasks: view, filtered: view.length !== all.length });
+        }
+        if (method === 'POST') {
+          const body = await readBody(req, 64 * 1024);
+          let origin = null;
+          let projectId = body.projectId;
+          if (body.origin?.type === 'chat') {
+            const cid = idOr404(CONVERSATION_ID_RE, body.origin.conversationId, 'conversation');
+            const convo = await chat.load(cid).catch(() => { throw new HttpError(404, 'the originating conversation was not found'); });
+            const ids = Array.isArray(body.origin.messageIds) ? body.origin.messageIds.map(String) : [];
+            for (const m of ids) if (!convo.messages.some((x) => x.id === m)) throw new HttpError(400, 'a referenced message does not belong to that conversation');
+            projectId ||= convo.projectId;
+            origin = { type: 'chat', conversationId: cid, messageIds: ids, ...(body.origin.excerpt ? { excerpt: redact(String(body.origin.excerpt)).slice(0, 2000) } : {}) };
+          }
+          if (!projectId) throw new HttpError(400, 'choose the project this task belongs to');
+          const project = await activeProject(projectId, 'add tasks to it');
+          const t = await tasks.create({ title: body.title, description: body.description, project, origin, status: body.status || 'backlog', position: body.position === 'top' ? 'top' : body.position && typeof body.position === 'object' ? { beforeId: body.position.beforeId && idOr404(TASK_ID_RE, body.position.beforeId, 'task'), afterId: body.position.afterId && idOr404(TASK_ID_RE, body.position.afterId, 'task') } : 'bottom' });
+          return json(res, 201, { task: await taskRow(t) });
+        }
+        throw new HttpError(405, 'method not allowed');
+      }
+      const id = idOr404(TASK_ID_RE, parts[2], 'task');
+      const sub = parts[3];
+      if (!sub) {
+        if (method === 'GET') return json(res, 200, { task: await taskRow(await tasks.get(id)) });
+        if (method === 'PATCH') {
+          const body = await readBody(req, 64 * 1024);
+          let project;
+          if (body.projectId !== undefined) project = await activeProject(body.projectId, 'move tasks to it');
+          return json(res, 200, { task: await taskRow(await tasks.update(id, body, { project })) });
+        }
+        throw new HttpError(405, 'method not allowed');
+      }
+      if (method !== 'POST') throw new HttpError(405, 'method not allowed');
+      if (sub === 'status') {
+        const body = await readBody(req, 4 * 1024);
+        return json(res, 200, { task: await taskRow(await tasks.setStatus(id, body.status, body.note)) });
+      }
+      if (sub === 'move') {
+        const body = await readBody(req, 4 * 1024);
+        await tasks.get(id);
+        const r = await tasks.move(id, { beforeId: body.beforeId && idOr404(TASK_ID_RE, body.beforeId, 'task'), afterId: body.afterId && idOr404(TASK_ID_RE, body.afterId, 'task'), top: body.top === true, bottom: body.bottom === true, rev: body.rev });
+        const rows = [];
+        for (const t of r.tasks) rows.push(await taskRow(t));
+        return json(res, 200, { moved: r.moved, rev: r.rev, tasks: rows });
+      }
+      if (sub === 'start') return json(res, 201, await startTask(id, await readBody(req, 16 * 1024)));
+      throw new HttpError(404, 'not found');
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      const h = asHttp(err);
+      if (err.backlog) {
+        const rows = [];
+        for (const t of err.backlog.tasks) rows.push(await taskRow(t));
+        h.extra = { ...(h.extra || {}), backlog: { rev: err.backlog.rev, tasks: rows } };
+      }
+      throw h;
+    }
+  }
+
+  /**
+   * Hand a task to the existing factory: the task's project and its (reviewed) text become a normal run. Saving or
+   * reordering a task never gets here; only this explicit action does. The task is linked to the run and stays
+   * in progress until a person decides it is done (the run's own verification is shown, not assumed).
+   */
+  async function startTask(id, body) {
+    const task = await tasks.get(id);
+    if (!STARTABLE.has(task.status)) throw new HttpError(409, `A ${task.status.replace('_', ' ')} task cannot be started${task.status === 'in_progress' ? ' (it already has a run; mark it blocked or ready first to run it again)' : ''}.`);
+    const project = await activeProject(task.projectId, 'start tasks on it');
+    const idea = `${task.title}${task.description ? `\n\n${task.description}` : ''}`;
+    let run;
+    try {
+      run = await factory.createRun({ idea, provider: body.provider, model: body.model, settings: body.settings, source: { projectId: project.id }, taskId: task.id });
+    } catch (err) {
+      throw asHttp(err);
+    }
+    try {
+      await tasks.attachRun(task.id, run.id);
+    } catch (err) {
+      await store.remove(run.id).catch(() => {});
+      throw asHttp(err);
+    }
+    factory.start(run.id);
+    return { task: await taskRow(await tasks.get(id)), run: publicRun(run, factory, previews) };
+  }
+
   async function serveStatic(res, pathname) {
     const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
     const abs = path.resolve(publicDir, rel);
@@ -744,6 +930,7 @@ export async function createServer(overrides = {}) {
   });
 
   const close = async () => {
+    await chat.shutdown();
     for (const { controller } of factory.active.values()) controller.abort(new Error('server shutting down'));
     await Promise.allSettled([...factory.active.values()].map((a) => a.promise));
     previews.stopAll();
@@ -752,7 +939,7 @@ export async function createServer(overrides = {}) {
     await new Promise((r) => server.close(r));
   };
 
-  return { server, cfg, store, factory, previews, registry, terminals, close };
+  return { server, cfg, store, factory, previews, registry, terminals, tasks, chat, close };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

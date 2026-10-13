@@ -71,6 +71,7 @@ export class OfflineProvider {
     let content;
     if (meta.kind === 'plan') content = [toolUse('submit_plan', meta.project?.inspection ? buildExistingPlan(meta.inputs, meta.project.inspection) : buildPlan(meta.inputs))];
     else if (meta.kind === 'task') content = this.taskTurn(messages, meta);
+    else if (meta.kind === 'chat') content = [{ type: 'text', text: 'This is the built-in offline demo provider: it cannot discuss your project. Pick a real provider and model (Providers page) to chat about it. Your message was saved, and you can still turn it into a task.' }];
     else if (meta.kind === 'summary') content = [{ type: 'text', text: summaryText(meta) }];
     else content = [{ type: 'text', text: 'OK' }];
     const chars = JSON.stringify(messages).length + JSON.stringify(content).length;

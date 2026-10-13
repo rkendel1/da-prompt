@@ -154,6 +154,7 @@ export class Factory {
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
       repoUrl,
+      ...(typeof body.taskId === 'string' && /^tsk_[\w-]+$/.test(body.taskId) ? { taskId: body.taskId } : {}),
       ...(source.projectId ? { projectId: source.projectId, projectName: (await this.registry.find(source.projectId).catch(() => null))?.name } : {}),
       ...(existing ? { source, project: { stages: {} } } : {}),
       layers: Object.fromEntries(LAYERS.map((l) => [l, 'pending'])),

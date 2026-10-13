@@ -6,7 +6,7 @@
 // this module translates both ways, and falls back to JSON-in-text tool calling for models
 // that have no native function calling.
 
-import { requestWithRetry, HttpError, describeError } from './http.js';
+import { requestWithRetry, requestStream, lineSplitter, HttpError, describeError } from './http.js';
 import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking } from './tooltext.js';
 
 // Remember models that rejected native tools so we don't pay for the failure every call.
@@ -92,6 +92,70 @@ export class OpenAICompatProvider {
     const content = fromOpenAIMessage(raw.message, { toolNames });
     const hasTool = content.some((c) => c.type === 'tool_use');
     return { content, stop_reason: hasTool ? 'tool_use' : raw.finish === 'length' ? 'max_tokens' : 'end_turn', usage: raw.usage };
+  }
+
+
+  /**
+   * Plain-text conversation with streaming (no tools). `onText(delta)` is called as tokens arrive.
+   * Resolves { text, usage, stop }. Used by project chat; the factory's tool loop keeps using chat().
+   */
+  async chatStream({ system, messages, maxTokens, signal, onText }) {
+    const model = this.model;
+    const msgs = toOpenAIMessages(system, messages, { mode: 'native', dialect: this.dialect });
+    const limit = maxTokens || this.maxTokens;
+    let text = '';
+    let usage = { input_tokens: 0, output_tokens: 0 };
+    let stop = 'end_turn';
+    const emit = (d) => {
+      if (!d) return;
+      text += d;
+      onText?.(d);
+    };
+    let url;
+    let body;
+    if (this.dialect === 'ollama') {
+      url = `${this.baseUrl}/api/chat`;
+      body = { model, messages: msgs, stream: true, options: { num_predict: limit } };
+      if (this.numCtx) body.options.num_ctx = this.numCtx;
+      if (this.temperature != null) body.options.temperature = this.temperature;
+    } else {
+      url = `${this.baseUrl}/chat/completions`;
+      body = { model, messages: msgs, max_tokens: limit, stream: true, stream_options: { include_usage: true } };
+      if (this.temperature != null) body.temperature = this.temperature;
+    }
+    const lines = lineSplitter((line) => {
+      const l = line.trim();
+      if (!l || l.startsWith(':')) return;
+      const data = l.startsWith('data:') ? l.slice(5).trim() : l;
+      if (data === '[DONE]') return;
+      let j;
+      try {
+        j = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (j.error) throw new Error(typeof j.error === 'string' ? j.error : j.error.message || 'the provider reported an error');
+      if (this.dialect === 'ollama') {
+        emit(j.message?.content);
+        if (j.done) {
+          usage = { input_tokens: j.prompt_eval_count || 0, output_tokens: j.eval_count || 0 };
+          if (j.done_reason === 'length') stop = 'max_tokens';
+        }
+      } else {
+        const c = j.choices?.[0];
+        emit(c?.delta?.content);
+        if (c?.finish_reason === 'length') stop = 'max_tokens';
+        if (j.usage) usage = { input_tokens: j.usage.prompt_tokens || 0, output_tokens: j.usage.completion_tokens || 0 };
+      }
+    });
+    try {
+      await requestStream(url, { body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs }, (c) => lines.push(c));
+      lines.end();
+    } catch (err) {
+      if (signal?.aborted) throw Object.assign(new Error('cancelled'), { partial: text });
+      throw Object.assign(new Error(`${this.label} (${model}): ${describeError(err)}`), { partial: text });
+    }
+    return { text: stripThinking ? stripThinking(text) : text, usage, stop };
   }
 
   authHeaders() {

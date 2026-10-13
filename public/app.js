@@ -2,6 +2,8 @@
 import { mountModelPicker, renderProvidersPage } from './providers.js';
 import { renderTerminalPage } from './terminal.js';
 import { renderProjectsPage } from './projects.js';
+import { renderChatPage } from './chat.js';
+import { renderBacklogPage } from './backlog.js';
 import { renderSetupPage, renderSettingsPage, renderPaxPage, renderHistoryPage, renderEvidence, refreshHealthDot, loadHealth } from './ops.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -113,6 +115,13 @@ function route() {
   } else if (hash === '/projects' || hash.startsWith('/projects/')) {
     current = null;
     renderProjectsPage(main, api, { toast, id: hash.split('/')[2] || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0].startsWith('/projects')) pageCleanup = c; else c?.(); });
+  } else if (hash === '/chat' || hash.startsWith('/chat/')) {
+    current = null;
+    const mine = hash;
+    renderChatPage(main, api, { toast, id: hash.split('/')[2] || '', project: params.get('project') || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0] === mine) pageCleanup = c; else c?.(); });
+  } else if (hash === '/backlog' || hash.startsWith('/backlog/')) {
+    current = null;
+    renderBacklogPage(main, api, { toast, task: hash.split('/')[2] || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0].startsWith('/backlog')) pageCleanup = c; else c?.(); });
   } else if (hash === '/terminal') {
     current = null;
     renderTerminalPage(main, api, { toast, project: params.get('project') || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0] === '/terminal') pageCleanup = c; else c(); });

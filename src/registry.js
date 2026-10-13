@@ -35,6 +35,7 @@ export function remoteKey(url) {
   }
 }
 
+const cleanProduct = (v) => String(v ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60);
 const cleanName = (n, fallback) => {
   const s = String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, MAX_NAME);
   return s || fallback;
@@ -180,7 +181,7 @@ export class ProjectRegistry {
     const roots = authorizedRoots(this.cfg);
     const root = p.kind === 'local' ? roots.find((r) => r.key === p.location.rootKey) : null;
     return {
-      id: p.id, name: p.name, kind: p.kind, archived: Boolean(p.archived), archivedAt: p.archivedAt || null,
+      id: p.id, name: p.name, product: p.product || null, kind: p.kind, archived: Boolean(p.archived), archivedAt: p.archivedAt || null,
       status: v.status, errors: v.errors || [], warnings: v.warnings || [], checkedAt: v.checkedAt,
       createdAt: p.createdAt, updatedAt: p.updatedAt, lastUsedAt: p.lastUsedAt || null, migratedFrom: p.migratedFrom || null,
       settings: p.settings || {},
@@ -265,7 +266,7 @@ export class ProjectRegistry {
         }
       }
       const t = now();
-      const rec = { id: newId(), name: cleanName(input.name, `${repo.owner}/${repo.repo}`), kind: 'remote', createdAt: t, updatedAt: t, archived: false, remote: { url: repo.url, webUrl: repo.webUrl, host: repo.host, owner: repo.owner, repo: repo.repo, defaultBranch }, settings: this.settingsFrom(input, { workingMode: 'clone' }), validation: { status: warning ? 'attention' : 'available', errors: warning ? [warning] : [], warnings: [], checkedAt: t } };
+      const rec = { id: newId(), name: cleanName(input.name, `${repo.owner}/${repo.repo}`), ...(cleanProduct(input.product) ? { product: cleanProduct(input.product) } : {}), kind: 'remote', createdAt: t, updatedAt: t, archived: false, remote: { url: repo.url, webUrl: repo.webUrl, host: repo.host, owner: repo.owner, repo: repo.repo, defaultBranch }, settings: this.settingsFrom(input, { workingMode: 'clone' }), validation: { status: warning ? 'attention' : 'available', errors: warning ? [warning] : [], warnings: [], checkedAt: t } };
       await this.mutate((d) => { check(d.projects); d.projects.push(rec); });
       return rec;
     }
@@ -288,6 +289,7 @@ export class ProjectRegistry {
     const rec = {
       id: newId(),
       name: cleanName(input.name, path.basename(dir.real) || dir.name),
+      ...(cleanProduct(input.product) ? { product: cleanProduct(input.product) } : {}),
       kind: 'local', createdAt: t, updatedAt: t, archived: false,
       location: { path: dir.real, rootKey: dir.root.key, rel: dir.rel },
       repo: ident.isGit ? { isGit: true, rootCommits: ident.rootCommits, remoteName: ident.remoteName, remoteUrl: ident.remoteUrl, remoteKey: ident.remoteKey, defaultBranch: ident.defaultBranch } : { isGit: false },
@@ -302,6 +304,7 @@ export class ProjectRegistry {
     const p = await this.find(id);
     const next = {};
     if (patch.name !== undefined) next.name = cleanName(patch.name, p.name);
+    if (patch.product !== undefined) next.product = cleanProduct(patch.product) || undefined; // an optional label that groups projects; not an identity
     const settings = this.settingsFrom(patch, p.settings || {});
     if (p.kind === 'local' && settings.workingMode === 'clone' && !p.repo?.isGit) throw new ProjectError(400, 'a folder that is not a Git repository can only use the "snapshot" working mode');
     if (p.kind === 'remote' && settings.workingMode !== 'clone') throw new ProjectError(400, 'remote projects always use an isolated clone');
@@ -322,6 +325,7 @@ export class ProjectRegistry {
     await this.mutate((d) => {
       const q = d.projects.find((x) => x.id === p.id);
       Object.assign(q, next, { settings, updatedAt: now() });
+      if (q.product === undefined) delete q.product;
       if (remote) q.remote = remote;
       if (repoPatch) q.repo = repoPatch;
     });
