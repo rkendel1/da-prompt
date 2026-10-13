@@ -7,6 +7,10 @@
 // that have no native function calling.
 
 import { requestWithRetry, requestStream, lineSplitter, HttpError, describeError } from './http.js';
+
+// Fixed limits (not configurable): a request may take this long in total; the Ollama dialect retries transient errors this often.
+export const REQUEST_TIMEOUT_MS = 30 * 60_000;
+export const OLLAMA_HTTP_RETRIES = 2;
 import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking } from './tooltext.js';
 
 // Remember models that rejected native tools so we don't pay for the failure every call.
@@ -29,7 +33,7 @@ export class OpenAICompatProvider {
     this.numCtx = numCtx;
     this.temperature = temperature;
     this.maxTokens = maxTokens;
-    this.timeoutMs = timeoutMs || 30 * 60_000;
+    this.timeoutMs = timeoutMs || REQUEST_TIMEOUT_MS;
   }
 
   describe() {
@@ -68,11 +72,11 @@ export class OpenAICompatProvider {
       if (this.numCtx) body.options.num_ctx = this.numCtx;
       if (this.temperature != null) body.options.temperature = this.temperature;
       if (mode === 'native' && tools.length) body.tools = tools.map(toOpenAITool);
-      const res = await requestWithRetry(`${this.baseUrl}/api/chat`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs }, { retries: 2 });
+      const res = await requestWithRetry(`${this.baseUrl}/api/chat`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs }, { retries: OLLAMA_HTTP_RETRIES });
       raw = {
         message: res.message || {},
         finish: res.done_reason === 'length' ? 'length' : 'stop',
-        usage: { input_tokens: res.prompt_eval_count || 0, output_tokens: res.eval_count || 0 },
+        usage: { input_tokens: res.prompt_eval_count || 0, output_tokens: res.eval_count || 0, reported: res.prompt_eval_count != null || res.eval_count != null },
       };
     } else {
       const body = { model, messages: msgs, max_tokens: limit };
@@ -86,7 +90,7 @@ export class OpenAICompatProvider {
       raw = {
         message: choice.message || {},
         finish: choice.finish_reason,
-        usage: { input_tokens: res.usage?.prompt_tokens || 0, output_tokens: res.usage?.completion_tokens || 0 },
+        usage: { input_tokens: res.usage?.prompt_tokens || 0, output_tokens: res.usage?.completion_tokens || 0, reported: Boolean(res.usage) },
       };
     }
     const content = fromOpenAIMessage(raw.message, { toolNames });

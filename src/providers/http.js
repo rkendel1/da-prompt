@@ -4,6 +4,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
+import { noteRetry } from '../diagnostics.js';
 
 export class HttpError extends Error {
   constructor(status, body, headers = {}) {
@@ -162,7 +163,8 @@ const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 const NET_RETRYABLE = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_SOCKET']);
 
 /** requestJson with retries on rate limits, overloads and transient network errors. */
-export async function requestWithRetry(url, opts = {}, { retries = 4 } = {}) {
+export const DEFAULT_HTTP_RETRIES = 4;
+export async function requestWithRetry(url, opts = {}, { retries = DEFAULT_HTTP_RETRIES } = {}) {
   let last;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (opts.signal?.aborted) throw new Error('cancelled');
@@ -173,6 +175,7 @@ export async function requestWithRetry(url, opts = {}, { retries = 4 } = {}) {
       if (opts.signal?.aborted) throw new Error('cancelled');
       const retryable = err instanceof HttpError ? RETRYABLE.has(err.status) : NET_RETRYABLE.has(err.code);
       if (!retryable || attempt === retries) throw err;
+      noteRetry(err instanceof HttpError ? `http_${err.status}` : err.code);
       const ra = Number(err.headers?.['retry-after']);
       const wait = Number.isFinite(ra) && ra >= 0 ? ra * 1000 : Math.min(30_000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 400);
       await new Promise((r) => setTimeout(r, wait));

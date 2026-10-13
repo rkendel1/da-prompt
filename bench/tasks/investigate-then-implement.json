@@ -1,0 +1,40 @@
+{
+  "id": "investigate-then-implement",
+  "kind": "repository investigation + implementation",
+  "title": "Make the request timeout configurable",
+  "idea": "Find where the HTTP client's request timeout is defined and make it configurable through the REQUEST_TIMEOUT_MS environment variable. The default must stay 1000 ms and invalid values must fall back to the default. Add a test.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"client\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/client.test.js\"\n  }\n}\n",
+    "src/config/defaults.js": "export const DEFAULTS = { retries: 2, timeoutMs: 1000 };\n",
+    "src/net/client.js": "import { DEFAULTS } from '../config/defaults.js';\n\nexport function requestOptions() {\n  return { retries: DEFAULTS.retries, timeoutMs: DEFAULTS.timeoutMs };\n}\n",
+    "src/index.js": "export { requestOptions } from './net/client.js';\n",
+    "test/client.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { requestOptions } from '../src/index.js';\ntest('defaults', () => assert.deepEqual(requestOptions(), { retries: 2, timeoutMs: 1000 }));\n",
+    "docs/notes.md": "Timeouts are tuned in the config module.\n"
+  },
+  "reference": {
+    "src/net/client.js": "import { DEFAULTS } from '../config/defaults.js';\n\nexport function requestOptions(env = process.env) {\n  const n = Number(env.REQUEST_TIMEOUT_MS);\n  const timeoutMs = Number.isInteger(n) && n > 0 ? n : DEFAULTS.timeoutMs;\n  return { retries: DEFAULTS.retries, timeoutMs };\n}\n",
+    "test/client.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { requestOptions } from '../src/index.js';\ntest('defaults', () => assert.deepEqual(requestOptions({}), { retries: 2, timeoutMs: 1000 }));\ntest('env override', () => assert.equal(requestOptions({ REQUEST_TIMEOUT_MS: '250' }).timeoutMs, 250));\ntest('invalid values fall back', () => assert.equal(requestOptions({ REQUEST_TIMEOUT_MS: 'abc' }).timeoutMs, 1000));\n"
+  },
+  "read": [
+    "docs/notes.md",
+    "src/net/client.js",
+    "src/config/defaults.js"
+  ],
+  "acceptance": [
+    {
+      "name": "the project's tests pass",
+      "files": {},
+      "command": "node --test test/client.test.js"
+    },
+    {
+      "name": "environment override, default and fallback",
+      "files": {
+        "accept.mjs": "import assert from 'node:assert/strict';\nimport { spawnSync } from 'node:child_process';\nconst run = (value) => spawnSync(process.execPath, ['--input-type=module', '-e', \"import('./src/index.js').then((m) => console.log(m.requestOptions().timeoutMs))\"], { env: { ...process.env, ...(value === undefined ? {} : { REQUEST_TIMEOUT_MS: value }) }, encoding: 'utf8' }).stdout.trim();\nassert.equal(run(undefined), '1000');\nassert.equal(run('250'), '250');\nassert.equal(run('nope'), '1000');\n"
+      },
+      "command": "node accept.mjs"
+    }
+  ],
+  "expectChanged": [
+    "src/net/client.js"
+  ]
+}

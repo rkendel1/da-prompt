@@ -9,6 +9,7 @@ import { OfflineProvider } from '../src/providers/offline.js';
 import { engineStatus, fxEndpoint } from '../src/engines/index.js';
 import { setup, Scripted, task, plan, done, toolUse } from './project-helpers.js';
 import { tmpDir } from './helpers.js';
+import { readRecords, summarizeRun } from '../src/diagnostics.js';
 
 /** A provider that looks like an Ollama/OpenAI-compatible one (what the FX engine needs) but answers from a script. */
 class EndpointProvider extends Scripted {
@@ -45,6 +46,7 @@ function fakeFx(script) {
             result,
             cancel: () => { cancelled = true; },
             async *[Symbol.asyncIterator]() {
+              opts.onEvent?.({ type: 'model.request', step: 1, messages: 2 });
               for (const step of script({ prompt: input, round: log.prompts.length, tools: opts.tools })) {
                 if (cancelled || signal?.aborted) break;
                 if (step.throw) { fail(step.throw); return; }
@@ -57,6 +59,7 @@ function fakeFx(script) {
                   yield { type: 'tool_end', id: 'x', name: step.tool };
                 }
               }
+              opts.onEvent?.({ type: 'model.response', step: 1, finishReason: 'stop', toolCalls: 0 });
               finish({ stopReason: cancelled ? 'cancelled' : 'end_turn', usage: { inputTokens: 120, outputTokens: 30 } });
             },
           };
@@ -271,4 +274,37 @@ test('loose completion fields (a string where a list was asked for) are accepted
   const rb = await b.factory.start((await create(b.factory)).id);
   assert.equal(rb.plan.tasks[0].status, 'completed', rb.error);
   assert.deepEqual(rb.plan.tasks[0].result.nextSteps, ['run npm test']);
+});
+
+test('FX prompts are recorded as diagnostics: requests, first event, per-prompt usage, and a timeout is classified', async () => {
+  const fx = fakeFx(() => [{ text: 'Working. ' }, { tool: 'write_file', input: { path: 'src/hello.txt', content: 'hi\n' } }, { tool: 'complete_task', input: { summary: 'made hello', files: [] } }]);
+  const { store, factory } = makeEnv({ fx, provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  const run = await factory.start((await create(factory, { engine: 'fx' })).id);
+  assert.equal(run.plan.tasks[0].status, 'completed', run.error);
+  const recs = readRecords(store.runDir(run.id)).filter((r) => r.type === 'call');
+  const agent = recs.filter((r) => r.purpose === 'agent_prompt');
+  assert.deepEqual(recs.filter((r) => r.purpose !== 'agent_prompt').map((r) => r.purpose).sort(), ['plan', 'summary'], 'planning and the summary still go through provider.chat and are recorded too');
+  assert.equal(agent.length, 1, 'one record per fx prompt');
+  const [r] = agent;
+  assert.equal(r.purpose, 'agent_prompt');
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.request.modelRequests, 1);
+  assert.equal(r.request.outputLimit, 8192);
+  assert.equal(r.firstResponse.supported, true);
+  assert.ok(Number.isInteger(r.firstResponse.ms), 'first streamed event measured by the factory');
+  assert.deepEqual(r.usage, { source: 'provider', input: 120, output: 30, scope: 'prompt' });
+  assert.equal(r.response.toolCalls, 2);
+  assert.equal(r.modelRequestMs.length, 1);
+  assert.equal(summarizeRun(run, await store.events(run.id), readRecords(store.runDir(run.id))).calls.byPurpose.agent_prompt.count, 1);
+
+  const slow = fakeFx(() => [{ throw: Object.assign(new Error('model call timed out'), { code: 'LIBFX_MODEL_TIMEOUT' }) }]);
+  const b = makeEnv({ fx: slow, provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  const rb = await b.factory.start((await create(b.factory, { engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
+  const failed = readRecords(b.store.runDir(rb.id)).find((x) => x.purpose === 'agent_prompt');
+  assert.deepEqual([failed.outcome, failed.failure.kind, failed.usage.source], ['error', 'first_response_timeout', 'unavailable']);
+  assert.notEqual(rb.status, 'completed');
+  // Unsupported options are said so in the run log.
+  const c = makeEnv({ fx: fakeFx(() => [{ tool: 'complete_task', input: { summary: 'x', files: [] } }]), provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
+  const rc = await c.factory.start((await create(c.factory, { engine: 'fx', providerOptions: { numCtx: 16384 }, settings: { deploy: false } })).id);
+  assert.ok((await c.store.events(rc.id)).some((e) => e.type === 'log' && e.level === 'warn' && /numCtx 16384 is not applied/.test(e.text)));
 });

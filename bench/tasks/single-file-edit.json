@@ -1,0 +1,30 @@
+{
+  "id": "single-file-edit",
+  "kind": "single-file edit",
+  "title": "Add an exclamation mark to greetings",
+  "idea": "In src/greet.js, make greet(name) return the greeting ending with an exclamation mark, e.g. greet('Ada') returns 'Hello, Ada!'. Change only that file.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"greet\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/greet.test.js\"\n  }\n}\n",
+    "src/greet.js": "export const greet = (name) => `Hello, ${name}`;\n",
+    "test/greet.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { greet } from '../src/greet.js';\ntest('greet names the person', () => assert.match(greet('Ada'), /^Hello, Ada/));\n",
+    "README.md": "# greet\n"
+  },
+  "reference": {
+    "src/greet.js": "export const greet = (name) => `Hello, ${name}!`;\n"
+  },
+  "read": [
+    "src/greet.js"
+  ],
+  "acceptance": [
+    {
+      "name": "greeting ends with !",
+      "files": {
+        "accept.mjs": "import assert from 'node:assert/strict';\nimport { greet } from './src/greet.js';\nassert.equal(greet('Ada'), 'Hello, Ada!');\nassert.equal(greet('Bo'), 'Hello, Bo!');\n"
+      },
+      "command": "node accept.mjs"
+    }
+  ],
+  "expectChanged": [
+    "src/greet.js"
+  ]
+}
