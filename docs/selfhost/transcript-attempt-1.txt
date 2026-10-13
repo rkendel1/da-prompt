@@ -1,0 +1,344 @@
+
+# A clean clone of the repository, inside the only folder da-prompt is authorized to read
+
+$ git clone -q /home/user/da-prompt <work>/projects/da-prompt
+[exit 0]
+## HEAD (no branch)
+adbbd13 Add a terminal-first CLI that drives the same backend as the browser
+
+# The stand-in model (an OpenAI-compatible server; see docs/selfhost/scripted-model.mjs)
+model endpoint: http://127.0.0.1:33827/v1
+
+# Configure through the CLI only
+
+$ dp server start
+● Started the da-prompt backend: http://127.0.0.1:39555  (pid 7521, log <work>/data/server.log)
+  Browser UI: http://127.0.0.1:39555/   ·   Stop it with: da-prompt server stop
+[exit 0]
+
+$ dp config set projectRoots <work>/projects
+✓ Saved projectRoots = <work>/projects  (applies immediately)
+[exit 0]
+
+$ dp providers add --label Scripted stand-in --provider-url http://127.0.0.1:33827/v1
+✓ Added Scripted stand-in (scripted-stand-in): ready
+[exit 0]
+
+$ dp providers test scripted-stand-in --model scripted-selfhost
+✓ connectivity Scripted stand-in is reachable.
+✓ discovery    Scripted stand-in lists scripted-selfhost (1 model available).
+✗ inference    Did not complete a request: The model answered but did not call the tool. It may struggle as a factory agent; try a larger or tool-capable model. (4ms)
+
+Not usable yet — see the first ✗ above.
+[exit 1]
+
+$ dp providers use scripted-stand-in --model scripted-selfhost
+✓ connectivity: Scripted stand-in is reachable.
+✓ discovery: Scripted stand-in lists scripted-selfhost (1 model available).
+✗ inference: Did not complete a request: The model answered but did not call the tool. It may struggle as a factory agent; try a larger or tool-capable model. (2ms)
+error: scripted-stand-in / scripted-selfhost is not usable, so the default was not changed.
+hint:  Use --skip-test to save without sending a test request.
+[exit 1]
+
+$ dp projects list
+  NAME       ID                    ACCESS    GIT
+  da-prompt  d276498229:da-prompt  writable  detached
+Ids are opaque: the backend maps them to folders inside its authorized roots. * = selected by "projects use".
+[exit 0]
+
+$ dp projects use <work>/projects/da-prompt
+✓ Selected da-prompt
+Only the project id is remembered; nothing is granted by selecting it.
+[exit 0]
+
+$ dp projects current
+da-prompt
+[exit 0]
+
+$ dp doctor
+This machine
+✓ Node.js — Node 22.22.0
+✓ Git — git version 2.43.0
+✓ npm — npm 10.9.4
+✓ Data folder — writable (<work>/data)
+✓ Saved settings — <work>/data/settings.json (permissions 600)
+
+Backend  http://127.0.0.1:39555 · host vm · da-prompt 1.0.0
+✓ Factory backend — Running directly on a host (da-prompt 1.0.0, Node v22.22.0).
+✓ Data folder — Writable. Runs, workspaces and saved settings are stored here.
+✓ Access protection — No password, but the server only listens on this machine.
+✓ Model providers — 1 provider ready: Scripted stand-in.
+      · Anthropic (Claude): no key
+      · OpenAI: no key
+      · Ollama: unreachable
+      · LM Studio: unreachable
+      · llama.cpp server: unreachable
+      · vLLM: unreachable
+      · OpenRouter: no key
+      · Google Gemini: no key
+      · Groq: no key
+      · Mistral: no key
+      · DeepSeek: no key
+      · xAI (Grok): no key
+      · Together AI: no key
+✓ Default provider and model — Scripted stand-in will use scripted-selfhost.
+– Delivery folder — No restriction: a run may export a finished project to any new folder you name. Downloads always work.
+✓ Project folders — 1 authorized folder readable and writable.
+✓ Git — git version 2.43.0
+! GitHub publishing — No GitHub token is configured: public repositories can be read, but nothing can be pushed and no pull request can be opened.
+    → Add a token with read access to clone private repositories and write access (Contents and Pull requests) to publish.
+! PAX — "pax" was not found on the PATH of the da-prompt server process (15 folders searched).
+    → Install PAX on the machine that runs da-prompt (release archives: github.com/rkendel1/pax/releases) so that "pax" is on the server's PATH, or enter the executable's full path in Settings. A browser cannot install a program on a host.  [needs access to the host]
+
+Ready. 2 item(s) could be improved (run with --verbose).
+[exit 0]
+
+# Start the task (bounded, with an explicit acceptance criterion)
+
+$ dp run "Make redact() in src/security.js also mask "Bearer <token>" and "x-api-key" header values. Acceptance: redact("Authorization: Bearer abcdefghijklmnop1234567890") returns "Authorization: Bearer ***"; redact("x-api-key: abcdef1234567890zzzz") returns "x-api-key: ***"; every existing redaction is unchanged; a new test/redact.test.js covers both cases and node --test test/redact.test.js passes." --attempts 2 --wait-timeout 1500
+Run 202610130213-0cfa0b started on da-prompt · scripted-stand-in / scripted-selfhost
+Reconnect any time: da-prompt runs follow 202610130213-0cfa0b   ·   browser: http://127.0.0.1:39555/#/runs/202610130213-0cfa0b
+02:13:26 run created · scripted-stand-in / scripted-selfhost · local da-prompt
+02:13:27 status → planning
+02:13:27 layer plan: active
+02:13:27 connect active — Authorizing the source and creating an isolated workspace
+02:13:27 Cloning HEAD @ adbbd133db into an isolated workspace…
+02:13:27 connect done — da-prompt · clone · base adbbd133db · branch da-prompt/202610130213-0cfa0b
+02:13:27 source: local da-prompt · clone · base adbbd133db · branch da-prompt/202610130213-0cfa0b
+02:13:27 inspect active — Reading the project
+02:13:27 inspect done — node · 110 files · tests: npm test
+02:13:27 inspected: node · 110 files · tests: npm test · instructions: CLAUDE.md
+02:13:27 baseline active — Running 3 check(s) before any change
+02:16:27 baseline ✗ npm test → timeout
+02:16:30 baseline ✓ npm run lint → passed
+02:16:37 baseline ✓ npm run build → passed
+02:16:37 baseline done — 2 passed, 1 already failing or not runnable
+02:16:37 Planning with Scripted stand-in · scripted-selfhost…
+02:16:37 plan: 1 tasks in 1 levels
+02:16:37 layer plan: done
+02:16:37 layer agents: done
+02:16:37 agents: engineer
+02:16:37 status → running
+02:16:37 layer execution: active
+02:16:37 [redact] running (attempt 1) — Mask Bearer tokens and x-api-key values in redact()
+02:16:38 layer verification: active
+02:16:38 verify redact: ✓ exists src/security.js  ✓ exists test/redact.test.js  ✓ node --test test/redact.test.js test/sandbox.test.js
+02:16:38 [redact] completed (attempt 1) — redact() now masks "Bearer <token>" and "x-api-key" values; test/redact.test.js covers both, case-insensitivity, non-matching text and the existing formats.
+02:16:38 layer execution: done
+02:16:38 layer artifacts: done
+02:16:38 layer verification: done
+02:16:39 status → completing
+02:16:39 layer completion: active
+02:19:54 verify final: ✓ node --test test/redact.test.js test/sandbox.test.js  ✓ node scripts/check.mjs  ✓ npm test (preexisting)  ✓ npm run lint  ✓ npm run build
+02:19:54 checklist ✓ Requested change implemented; every planned task verified — 1/1 tasks completed and verified
+02:19:54 checklist ✓ Project checks pass with no regressions — node --test test/redact.test.js test/sandbox.test.js → passed, node scripts/check.mjs → passed, npm test → preexisting, npm run lint → passed, npm run build → passed
+02:19:54 checklist ✓ Pre-existing failures (present before this run) (warn) — 1 still failing exactly as at baseline; not caused by this change
+02:19:54 checklist ✓ No critical errors or security issues in the changed files — 2 changed file(s) scanned, 0 low/medium findings, 0 blocking
+02:19:54 checklist ✓ Deployment (na) — not requested for this run — nothing was deployed
+02:19:54 checklist ✓ Documentation (na) — only changed when the request or a plan task calls for it
+02:19:54 checklist ✓ Final summary and next steps provided — FACTORY_REPORT.md
+02:19:54 layer completion: done
+02:19:54 delivered: FACTORY_REPORT.md, changes.patch, project.tar.gz
+02:19:54 status → completed
+
+Redact credentials in headers  202610130213-0cfa0b
+  status    completed   6m27s · 6m ago
+  task      Make redact() in src/security.js also mask "Bearer <token>" and "x-api-key" header values. Acceptanc
+  project   local da-prompt · clone · branch da-prompt/202610130213-0cfa0b
+  model     scripted-stand-in / scripted-selfhost
+
+Tasks
+  ✓ redact         engineer  completed  1 attempt
+
+Factory verification  verified, pre-existing failures remain
+  ✓ Requested change implemented; every planned task verified — 1/1 tasks completed and verified
+  ✓ Project checks pass with no regressions — node --test test/redact.test.js test/sandbox.test.js → passed, node scripts/check.mjs → passed, npm test → preexisting, npm run lint → passed, npm run build → passed
+  ✓ Pre-existing failures (present before this run) (warn) — 1 still failing exactly as at baseline; not caused by this change
+  ✓ No critical errors or security issues in the changed files — 2 changed file(s) scanned, 0 low/medium findings, 0 blocking
+  ✓ Deployment (na) — not requested for this run — nothing was deployed
+  ✓ Documentation (na) — only changed when the request or a plan task calls for it
+  ✓ Final summary and next steps provided — FACTORY_REPORT.md
+
+Changes  2 file(s) +30 −1
+Delivery  ready for review
+
+Next
+  da-prompt runs evidence 202610130213-0cfa0b   # see agent claims, factory verification and PAX separately
+  da-prompt runs diff 202610130213-0cfa0b   # review the changes
+  da-prompt runs review 202610130213-0cfa0b approve   # approve these exact changes (required before apply/publish)
+[exit 0]
+run id: 202610130213-0cfa0b
+
+# Inspect: tasks, files, diff, the factory's checks, and the evidence (agent claims / factory verification / PAX kept apart)
+
+$ dp runs list
+ID                   STATUS     PROJECT    TASKS  VERIFIED                  AGE     TASK
+202610130213-0cfa0b  completed  da-prompt  1/1    verified with preexisti…  6m ago  Redact credentials in headers
+[exit 0]
+
+$ dp runs tasks 202610130213-0cfa0b
+TASK    ROLE      STATUS     TRIES  AFTER  TITLE                                         PROBLEM
+redact  engineer  completed  1      —      Mask Bearer tokens and x-api-key values in …
+[exit 0]
+
+$ dp runs files 202610130213-0cfa0b
+   FILE                 +    −
+M  src/security.js      +3   −1
+A  test/redact.test.js  +27  −0
+2 file(s), +30 −1 against the baseline · diff: da-prompt runs diff 202610130213-0cfa0b
+[exit 0]
+
+$ dp runs diff 202610130213-0cfa0b
+diff --git a/src/security.js b/src/security.js
+index 7fd933f..fa0bb91 100644
+--- a/src/security.js
++++ b/src/security.js
+@@ -80,5 +80,7 @@ export function redact(text) {
+     .replace(/\bsk-(proj-)?[A-Za-z0-9]{20,}/g, 'sk-***')
+     .replace(/\b(ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g, '$1_***')
+     .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***')
+-    .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, 'xox*-***');
++    .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, 'xox*-***')
++    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
++    .replace(/(x-api-key["']?\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***');
+ }
+diff --git a/test/redact.test.js b/test/redact.test.js
+new file mode 100644
+index 0000000..0bd7688
+--- /dev/null
++++ b/test/redact.test.js
+@@ -0,0 +1,27 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { redact } from '../src/security.js';
++
++test('Bearer tokens are masked, keeping the scheme so the log line still makes sense', () => {
++  assert.equal(redact('Authorization: Bearer abcdefghijklmnop1234567890'), 'Authorization: Bearer ***');
++  assert.equal(redact('curl -H "Authorization: Bearer eyJhbGciOi.abc-def_ghi.jkl" https://x'), 'curl -H "Authorization: Bearer ***" https://x');
++  assert.equal(redact('authorization: bearer abcdefgh12345678'), 'authorization: bearer ***');
++});
++
++test('x-api-key header values are masked, whatever the case of the header name', () => {
++  assert.equal(redact('x-api-key: abcdef1234567890zzzz'), 'x-api-key: ***');
++  assert.equal(redact('X-API-Key: abcdef1234567890zzzz'), 'X-API-Key: ***');
++  assert.equal(redact('{"x-api-key":"abcdef1234567890zzzz"}'), '{"x-api-key":"***"}');
++});
++
++test('ordinary text and short words are left alone', () => {
++  assert.equal(redact('the bearer of bad news'), 'the bearer of bad news');
++  assert.equal(redact('Bearer of gifts'), 'Bearer of gifts');
++  assert.equal(redact('x-api-key header is required'), 'x-api-key header is required');
++});
++
++test('the existing key formats are still masked', () => {
++  assert.equal(redact(`token ghp_${'b'.repeat(30)}`), 'token ghp_***');
++  assert.equal(redact(`sk-ant-${'a'.repeat(30)}`), 'sk-ant-***');
++  assert.equal(redact(42), 42);
++});
+
+[exit 0]
+
+$ dp runs tests 202610130213-0cfa0b
+Baseline → result (the factory's own checks)
+  ✓ npm test
+      baseline: timeout   result: preexisting (exit 124)
+  ✓ npm run lint
+      baseline: passed   result: passed (exit 0)
+  ✓ npm run build
+      baseline: passed   result: passed (exit 0)
+  ✓ node --test test/redact.test.js test/sandbox.test.js
+      baseline: none   result: passed (exit 0)
+  ✓ node scripts/check.mjs
+      baseline: none   result: passed (exit 0)
+
+Re-run the checks now: da-prompt runs tests 202610130213-0cfa0b --run
+[exit 0]
+
+$ dp runs evidence 202610130213-0cfa0b
+AGENT CLAIMS  — what the agents said. Not evidence that anything works.
+  redact (engineer, 1 attempt): “redact() now masks "Bearer <token>" and "x-api-key" values; test/redact.test.js covers both, case-insensitivity, non-matching text and the existing formats.”
+
+FACTORY VERIFICATION  — commands the factory ran itself, with their real exit status.  verdict: verified with preexisting failures
+  baseline (before any change):
+    ✗ npm test → timeout
+    ✓ npm run lint → passed
+    ✓ npm run build → passed
+  at the end of the run:
+    ✓ node --test test/redact.test.js test/sandbox.test.js → passed (exit 0)
+    ✓ node scripts/check.mjs → passed (exit 0)
+    ✓ npm test → preexisting (exit 124)
+    ✓ npm run lint → passed (exit 0)
+    ✓ npm run build → passed (exit 0)
+  task redact [completed]: ✓ exists src/security.js  ✓ exists test/redact.test.js  ✓ node --test test/redact.test.js test/sandbox.test.js
+  ✓ Requested change implemented; every planned task verified
+  ✓ Project checks pass with no regressions
+  ✓ Pre-existing failures (present before this run) (warn)
+  ✓ No critical errors or security issues in the changed files
+  ✓ Deployment (na)
+  ✓ Documentation (na)
+  ✓ Final summary and next steps provided
+
+PAX OBSERVATION  — what PAX observed. Never part of the verdict.  state: not-requested
+  (not requested for this run; collect with: da-prompt pax verify <run>)
+[exit 0]
+
+# The working tree is untouched until approval + explicit apply
+
+$ git -C <work>/projects/da-prompt status --short
+[exit 0]
+
+$ dp runs apply 202610130213-0cfa0b --yes
+error: Run 202610130213-0cfa0b has not been approved.
+hint:  Review it first: da-prompt runs diff 202610130213-0cfa0b && da-prompt runs review 202610130213-0cfa0b approve
+[exit 4]
+
+$ dp runs review 202610130213-0cfa0b approve --note reviewed the diff above: two replacements and a test file
+✓ approved 2 file(s) of run 202610130213-0cfa0b — “reviewed the diff above: two replacements and a test file”. The approval covers exactly these changes; apply/publish are still separate commands.
+  da-prompt runs apply 202610130213-0cfa0b   # write the approved changes into your directory
+[exit 0]
+
+$ dp runs apply 202610130213-0cfa0b
+error: Write 2 file(s) into your directory "da-prompt"? Nothing is staged or committed, and nothing is written if any of them changed since the run started.
+Refusing to continue without explicit confirmation in a non-interactive session.
+hint:  Pass --yes to confirm.
+[exit 2]
+
+$ dp runs apply 202610130213-0cfa0b --yes
+✓ Applied 2 file(s). Review with git status / git diff; nothing was staged or committed.
+[exit 0]
+
+$ git -C <work>/projects/da-prompt status --short
+ M src/security.js
+?? test/redact.test.js
+[exit 0]
+
+$ git -C <work>/projects/da-prompt diff --stat
+ src/security.js | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+[exit 0]
+
+# Independent validation with ordinary npm, no da-prompt involved
+
+$ npm run check
+> node scripts/check.mjs
+
+check: ok — 76 files (syntax, imports, unused imports, focused tests)
+check: skipped eslint (not installed; this repository has no runtime or dev dependencies)
+[exit 0]
+
+$ node --test test/redact.test.js test/sandbox.test.js
+# tests 7
+# pass 7
+# fail 0
+[exit 0]
+
+# Shut down
+
+$ dp server stop
+○ Stopped the backend (pid 7521).
+[exit 0]
+
+$ dp server status
+○ not running
+[exit 3]
+script exit 0

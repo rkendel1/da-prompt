@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - run: npm run check
+      - run: npm run build
       - run: npm test
       - name: Headless factory run (offline agents)
         run: FACTORY_OFFLINE_DELAY_MS=0 FACTORY_DATA_DIR=$RUNNER_TEMP/data node src/cli.js "A habit tracker with daily check-ins"

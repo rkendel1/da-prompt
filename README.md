@@ -18,16 +18,220 @@ idea ─▶ 1 PLAN ─▶ 2 AGENTS ─▶ 3 EXECUTION ─▶ 4 ARTIFACTS ─▶ 
 ## Quick start
 
 ```bash
-git clone https://github.com/rkendel1/da-prompt.git
-cd da-prompt
-npm start                     # http://localhost:3000 — no install step, zero dependencies
+git clone https://github.com/rkendel1/da-prompt.git && cd da-prompt
+npm link                                  # or: node src/cli.js …   (no install step, zero dependencies)
+da-prompt setup                           # providers, models, project folders — validated with real requests
+da-prompt run "Add password reset" --project ~/projects/my-app
+da-prompt runs diff <id> && da-prompt runs review <id> approve && da-prompt runs apply <id> --yes
 ```
 
-Open the app, describe an idea, pick a provider and model, and press **Start the factory**.
-The provider and model lists fill themselves from what you have: any provider with a key
-configured, and any local server that is running right now.
+That is the whole loop, from the terminal, without VS Code or a browser. The same backend also serves the web UI
+(`da-prompt server start` prints the URL, or `npm start`; http://localhost:3000): describe an idea, pick a provider and
+model, press **Start the factory**. Requires Node.js 20 or newer.
 
-Requires Node.js 20 or newer.
+
+## Command line (the primary interface)
+
+`da-prompt` is a terminal-first development tool. The CLI and the browser are two clients of **one** local backend
+(`src/server.js`): same factory, same authorization rules, same run state, same evidence. The CLI is a pure HTTP
+client of `/api` — it has no orchestration loop of its own, no run database of its own and **no extra authority because
+it runs on your machine**: a path you type is mapped to an opaque project id by the backend and refused unless it is
+inside an authorized folder, secrets are write-only, and apply/publish need an approval of the exact diff.
+
+### Install and prerequisites
+
+Node.js 20+, git. No `npm install` is needed (zero runtime dependencies).
+
+```bash
+git clone https://github.com/rkendel1/da-prompt.git && cd da-prompt
+npm link                      # puts `da-prompt` on your PATH; or run `node src/cli.js …` / `npm run cli -- …`
+da-prompt --version
+da-prompt doctor              # prerequisites, backend and provider health, with a fix for every problem
+```
+
+### Backend lifecycle
+
+You never have to start anything by hand: the first command that needs the backend starts it **detached on
+127.0.0.1** (`server.json`, `server.lock` and `server.log` live in the data folder, `FACTORY_DATA_DIR`) and later
+commands reuse it. One data folder has at most one server; a second one is refused with the pid of the first, a busy
+port is a clear error, and a stale record from a crashed server is detected and removed.
+
+```bash
+da-prompt server start [--port N]    # explicit start (prints URL, pid, log path); the browser UI is at the same URL
+da-prompt status                     # running? what is it doing?  (exit 3 if not running; never starts anything)
+da-prompt server logs -f
+da-prompt server stop                # --yes if runs are executing (they can be resumed later)
+da-prompt server restart             # applies restart-only settings (host, port)
+da-prompt runs list --url http://host:3000    # or DA_PROMPT_URL=…; use DA_PROMPT_PASSWORD when the server has a password
+da-prompt runs list --no-start       # never launch a backend; exit 3 if none is running
+```
+
+### Setup, providers and models
+
+```bash
+da-prompt setup                                   # interactive on a terminal; asks only for what is missing
+da-prompt setup --non-interactive --provider ollama --model qwen2.5-coder:7b --project-root ~/projects
+printf %s "$ANTHROPIC_API_KEY" | da-prompt providers set-key anthropic --stdin
+da-prompt providers list                           # health of every provider + the current default/planner
+da-prompt providers models ollama                  # discovery only
+da-prompt providers test ollama --model qwen2.5-coder:7b   # connectivity → discovery → a real tool-calling request
+da-prompt providers use ollama --model qwen2.5-coder:7b    # validated first; nothing is saved if it fails
+da-prompt providers planner anthropic --model <model>   # plan with a different model than builds
+da-prompt providers add --label "My vLLM" --provider-url http://gpu:8000/v1 [--stdin]
+```
+
+`providers test` reports the three stages separately — *reachable*, *lists the model*, *answered a real request* — so
+"the server is up" is never mistaken for "the model works". Keys are accepted only on stdin or from a named
+environment variable (`--from-env NAME`), never as arguments, and are never echoed.
+
+### Configuration (no editor needed)
+
+```bash
+da-prompt config list [--group github]    # every setting, its effective value and WHERE it came from
+da-prompt config get maxParallel
+da-prompt config set maxParallel 5        # validated by the backend before anything is saved
+da-prompt config set projectRoots ~/projects ~/work
+printf %s "$GITHUB_TOKEN" | da-prompt config set githubToken --stdin
+da-prompt config unset maxParallel        # fall back to the environment, then the default
+da-prompt config path
+```
+
+Settings are the same ones the browser edits, persisted by the backend in `<data folder>/settings.json` (mode 0600).
+Precedence, highest first: **run option → startup option → saved → environment → default**. The CLI's own
+`--option` flags are run options. One deliberate exception to "CLI > env > persisted > defaults": a value you *saved*
+(in the browser or with `config set`) beats the environment, because a saved value is an explicit later decision and a
+long-lived environment variable should not silently undo it; `config list` always shows which one is in effect and
+`config unset` removes the saved value. Nothing in setup edits `.zshrc` or any shell profile; the CLI itself stores only
+the selected project id in `~/.config/da-prompt/cli.json` (`DA_PROMPT_CONFIG_DIR` to move it).
+
+### Projects
+
+```bash
+da-prompt projects list                    # authorized folders: opaque ids, read-only vs writable, git state
+da-prompt projects use my-app              # by name or id; also: `projects use .` (a path inside an authorized folder)
+da-prompt projects connect acme/api --ref develop    # a GitHub repo: read, edited in an isolated clone, never pushed unless you publish
+da-prompt projects inspect                 # stack, test commands, instruction files, isolation mode
+da-prompt projects current
+da-prompt projects init "A habit tracker"  # start a new application (same as `run … --new`)
+```
+
+### Run, monitor and recover
+
+```bash
+da-prompt run "Add password reset" --project my-app [--pax] [--provider P --model M] [--attempts 3]
+da-prompt run "…" --project . --detach           # returns the run id immediately
+da-prompt runs follow <id>                       # reconnects and resumes from the last event; Ctrl-C only detaches
+da-prompt runs list [--active] [--status needs_attention]
+da-prompt runs show <id>        # tasks, verification, delivery, review, next steps
+da-prompt runs tasks <id>       # the task graph; retries/escalations/errors per task
+da-prompt runs logs <id> [--tail 50] [--type verify] [-f]
+da-prompt runs cancel <id>
+da-prompt runs resume <id>      # stopped / interrupted / cancelled / failed / needs-attention runs
+da-prompt runs retry <id> <task> [--description "…"] [--verify "cmd"]   # an escalated task, fresh attempts
+da-prompt runs skip <id> <task>
+```
+
+A run executes on the backend, so closing the terminal does not stop it; `--cancel-on-interrupt` makes Ctrl-C cancel
+instead of detach, and `--wait-timeout SECONDS` stops *following* (exit 7) without touching the run.
+
+### Changes, verification and evidence
+
+```bash
+da-prompt runs files <id>              # changed files and line counts
+da-prompt runs diff <id> [--file src/x.js] [--out change.patch]
+da-prompt runs tests <id>              # the factory's checks: baseline → result; --run re-runs them now
+da-prompt runs verify <id>             # re-run the checks in the run's workspace (recorded apart from the verdict)
+da-prompt runs evidence <id> [--strict]   # AGENT CLAIMS · FACTORY VERIFICATION · PAX OBSERVATION, kept separate
+da-prompt runs report <id> --out report.md
+da-prompt runs artifacts <id> [--get changes.patch --out p.patch]
+```
+
+Nothing here changes your project. Previewing and reviewing are separate from applying.
+
+### PAX
+
+PAX is resolved from the **backend's** `PATH` (or `config set paxPath /full/path/pax`); da-prompt never installs it.
+
+```bash
+da-prompt pax status                   # path, version, capabilities — and which environment was inspected
+da-prompt pax probe /opt/pax/bin/pax   # check an executable without saving it
+da-prompt pax verify <run-id> [--steps info,doctor,drift] [--confirm-tests] [--fail-on-findings]
+da-prompt pax evidence <run-id>
+```
+
+PAX output is *evidence*, shown apart from agent claims and from the factory's own verification, and it never changes a
+run's verdict. Missing, incompatible (a different program called `pax`, e.g. the POSIX archiver), timing-out and failing
+PAX are each reported as such; drift is a finding (exit 6 with `--fail-on-findings`), a tool failure is exit 1.
+
+### Apply and publish (explicit, never automatic)
+
+```bash
+da-prompt runs review <id> approve --note "read the diff"     # approval is bound to the exact patch (sha256)
+da-prompt runs apply <id> --yes          # write the approved files into your directory — nothing staged or committed
+da-prompt runs apply <id> --branch --yes # or add the work to your repo as a branch instead
+da-prompt runs publish <id> --yes        # GitHub runs: push da-prompt/<id> and open a PR (needs githubToken; --no-pr to push only)
+```
+
+`apply` refuses if the files changed since the run started, preserves your uncommitted work and never overwrites it
+silently. Without a terminal, `--yes` is required; there is no auto-merge and no deploy command.
+
+### Scripting: `--json`, exit codes, timeouts
+
+Every command takes `--json` (one JSON document on stdout; errors too, as `{"error":{"code","exitCode","message","hint"}}`;
+`run`/`follow` stream NDJSON events and end with a `{"type":"result"}` line), `--quiet`, `--no-color` (and `NO_COLOR`),
+`--timeout SECONDS` per request, and never prompt when stdin is not a terminal.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | success (for a run: completed **and** verified by the factory) |
+| 1 | failed (run failed, check failed, provider not usable, step failed, `doctor` found a problem) |
+| 2 | usage error (bad flag/argument, missing `--yes` when non-interactive) |
+| 3 | backend unreachable / not running / PAX not available |
+| 4 | refused (not approved, not authorized, password needed, path outside the authorized folders) |
+| 5 | not found (run, task, project, setting) |
+| 6 | needs attention (escalated tasks, PAX findings with `--fail-on-findings`) |
+| 7 | `--wait-timeout` elapsed (the run keeps going) |
+| 8 | run cancelled |
+| 130 | interrupted while following (the run keeps going) |
+
+### When da-prompt itself is broken: the independent development path
+
+Nothing below needs da-prompt, a backend, a network or an LLM.
+
+```bash
+npm test             # the full suite (offline agents, no keys); exit 0 = pass
+npm run check        # lint-style static checks: syntax, relative imports resolve, unused imports, stray .only; `--json` for CI
+npm run build        # "build": package contents (npm pack --dry-run), CLI entry, every module imports; exit 1 on failure
+npm run validate     # check + build + test
+```
+
+There is no TypeScript or bundler in this repository, so there is no separate type-check step and `build` compiles
+nothing; `check` reports what it could not run (e.g. ESLint is not installed) as *skipped*, never as passed. The same
+three commands run in CI (`.github/workflows/ci.yml`).
+
+Inspecting, reviewing, reverting and recovering with ordinary git (a run never touches your branch until `apply`):
+
+```bash
+git status; git diff; git log --oneline -5         # what is in your tree
+git checkout -- <file>  ·  git stash -u            # throw away / set aside an applied change
+git apply -R path/to/changes.patch                 # undo an applied patch (the run's patch is in its artifacts)
+git apply --check path/to/changes.patch            # would it still apply?
+ls "$FACTORY_DATA_DIR/runs/<id>/"                  # run.json, events.jsonl, workspace/, delivery/ (report, patch, tar.gz), pax/
+git -C "$FACTORY_DATA_DIR/runs/<id>/workspace" log --oneline   # the isolated clone: inspect, test or push it yourself
+tar -xzf "$FACTORY_DATA_DIR/runs/<id>/delivery/project.tar.gz" -C /tmp/inspect    # the changed files
+```
+
+After a crash or reboot: `da-prompt runs list` shows interrupted runs; `da-prompt runs resume <id>` continues them. If
+the CLI cannot start a backend, `da-prompt server logs`, or read `<data>/server.log`; stale records are cleaned up
+automatically, or delete `<data>/server.json` and `server.lock` by hand when no `node src/server.js` is running.
+
+### Self-hosting demonstration
+
+[`docs/selfhost/`](docs/selfhost/) records a real run of this CLI on this repository: one bounded change (`redact()` now
+masks `Bearer` tokens and `x-api-key` header values, with tests), done through `setup → run → follow → evidence → diff →
+review → apply`, then validated with plain npm. Read [`docs/selfhost/README.md`](docs/selfhost/README.md) for what was
+real and what was a stand-in (no real model credentials were available, so a scripted OpenAI-compatible server played the
+model).
 
 ## Using da-prompt from the browser
 
@@ -206,7 +410,11 @@ export FACTORY_PASSWORD=choose-something   # agents run shell commands
 npm start
 ```
 
-### Headless
+### Headless (compatibility runner)
+
+The original in-process runner is kept: `da-prompt "<idea>" [flags]` (any first argument that is not a command, with spaces or
+flags) builds without a backend and prints the result. Prefer `da-prompt run …`, which uses the shared backend, is
+observable from the browser and supports review/apply/publish.
 
 ```bash
 npm run factory -- "A shared reading list for book clubs" \
@@ -490,6 +698,8 @@ See `.env.example`.
 ## Development
 
 ```bash
+npm run validate  # check + build + test, no da-prompt or LLM involved (see "Command line" above)
+npm run check     # static checks      ·  npm run build  # package/entry/import smoke
 npm test          # graph, sandbox, prompt, providers (incl. full runs through mock Ollama/OpenAI servers), factory, HTTP API,
                   # existing projects (temp git repos, a mock GitHub, scripted agents, CLI; the browser test needs Playwright and is skipped without it)
 npm run dev       # restart on change
@@ -509,7 +719,11 @@ src/deliver.js     report, archive, optional git push
 src/providers/     registry (presets, discovery, saved keys), anthropic, openai (OpenAI-compatible
                    + Ollama native), tooltext (JSON tool-call fallback), offline (deterministic demo)
 src/server.js      HTTP API, SSE, preview proxy, static UI
-src/cli.js         headless runner
+src/cli.js         entry: the CLI (src/cli/) or, for a bare idea, the legacy in-process runner (src/cli/legacy.js)
+src/cli/           terminal client of the backend: client.js (HTTP/SSE), backend.js (start/stop), commands/*
+src/runtime.js     server.json / lock / log: the single-instance backend record
+scripts/           check.mjs and build.mjs: dependency-free static checks and package smoke test
+docs/selfhost/     the self-hosting demonstration (stand-in model, script, transcripts)
 public/            the web app
 templates/         files the offline agents generate
 ```

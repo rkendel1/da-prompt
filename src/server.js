@@ -17,7 +17,8 @@ import { probePax, listEvidence, STEPS as PAX_STEPS, SEMANTICS as PAX_SEMANTICS 
 import { buildEvidence } from './evidence.js';
 import { redact } from './security.js';
 import { redactUrl } from './gitutil.js';
-import { ProjectError, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
+import { writeRecord, removeRecord, liveServer } from './runtime.js';
+import { ProjectError, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -142,7 +143,7 @@ export async function createServer(overrides = {}) {
     if (parts[1] !== 'runs') throw new HttpError(404, 'not found');
 
     if (parts.length === 2) {
-      if (method === 'GET') return json(res, 200, { runs: await store.list() });
+      if (method === 'GET') return json(res, 200, { runs: (await store.list()).map((r) => ({ ...r, executing: factory.isActive(r.id) })) });
       if (method === 'POST') {
         const body = await readBody(req);
         let run;
@@ -190,6 +191,14 @@ export async function createServer(overrides = {}) {
       }
       return json(res, 202, { run: publicRun(await store.load(id), factory, previews) });
     }
+    // Event history as JSON (the /events stream never ends): ?after=<seq>&limit=<n>&tail=<n>
+    if (sub === 'log' && method === 'GET') {
+      const all = await store.events(id, { after: Math.max(0, Number(url.searchParams.get('after')) || 0) });
+      const tail = Number(url.searchParams.get('tail')) || 0;
+      const limit = Math.min(5000, Number(url.searchParams.get('limit')) || 5000);
+      const events = tail > 0 ? all.slice(-tail) : all.slice(0, limit);
+      return json(res, 200, { events, lastSeq: all.at(-1)?.seq ?? (Number(url.searchParams.get('after')) || 0), total: all.length });
+    }
     if (sub === 'evidence' && method === 'GET') return json(res, 200, { evidence: buildEvidence(run) });
     if (sub === 'artifacts' && method === 'GET') {
       const delivery = [];
@@ -204,6 +213,13 @@ export async function createServer(overrides = {}) {
       const body = await readBody(req);
       try {
         return json(res, 200, { run: publicRun(await factory.runPax(id, { steps: body.steps, confirmTests: body.confirmTests === true }), factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
+    if (sub === 'verify' && method === 'POST') {
+      try {
+        return json(res, 200, { run: publicRun(await factory.reverify(id), factory, previews) });
       } catch (err) {
         throw asHttp(err);
       }
@@ -295,6 +311,15 @@ export async function createServer(overrides = {}) {
     const method = req.method;
     try {
       if (parts[2] === 'directories' && method === 'GET') return json(res, 200, await listDirectories(cfg));
+      // Maps a path on the server machine to an opaque id, but only inside an authorized root. It grants nothing a
+      // directoryId would not, and (like other host-authority actions) only an authenticated or local client may ask.
+      if (parts[2] === 'resolve' && method === 'POST') {
+        if (!isAdmin(req, cfg)) throw new HttpError(403, 'Resolving a path needs an authenticated session (set an access password) or a client on the server machine.');
+        const body = await readBody(req);
+        const id = directoryIdForPath(cfg, String(body.path || ''));
+        const dir = resolveDirectory(cfg, id);
+        return json(res, 200, { id: dir.id, name: dir.name, readOnly: dir.readOnly });
+      }
       if (parts[2] === 'inspect' && method === 'POST') {
         const body = await readBody(req);
         const src = body.source && typeof body.source === 'object' ? body.source : body;
@@ -375,6 +400,10 @@ export async function createServer(overrides = {}) {
 
   let healthCache = null;
   async function systemApi(req, res, parts, url) {
+    if (parts[2] === 'status' && req.method === 'GET') {
+      const env = describeEnvironment();
+      return json(res, 200, { version: env.version, pid: process.pid, uptimeSeconds: env.uptimeSeconds, listening: { host: cfg.host, port: cfg.port }, environment: { kind: env.kind, container: env.container, hostname: env.hostname, platform: env.platform, node: env.node }, auth: Boolean(cfg.password), admin: isAdmin(req, cfg), active: [...factory.active.keys()], dataDirWritable: true });
+    }
     if (parts[2] === 'health' && req.method === 'GET') {
       if (url.searchParams.get('refresh') === '1' || !healthCache || Date.now() - healthCache.at > 5000) healthCache = { at: Date.now(), result: await runHealth({ cfg, factory }) };
       return json(res, 200, { ...healthCache.result, admin: isAdmin(req, cfg), auth: Boolean(cfg.password), environment: describeEnvironment() });
@@ -545,19 +574,36 @@ export async function createServer(overrides = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await createServer();
+  // One backend per data directory: a second one would share run state with the first and fight over it.
+  const running = await liveServer(app.cfg);
+  if (running && running.pid !== process.pid) {
+    console.error(`da-prompt is already running for ${app.cfg.dataDir} (pid ${running.pid}, ${running.url}).\nStarting a second server would share its runs. Use that one, or stop it first: da-prompt server stop`);
+    process.exit(1);
+  }
+  app.server.on('error', (err) => {
+    console.error(err.code === 'EADDRINUSE' ? `Port ${app.cfg.port} is already in use by another program. Choose another with PORT=<n> (or da-prompt server start --port <n>).` : `Server error: ${err.message}`);
+    process.exit(1);
+  });
   app.server.listen(app.cfg.port, app.cfg.host, () => {
+    const shown = ['0.0.0.0', '::'].includes(app.cfg.host) ? 'localhost' : app.cfg.host;
+    writeRecord(app.cfg, { pid: process.pid, host: app.cfg.host, port: app.cfg.port, url: `http://${shown}:${app.cfg.port}`, startedAt: new Date().toISOString(), managed: process.env.DA_PROMPT_MANAGED === '1', dataDir: app.cfg.dataDir });
     console.log(`da-prompt software factory on http://localhost:${app.cfg.port}  (data: ${app.cfg.dataDir})`);
     app.factory.providers.discover().then(({ providers, defaultProvider }) => {
       for (const p of providers.filter((x) => x.status === 'ready')) console.log(`  ✓ ${p.label}: ${p.models.length} model(s)${p.id === defaultProvider ? '  ← default' : ''}`);
       const off = providers.filter((x) => x.status !== 'ready').map((x) => x.label);
       if (off.length) console.log(`  · not available: ${off.join(', ')}`);
     });
-    if (!app.cfg.password && app.cfg.host !== '127.0.0.1') console.log('note: set FACTORY_PASSWORD before exposing this server; agents run shell commands.');
+    if (!app.cfg.password && !['127.0.0.1', 'localhost', '::1'].includes(app.cfg.host)) console.log('note: set FACTORY_PASSWORD before exposing this server; agents run shell commands.');
   });
+  let stopping = false;
   const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    removeRecord(app.cfg);
     await app.close();
     process.exit(0);
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  process.on('exit', () => removeRecord(app.cfg));
 }
