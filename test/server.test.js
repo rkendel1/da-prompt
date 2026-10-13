@@ -95,7 +95,9 @@ test('providers API: discovery, add, update without leaking keys, remove', async
   assert.equal(added.status, 201);
   const { provider } = await added.json();
   assert.equal(provider.status, 'unreachable');
-  assert.equal(provider.keyHint, '…mnop');
+  assert.equal(provider.hasKey, true);
+  assert.equal(provider.keyHint, undefined, 'not even a fragment of a saved key is returned');
+  assert.ok(!JSON.stringify(provider).includes('mnop'));
   const patched = await fetch(`${base}/api/providers/my-gateway`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ toolMode: 'json' }) });
   assert.equal((await patched.json()).provider.toolMode, 'json');
   const all = await (await fetch(`${base}/api/providers`)).text();

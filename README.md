@@ -29,6 +29,131 @@ configured, and any local server that is running right now.
 
 Requires Node.js 20 or newer.
 
+## Using da-prompt from the browser
+
+Everything routine is done in the web UI; no editor, terminal or CLI is needed after the server is running.
+
+| Where | What you do there |
+| --- | --- |
+| **New run** (`#/`) | Pick a project (new, authorized local folder, GitHub repo), describe the change, choose models, review the *"what this run may do"* summary, start. |
+| **Run view** | Follow the seven layers and the Connect/Inspect/Baseline stages live (it reconnects by itself after a refresh or a network blip), cancel, resume, retry/skip escalated tasks. Tabs: Overview, Task graph, Activity, Files (changed files + diff), **Evidence**, Delivery. |
+| **History** (`#/history`) | Every run on record, searchable by task, project, id, model; filter by status, project type and verification. |
+| **Setup & health** (`#/setup`) | First-run checklist and ongoing health. Every line is a real probe, with what was observed and the next step. |
+| **Settings** (`#/settings`) | The supported configuration, saved on the server, with the source of each value. |
+| **PAX** (`#/pax`) | Where PAX was found, its version, what this install can do, and what its evidence means. |
+| **Providers** (`#/providers`) | Provider URLs/keys, model discovery, connection tests. |
+
+### Launching it
+
+Start the server once (`npm start`, or the Docker image) and open `http://localhost:3000`. That one start is the only
+host-level step: a browser cannot start, install or restart the program on your machine. Everything below happens in the UI.
+
+### First-run setup (in the browser)
+
+1. Open the app. If something blocks real work, **New run** shows *"Finish setup before your first run"* and the sidebar dot is red.
+2. **Setup & health** runs real checks: the backend, the data folder (a real write), model providers (a real call to each),
+   the default model (is it actually offered?), the delivery folder, project folders (read/write access), `git --version`,
+   the GitHub API (a real `GET /user` with your token), PAX (`pax --version` / `--help`) and access protection. Each problem says
+   *what was observed*, *what to do*, and gives a button when the UI can do it, or marks it **host-level** when only the
+   machine's owner can (installing git or PAX, file permissions, restarting the process).
+3. **Providers**: add a key or point at a local server (Ollama, LM Studio, …); the page tests the connection and lists the models
+   the provider really offers. Provider keys are write-only.
+4. **Settings → Models**: choose the default provider and model (the model list is the provider's own), and optionally a separate
+   planner provider/model.
+5. **Settings → Folders and projects**: authorize the folder(s) that contain your projects.
+6. **Settings → GitHub**: paste a token to clone private repos and publish; **Settings → Server**: set an access password.
+7. Re-check on **Setup & health**, then start a run.
+
+### Persistent settings and precedence
+
+Settings the UI saves live in `<data dir>/settings.json` (mode `0600`, written atomically, never sent to the browser, never in
+logs). Every setting is a field the server genuinely reads; nothing is invented for the page. Precedence, highest first:
+
+1. **Run-specific option** (the New Run form / API body) — for example attempts, parallelism, token budget, PAX on/off.
+2. **Startup option** (programmatic overrides; fixed while the server runs).
+3. **Saved in the UI**.
+4. **Environment variable**.
+5. **Built-in default**.
+
+The UI shows the effective value, which of these supplied it, and — when the environment *also* sets it — that the saved value
+wins. **Reset** removes the saved value and falls back to the environment/default. *Saved beats environment* on purpose
+(the UI is the product and an environment variable cannot be changed from a browser); this is also how provider keys and URLs
+already behaved. Values are validated before anything is saved: an invalid batch saves nothing.
+Each setting is marked **applies immediately** or **needs a restart** (listen address, port): restart-only values are saved, flagged
+*restart pending*, and used the next time the server starts. **The browser cannot restart the server**; restart it where it runs
+(for example `docker restart`).
+
+Secrets (GitHub token, access password) are write-only: the UI shows *configured · source*, never a value or a fragment.
+Settings that grant host authority — project folders, delivery folder, GitHub token/API URL/hosts, the PAX path, the password,
+the listen address — are **privileged**: they can only be read or changed when the server has an access password
+(`FACTORY_PASSWORD`, so every client is authenticated) or the browser is on the server machine (loopback, and not relayed
+through a proxy). Otherwise they are hidden/locked with an explanation. The data folder is chosen at startup and shown read-only.
+
+### Local vs remote / container backends
+
+da-prompt always looks things up in **the server process's own environment**: its PATH, its folders, its `localhost`. Setup &
+health says whether the server runs on a host or in a container. In a container, a PAX or Ollama installed on your computer is
+not visible (`127.0.0.1` is the container); use `host.docker.internal`/the host's address for providers, mount your projects as
+volumes, and install PAX in the image. The UI never pretends otherwise.
+
+### PAX
+
+[PAX](https://github.com/rkendel1/pax) inspects project artifacts and reports structured observations (`pax --json …`). da-prompt
+integrates it through `src/pax.js`:
+
+- **Discovery** — `pax` on the server process's PATH, or the executable path set in Settings (`FACTORY_PAX_PATH`). The page shows the
+  resolved path, how it was found and the version.
+- **Capability checks** read the installed binary: identity from `--version` (`pax <semver>`), commands/flags from `--help`, and per-step
+  availability including minimum versions (for example `--json test` needs ≥ 0.3.0). A different program called `pax` (such as the POSIX
+  archiver), an unrecognisable help, a missing or non-executable file, a hang (timeout) are each reported as such.
+- **Steps** are a fixed catalog of documented commands — `info`, `doctor`, `reality`, `drift`, `graph` (read-only), `test-plan`
+  (`--dry-run`) and `test` (runs the project's native tests through PAX; opt-in, needs confirmation) — run without a shell, in the run's
+  workspace, with a timeout and process-group kill. No guessed flags.
+- **Evidence** — per step: exit status, interpretation (for example `drift` exit 1 = *drift detected*, a finding; `pax.execution-result.v1`
+  parsed strictly), a structured summary, stderr tail, and artifact files under `<run>/pax/` with sizes and SHA-256. Host paths are replaced
+  by `<workspace>` before anything is stored. Collect it per run (New Run checkbox), automatically (Settings), or later from the **Evidence** tab.
+
+**Evidence semantics.** An agent's claim is not evidence. A process exiting 0 is not proof the requested outcome was achieved. PAX
+observations are stored as `run.pax`, shown in their own section, and **never** feed the checklist, the verdict or readiness — a run is
+*verified* only by the project's own checks, whether or not PAX was present or invoked. Where sources disagree (for example agents say
+done, the factory says failed, PAX says its test run passed) the Evidence tab says so instead of resolving it. Missing or inconclusive
+evidence is listed explicitly.
+
+**Validating the real PAX install (host-side smoke test).** CI uses deterministic fake executables; to check your real install run, on
+the machine that runs da-prompt:
+
+```bash
+pax --version && pax --help | head -5         # expect "pax <version>" and the PAX help
+npm test -- --test-name-pattern "real PAX smoke"   # skipped unless a real pax is found (set DA_PROMPT_PAX_BIN=/path/to/pax to force one)
+```
+
+It runs every step against a throw-away Cargo project and checks the outcomes and that no host path is stored. It was run against PAX 0.5.0
+built from `rkendel1/pax` while developing this feature.
+
+### Project authorization, review, apply and publish
+
+Local projects come only from the folders authorized in Settings (see *Existing projects* below); the browser only ever holds opaque
+ids. The New Run screen shows exactly what a run may do (reads, where edits happen, whether anything can be applied or published, deploy,
+PAX, models). **Preview, apply, publish and deploy are separate decisions**:
+
+1. **Preview** — the Files tab shows changed files and diffs; the Evidence tab shows verification, baseline comparison and PAX.
+2. **Review** — Delivery → *Approve changes* / *Reject*. The approval is bound to a hash of the exact change set; if the changes differ later
+   you must approve again. Rejecting blocks apply and publish.
+3. **Apply** (local) — writes only the changed files, only if none changed in your directory since the baseline; nothing is staged or
+   committed. Or add the run as a branch in your repository. A confirmation states exactly what will be written.
+4. **Publish** (GitHub) — pushes only the run branch (never forced, never the base) and opens a pull request (a draft unless fully verified);
+   idempotent on retry. The PR link and branch can be opened or copied from the UI. Creation-time *publish* (the New Run checkbox) is itself an
+   explicit authorization.
+5. **Deploy** — unchanged: off for existing projects unless you authorize a local preview.
+
+### Remaining host-level prerequisites
+
+- Starting the server (and restarting it after *restart-only* settings).
+- Installing **git** and **PAX** (and Ollama or other local model servers) on the machine/image that runs the server; file permissions on
+  project folders. The UI detects and explains each, but cannot perform them.
+- Setting `FACTORY_PASSWORD` in the environment when the server runs in a container behind a published port (otherwise host-authority
+  settings stay locked, because a containerised request does not come from loopback). Everything else can be set in the UI.
+
 ## Providers and models
 
 The factory works with any LLM that can chat. Pick the provider and model per run in the
@@ -317,6 +442,8 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 | `FACTORY_PROJECT_ROOTS_READONLY` | — | Same, but results can only be downloaded, never applied back |
 | `FACTORY_GIT_HOSTS` | `github.com` | Git hosts GitHub-backed runs may use (add a GitHub Enterprise host) |
 | `FACTORY_GITHUB_API_URL` | host default | Override the REST API base (Enterprise, testing) |
+| `FACTORY_PAX_PATH` | — | PAX executable (empty = `pax` on the server's PATH) |
+| `FACTORY_PAX_TIMEOUT_MS` | `120000` | Timeout per PAX step |
 | `FACTORY_OFFLINE_FAULTS` | `on` | Offline agents: `on` injects one bug the feedback loop fixes, `persistent` fails a full round to demo escalation, `off` |
 
 See `.env.example`.
@@ -339,8 +466,13 @@ See `.env.example`.
 | GET | `/api/runs/:id/files[?path=]` | Workspace listing / file content |
 | GET | `/api/projects/directories` | Authorized local directories (ids, names, git state — no paths) |
 | POST | `/api/projects/inspect` | Read-only summary of `{ source: { mode: 'local', directoryId } }` or `{ mode: 'github', repoUrl, ref }` |
+| GET / PUT | `/api/settings` | Effective settings with sources and masking / validate + save (`{ values: { key: value \| null } }`; `null` resets) |
+| GET | `/api/system/health[?refresh=1]` | Real health probes (the unauthenticated `/api/health` stays a bare liveness check) |
+| GET · POST | `/api/pax` · `/api/pax/probe` | PAX status, capability catalog / probe a candidate executable (privileged) |
+| GET | `/api/runs/:id/evidence` · `/artifacts` | Agent claims vs factory verification vs PAX, missing evidence / downloadable artifacts (`/download/pax/<file>`) |
+| POST | `/api/runs/:id/review` · `/pax` | Approve/reject/clear the delivered changes / collect PAX evidence `{ steps, confirmTests }` |
 | GET | `/api/runs/:id/changes[?path=]` | Changed files since the baseline / the diff of one file |
-| POST | `/api/runs/:id/publish` · `/apply` | Explicit: push the run branch + PR `{ pullRequest }` / apply to the local directory `{ mode: 'working-tree' \| 'branch' }` |
+| POST | `/api/runs/:id/publish` · `/apply` | Explicit, and require an approval of the exact changes (`/review`): push the run branch + PR `{ pullRequest }` / apply to the local directory `{ mode: 'working-tree' \| 'branch' }` |
 | GET | `/api/runs/:id/report` · `/download/:file` | Report, `project.tar.gz` (changed files only for existing projects), `test-results.json`, `changes.patch` |
 | ANY | `/preview/:id/*` | Proxy to the deployed app |
 

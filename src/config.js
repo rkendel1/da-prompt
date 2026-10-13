@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SettingsStore } from './settings.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -59,8 +60,16 @@ export function loadConfig(overrides = {}) {
     // ever sent to these hosts. The REST API base defaults to api.github.com / https://<host>/api/v3.
     gitHosts: (process.env.FACTORY_GIT_HOSTS || 'github.com').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
     githubApiUrl: process.env.FACTORY_GITHUB_API_URL || '',
+    // PAX (project observation). Empty path = look up "pax" on the backend process's PATH.
+    paxPath: process.env.FACTORY_PAX_PATH || '',
+    paxTimeoutMs: int('FACTORY_PAX_TIMEOUT_MS', 120_000),
+    paxAutoRun: false,
+    paxSteps: ['info', 'doctor', 'reality', 'drift'],
     // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).
     gitConfig: [],
   };
-  return { ...cfg, ...overrides, defaults: { ...cfg.defaults, ...(overrides.defaults || {}) } };
+  const merged = { ...cfg, ...overrides, defaults: { ...cfg.defaults, ...(overrides.defaults || {}) } };
+  // Settings saved from the UI (<data dir>/settings.json) are layered on top of the environment; see src/settings.js.
+  merged.settings = new SettingsStore(merged, overrides);
+  return merged;
 }

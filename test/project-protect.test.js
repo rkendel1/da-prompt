@@ -6,7 +6,7 @@ import { OfflineProvider } from '../src/providers/offline.js';
 import { Workspace } from '../src/sandbox.js';
 import { existingProjectPolicy } from '../src/security.js';
 import { verifyIntegrity } from '../src/project.js';
-import { makeRepo, makeRoot, makeRemote, dirId, git, writeFiles, setup, Scripted, task, plan, toolUse, done, NODE_FILES, PY_FILES } from './project-helpers.js';
+import { approve, makeRepo, makeRoot, makeRemote, dirId, git, writeFiles, setup, Scripted, task, plan, toolUse, done, NODE_FILES, PY_FILES } from './project-helpers.js';
 import { waitFor, tmpDir } from './helpers.js';
 
 const widgets = (extra = {}) => makeRoot({ widgets: (d) => fs.cpSync(makeRepo({ ...NODE_FILES, ...extra }), d, { recursive: true }) });
@@ -62,6 +62,8 @@ test('applying a result writes only the changed files, keeps your uncommitted wo
   writeFiles(dir, { 'src/greet.js': "export const greet = (name) => `Hello, ${name}! (edited by me)`;\n" });
   const head = git(dir, 'rev-parse', 'HEAD');
 
+  await assert.rejects(factory.applyLocal(run.id, { mode: 'working-tree' }), /review the changes and approve them/);
+  await approve(factory, run.id);
   const applied = await factory.applyLocal(run.id, { mode: 'working-tree' });
   assert.deepEqual(applied.delivery.local.applied.files.map((f) => f.path).sort(), ['README.md', 'src/new.js']);
   assert.equal(fs.readFileSync(path.join(dir, 'src/new.js'), 'utf8'), 'export const x = 1;\n');
@@ -83,6 +85,7 @@ test('files changed in the source after the baseline fail the apply safely and n
 
   fs.writeFileSync(path.join(dir, 'README.md'), '# widgets\nNEWER WORK from the user\n'); // edited after the baseline
   writeFiles(dir, { 'src/new.js': 'export const x = "someone else created this";\n' }); // created after the baseline
+  await approve(factory, run.id);
   const before = snapshot(dir);
   await assert.rejects(factory.applyLocal(run.id, { mode: 'working-tree' }), (e) => {
     assert.equal(e.status, 409);
@@ -108,6 +111,7 @@ test('a deletion conflicts when the source file changed; read-only roots refuse 
   const run = await factory.start((await factory.createRun({ idea: 'remove greet', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets') } })).id);
   assert.deepEqual(run.changes.files.map((f) => `${f.status} ${f.path}`).sort(), ['D src/greet.js', 'D test/greet.test.js']);
   assert.ok(run.delivery.deleted);
+  await approve(factory, run.id);
   fs.appendFileSync(path.join(dir, 'src/greet.js'), '// touched\n');
   await assert.rejects(factory.applyLocal(run.id, { mode: 'working-tree' }), (e) => e.conflicts.length === 1 && e.conflicts[0].path === 'src/greet.js');
 
@@ -125,6 +129,7 @@ test('exporting a branch adds one ref to your repository without checking it out
   const { cfg, factory } = setup({ provider: writer({ 'src/new.js': 'export const x = 1;\n' }), cfg: rootCfg });
   const run = await factory.start((await factory.createRun({ idea: 'add x', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets') } })).id);
   const before = snapshot(dir);
+  await approve(factory, run.id);
   const out = await factory.applyLocal(run.id, { mode: 'branch' });
   assert.equal(out.delivery.local.branch.branch, `da-prompt/${run.id}`);
   const after = snapshot(dir);
@@ -139,6 +144,7 @@ test('exporting a branch adds one ref to your repository without checking it out
 
   // Snapshot runs have no shared history, so they cannot export a branch.
   const snap = await factory.start((await factory.createRun({ idea: 'again', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets'), workingMode: 'snapshot' } })).id);
+  await approve(factory, snap.id);
   await assert.rejects(factory.applyLocal(snap.id, { mode: 'branch' }), (e) => e.status === 409 && /clone-mode/.test(e.message));
 });
 
@@ -158,6 +164,7 @@ test('non-git folders: snapshot only, patch/archive delivered, no git delivery a
   assert.ok(run.delivery.patch);
   assert.equal(run.delivery.publication, undefined);
   assert.match(fs.readFileSync(path.join(store.deliveryDir(run.id), 'changes.patch'), 'utf8'), /\+def sub/);
+  await approve(factory, run.id);
   await assert.rejects(factory.applyLocal(run.id, { mode: 'branch' }), /clone-mode/);
   await assert.rejects(factory.publish(run.id), (e) => /only GitHub-backed runs/.test(e.message));
   // The non-git folder can still receive the result, with the same conflict rules.

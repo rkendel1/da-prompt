@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { verdictOf } from './deliver.js';
 
 /** File-backed persistence for runs: run.json (state), events.jsonl (record of work), workspace/, delivery/. */
 export class RunStore {
@@ -26,6 +27,10 @@ export class RunStore {
   }
   workspaceDir(id) {
     return path.join(this.runDir(id), 'workspace');
+  }
+  /** PAX evidence files for a run (kept outside the workspace). */
+  paxDir(id) {
+    return path.join(this.runDir(id), 'pax');
   }
   /** Factory notes (plan, lessons) for runs against existing projects: never written into the project. */
   notesDir(id) {
@@ -85,6 +90,15 @@ export class RunStore {
           idea: r.inputs.idea,
           status: r.status,
           provider: r.provider,
+          model: r.model,
+          startedAt: r.startedAt,
+          finishedAt: r.finishedAt,
+          error: r.error ? String(r.error).slice(0, 200) : undefined,
+          verdict: r.source && r.finalVerification ? verdictOf(r) : undefined,
+          review: r.review?.decision,
+          publication: r.delivery?.publication ? { state: r.delivery.publication.state, pr: r.delivery.publication.pr?.url, prNumber: r.delivery.publication.pr?.number } : undefined,
+          pax: r.pax ? r.pax.state : undefined,
+          checklistOk: r.checklist?.length ? r.checklist.every((c) => c.ok) : undefined,
           createdAt: r.createdAt,
           updatedAt: r.updatedAt,
           source: r.source?.mode && r.source.mode !== 'new' ? { mode: r.source.mode, label: r.source.label } : undefined,

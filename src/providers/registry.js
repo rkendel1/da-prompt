@@ -143,7 +143,6 @@ export class ProviderRegistry {
       needsKey: Boolean(p.needsKey),
       hasKey: Boolean(p.apiKey),
       keySource: p.keySource,
-      keyHint: p.apiKey ? `…${p.apiKey.slice(-4)}` : null,
       keyEnv: p.keyEnv?.[0] || null,
       keyUrl: p.keyUrl || null,
       enabled: p.enabled !== false,

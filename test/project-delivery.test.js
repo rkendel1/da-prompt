@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { publishRun } from '../src/publish.js';
-import { makeRepo, makeRoot, makeRemote, startMockApi, dirId, git, writeFiles, setup, Scripted, task, plan, toolUse, done, PY_FILES } from './project-helpers.js';
+import { approve, makeRepo, makeRoot, makeRemote, startMockApi, dirId, git, writeFiles, setup, Scripted, task, plan, toolUse, done, PY_FILES } from './project-helpers.js';
 import { tmpDir } from './helpers.js';
 
 const TOKEN = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
@@ -39,6 +39,8 @@ test('publishing is explicit: with publish off nothing is pushed or opened, and 
   assert.equal(api.calls.length, 0);
   assert.equal(git(remote.bare, 'branch', '--list').replace(/\*/g, '').trim(), 'main');
 
+  await assert.rejects(factory.publish(run.id), /review the changes and approve them/);
+  await approve(factory, run.id);
   const published = await factory.publish(run.id, { pullRequest: true });
   const pub = published.delivery.publication;
   assert.equal(pub.state, 'pr-created');
@@ -97,6 +99,7 @@ test('retrying delivery is idempotent: same branch, same commit, same pull reque
   assert.equal(first.state, 'pr-created');
   const pushedAt = first.pushedAt;
 
+  await approve(factory, run.id);
   const again = (await factory.publish(run.id)).delivery.publication;
   assert.equal(again.state, 'pr-exists');
   assert.equal(again.pr.number, 1);
@@ -140,6 +143,7 @@ test('a pull-request failure is reported as such: the branch is pushed, verifica
   assert.doesNotMatch(report, /Pull request: http/);
 
   api.failWith(null);
+  await approve(factory, run.id);
   const retried = (await factory.publish(run.id)).delivery.publication;
   assert.equal(retried.state, 'pr-created');
   assert.equal(retried.prError, undefined);

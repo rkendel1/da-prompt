@@ -182,6 +182,8 @@ test('a local run over HTTP: events, changes, diff, downloads, apply (idempotent
 
   // Nothing was written until we ask.
   assert.equal(fs.existsSync(path.join(roots.dirs.widgets, 'docs')), false);
+  assert.equal((await post(`/api/runs/${run.id}/apply`, { mode: 'working-tree' })).status, 409, 'applying needs an approval first');
+  assert.equal((await post(`/api/runs/${run.id}/review`, { decision: 'approve' })).status, 200);
   const applied = await post(`/api/runs/${run.id}/apply`, { mode: 'working-tree' });
   assert.equal(applied.status, 200);
   assert.equal(applied.data.run.delivery.local.applied.files.length, 1);
@@ -210,6 +212,8 @@ test('a GitHub run over HTTP: explicit publish pushes the branch and opens the p
   assert.equal(run.delivery.publication, undefined);
   assert.equal((await post(`/api/runs/${run.id}/apply`, { mode: 'working-tree' })).status, 409);
 
+  assert.equal((await post(`/api/runs/${run.id}/publish`, { pullRequest: true })).status, 409, 'publishing needs an approval first');
+  assert.equal((await post(`/api/runs/${run.id}/review`, { decision: 'approve' })).status, 200);
   const pub = await post(`/api/runs/${run.id}/publish`, { pullRequest: true });
   assert.equal(pub.status, 200);
   assert.equal(pub.data.run.delivery.publication.state, 'pr-created');
