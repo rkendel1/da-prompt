@@ -8,7 +8,7 @@ import { Workspace } from './sandbox.js';
 import { normalizeInputs } from './prompt.js';
 import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from './graph.js';
 import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
-import { scanWorkspace, redact, existingProjectPolicy } from './security.js';
+import { scanWorkspace, redact, existingProjectPolicy, hideSecretValues } from './security.js';
 import { runGit, scrubPaths } from './gitutil.js';
 import {
   ProjectError, isExisting, normalizeSource, inspectRemote, prepareWorkspace, inspectProject, describeInspection, runChecks, installCommands, installDependencies, classifyCheck,
@@ -762,10 +762,7 @@ export class Factory {
    * shapes; a provider that echoes back a credential of any other shape in an error body must not get it persisted.
    */
   hideSecrets(text) {
-    let s = String(text ?? '');
-    const secrets = [...this.providers.all().map((p) => p.apiKey), this.cfg.githubToken, this.cfg.password];
-    for (const v of secrets) if (typeof v === 'string' && v.length >= 8) s = s.split(v).join('***');
-    return s;
+    return hideSecretValues(text, [...this.providers.all().map((p) => p.apiKey), this.cfg.githubToken, this.cfg.password]);
   }
 
   scrub(run, text) {

@@ -9,7 +9,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
-import { redact } from './security.js';
+import { redact, hideSecretValues } from './security.js';
 
 export const DIAG_FILE = 'diagnostics.jsonl';
 export const DIAG_SCHEMA = 'da-prompt.diagnostics/1';
@@ -51,9 +51,7 @@ export function failureKind(err) {
 
 /** A bounded, secret-free version of an error message. `secrets` are exact values to remove (keys, tokens). */
 export function safeMessage(text, secrets = []) {
-  let s = String(text ?? '');
-  for (const v of secrets) if (typeof v === 'string' && v.length >= 6) s = s.split(v).join('***');
-  return redact(s).replace(/[\0\r]/g, '').slice(0, MAX_MESSAGE);
+  return redact(hideSecretValues(text, secrets)).replace(/[\0\r]/g, '').slice(0, MAX_MESSAGE);
 }
 
 /** Size of a request without serializing it: counts messages and the characters of their text. */

@@ -762,6 +762,37 @@ default on a given machine; what context size is enough or too much; how large p
 local models need retries or malformed-tool-call re-prompts; and whether any prompt or history trimming is safe. No default was changed
 for any of these.
 
+### Deterministic tests: replay, contracts and architecture guards
+
+These tests need no model, no credentials and no network. They guard the factory's behaviour, not any model's.
+
+* **Replay** (`test/replay.test.js`, fixtures in `test/replay/fixtures.js`): a scripted sequence of model replies is plugged in where a
+  provider would be, and the *real* factory runs it: planning, the agent loop, the sandbox, verification, feedback, delivery and the
+  stored run record. Scenarios: success, sandbox refusals (path escape, absolute path, `.git`, blocked install, unknown tool, missing
+  arguments), recovery after a failed command, an endlessly repeated failing command (bounded turns, attempts and model calls),
+  a false "all tests pass" claim, cancellation, a delivery failure behind passing checks, missing evidence, empty replies, a planner that
+  never plans, and a provider call that throws. Each asserts the terminal state *and* the evidence, tool, retry and verification records.
+* **Provider and engine contracts** (`test/provider-contract.test.js`): the production adapters against loopback stubs: explicit selection
+  reaches only that adapter; history and tool definitions per wire format (OpenAI-compatible, Ollama, Anthropic, JSON tool mode); options an
+  adapter cannot take are not sent; normal, multiple-tool-call, empty, truncated, malformed and usage-less replies; authentication,
+  not-found, rate-limit, server-error, bad-body, connection and timeout failures with bounded retries; cancellation; no silent fallback to
+  another provider; and what the fx engine is given (an allow-list, so a new option must first be added to the contract).
+* **Architecture guards** (`test/architecture.test.js`): read the real source (comments and string contents removed): provider adapters,
+  diagnostics and the preflight cannot import run state, delivery, the store or the sandbox; the fx engine has no file, process or network
+  access of its own; `execTool` is the only code that touches the workspace for model-proposed operations; only the factory assigns
+  `run.status`; providers are constructed in one place; browser code has no storage or file-system API; and a recorder that fails on every
+  write changes neither a run's outcome nor what the model is shown.
+* **Security** (`test/security-contract.test.js`): sentinel credentials that match no known key pattern are sent to a provider that echoes
+  them (whole, as an Authorization header, and cut in half by upstream truncation); none may reach any API response, CLI output, run
+  record, event, diagnostics record or file. A network guard (`test/offline-guard.js`) makes any off-machine connection from these tests fail.
+* **Run-state invariants** (`runInvariants` in `test/replay-helpers.js`) hold for every replayed run: `completed` implies every task
+  completed, every checklist item passing and a delivery whose source protection held; a cancelled run is never delivered.
+
+**What replay proves:** for the supplied sequence of replies, the factory behaves as specified (it executes only inside the sandbox, lets
+its own verification decide, bounds retries, and reports failed, cancelled and undelivered runs as such). **What it does not prove:** that
+any model would produce such a sequence, how good or fast any model is, or that a real provider behaves like the stubs. Real-model
+certification still needs a live run (see *Local tuning* for the opt-in benchmark and *Using a hosted provider* for the smoke test).
+
 ### Protect the server
 
 ```bash
