@@ -104,7 +104,8 @@ test('folders: only real, specific directories can be authorized; broad or syste
   assert.match(err({ projectRoots: ['/'] }).projectRoots, /too broad/);
   assert.match(err({ projectRoots: ['/etc'] }).projectRoots, /system location/);
   assert.match(err({ projectRoots: [process.env.HOME || '/root'] }).projectRoots, /too broad|system location/);
-  assert.match(err({ projectRoots: [path.dirname(dataDir)] }).projectRoots, /overlaps the factory data directory|too broad/);
+  fs.mkdirSync(path.join(dataDir, 'inner'));
+  assert.match(err({ projectRoots: [path.join(dataDir, 'inner')] }).projectRoots, /inside the factory data directory|system location/);
   assert.match(err({ projectRoots: [dirs.a], projectRootsReadOnly: [dirs.a] }).projectRootsReadOnly, /both read\/write and read-only/);
   const ok = cfg.settings.update({ projectRoots: [root], projectRootsReadOnly: [other.root] }, admin);
   assert.deepEqual(ok.changed.sort(), ['projectRoots', 'projectRootsReadOnly']);

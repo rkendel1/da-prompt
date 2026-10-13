@@ -87,7 +87,9 @@ const asRoot = (x, ctx) => {
     throw new Invalid(`"${x}" is too broad or a system location; choose the folder that contains your projects`);
   }
   const data = ctx.cfg.dataDir && path.resolve(ctx.cfg.dataDir);
-  if (data && (within(real, data) || within(data, real))) throw new Invalid(`"${x}" overlaps the factory data directory`);
+  // A folder that merely contains the data directory (e.g. ~/Developer holding da-prompt) is fine: every project
+  // folder is checked against the data directory when it is used, so da-prompt itself is never offered as a project.
+  if (data && within(real, data)) throw new Invalid(`"${x}" is inside the factory data directory`);
   return real;
 };
 const asUrl = (v) => {

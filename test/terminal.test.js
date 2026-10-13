@@ -453,6 +453,14 @@ test('secrets: the shell environment drops the access password, session metadata
   assert.ok(!('FACTORY_PASSWORD' in env) && !('DA_PROMPT_PASSWORD' in env) && !('NODE_TEST_CONTEXT' in env));
   assert.equal(env.MY_TOKEN, SECRET, 'the user\'s own variables are the user\'s shell environment');
   assert.equal(env.TERM, 'xterm-256color');
+  // Launched by `npm start`: npm's own variables and project .bin directories do not leak into the user's shell.
+  const viaNpm = terminalEnv({ PATH: '/repo/node_modules/.bin:/usr/local/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin:/usr/bin:/opt/homebrew/bin', npm_config_prefix: '/opt/homebrew', npm_lifecycle_event: 'start', npm_config_user_agent: 'npm/10', NPM_CONFIG_CACHE: '/c', INIT_CWD: '/repo', HOME: '/h' });
+  assert.deepEqual(Object.keys(viaNpm).filter((k) => /^npm_/i.test(k) || k === 'INIT_CWD'), []);
+  assert.equal(viaNpm.PATH, '/usr/bin:/opt/homebrew/bin');
+  assert.equal(viaNpm.HOME, '/h');
+  // Not launched by npm: a user's own npm_config_prefix is theirs.
+  assert.equal(terminalEnv({ npm_config_prefix: '/mine', PATH: '/x/node_modules/.bin:/usr/bin' }).npm_config_prefix, '/mine');
+  assert.equal(terminalEnv({ PATH: '/x/node_modules/.bin:/usr/bin' }).PATH, '/x/node_modules/.bin:/usr/bin');
 
   const logs = [];
   const orig = { log: console.log, error: console.error, warn: console.warn, out: process.stdout.write, err: process.stderr.write };

@@ -59,7 +59,9 @@ test('conversations are persistent, ordered and attached to a project by id; ren
   assert.equal((await be.call('POST', '/api/chat/conversations', { projectId: b.id, provider: 'fake', model: 'fake-model' })).status, 409);
   assert.equal((await be.call('GET', `/api/chat/conversations/${c2.id}`)).body.conversation.project.archived, true);
   assert.equal((await be.call('POST', '/api/chat/conversations', { projectId: 'prj_nonexistent0000', provider: 'fake', model: 'fake-model' })).status, 404);
-  assert.equal((await be.call('POST', '/api/chat/conversations', {})).status, 404);
+  const general = await be.call('POST', '/api/chat/conversations', { provider: 'fake', model: 'fake-model' });
+  assert.equal(general.status, 201, 'a conversation does not need a project');
+  assert.equal(general.body.conversation.projectId, null);
 });
 
 test('streaming: deltas arrive in order, the final message is persisted once, and a late subscriber is brought up to date', async () => {
@@ -347,4 +349,68 @@ test('chat needs the access password like everything else, and works with no ter
   const r = await be.ask(c.id, 'hello without a terminal');
   assert.equal(r.conversation.messages[1].status, 'complete');
   assert.equal((await be.call('GET', '/api/terminal')).body.sessions.length, 0);
+});
+
+test('a chat without a project: general assistant, no project retrieval, history on by default and switchable', async () => {
+  const fake = new ChatFake();
+  const be = await boot({ roots: { alpha: repoA }, fake });
+  const c = await be.newConvo(undefined);
+  assert.equal(c.projectless, true);
+  assert.equal(c.projectRemoved, false);
+  assert.equal(c.project, null);
+  await be.ask(c.id, 'My name is Ada.');
+  const r = await be.ask(c.id, 'What is my name?');
+  const last = fake.calls.at(-1);
+  assert.match(last.system, /not attached to any project/);
+  assert.ok(!/RETRIEVED PROJECT CONTEXT/.test(last.system));
+  assert.equal(last.messages.length, 3, 'earlier turns are sent');
+  assert.deepEqual(r.conversation.messages.at(-1).context.items, []);
+  assert.equal(r.conversation.messages.at(-1).context.history.sent, true);
+  // Switch history off: only the newest message goes to the model.
+  const off = await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { sources: { history: false } } });
+  assert.equal(off.body.conversation.context.sources.history, false);
+  await be.ask(c.id, 'And now?');
+  assert.deepEqual(fake.calls.at(-1).messages.map((m) => m.content), ['And now?']);
+  assert.equal((await be.call('GET', `/api/chat/conversations/${c.id}`)).body.conversation.messages.length, 6, 'the transcript itself is untouched');
+  const pv = (await be.call('GET', `/api/chat/conversations/${c.id}/context`)).body.context;
+  assert.deepEqual(pv.sources.map((x) => x.key), ['history']);
+  assert.equal(pv.sources[0].enabled, false);
+});
+
+test('context sources can be switched off one by one, and pinned notes are sent only while enabled (secrets redacted)', async () => {
+  const fake = new ChatFake();
+  const be = await boot({ roots: { alpha: repoA }, fake });
+  const a = await be.register('alpha', { name: 'Alpha' });
+  await be.newTask({ title: 'Fix the billing rounding', projectId: a.id });
+  const c = await be.newConvo(a.id);
+  const pv = (await be.call('GET', `/api/chat/conversations/${c.id}/context`)).body.context;
+  assert.deepEqual(pv.sources.map((x) => x.key), ['history', 'project', 'backlog', 'runs', 'git', 'files', 'docs', 'mentioned']);
+  assert.ok(pv.sources.find((x) => x.key === 'backlog').bytes > 0);
+  assert.ok(pv.sources.find((x) => x.key === 'docs').items.includes('README.md'));
+  assert.ok(pv.sources.every((x) => x.enabled));
+
+  const patched = await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { sources: { backlog: false, files: false, docs: false }, notes: [{ title: 'Style', text: 'Prefer small functions. token=ghp_abcdefghijklmnopqrstuvwxyz0123456789' }] } });
+  assert.equal(patched.status, 200);
+  const note = patched.body.conversation.context.notes[0];
+  assert.match(note.id, /^note_/);
+  assert.equal((await be.call('GET', `/api/chat/conversations/${c.id}`)).body.conversation.context.notes[0].id, note.id, 'a note keeps its id across reads');
+  assert.ok(!note.text.includes('ghp_abcdefghij'), 'secrets in a note are redacted before it is stored');
+  const r = await be.ask(c.id, 'How does src/billing.js compute totals?');
+  const sys = fake.calls.at(-1).system;
+  assert.ok(!/Fix the billing rounding/.test(sys), 'backlog switched off');
+  assert.ok(!/### File list/.test(sys), 'file list switched off');
+  assert.ok(!/ALPHA_MARKER_README/.test(sys), 'docs switched off');
+  assert.match(sys, /ALPHA_BILLING_SOURCE/, 'mentioned files still on');
+  assert.match(sys, /Prefer small functions/);
+  assert.ok(r.conversation.messages.at(-1).context.items.some((i) => i.kind === 'note'));
+
+  // Disable the note: it is kept but no longer sent.
+  await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { notes: [{ ...note, enabled: false }] } });
+  await be.ask(c.id, 'Again');
+  assert.ok(!/Prefer small functions/.test(fake.calls.at(-1).system));
+  assert.equal((await be.call('GET', `/api/chat/conversations/${c.id}`)).body.conversation.context.notes.length, 1);
+  // Validation.
+  assert.equal((await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { notes: [{ title: 'x', text: '   ' }] } })).status, 400);
+  assert.equal((await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { notes: [{ text: 'x'.repeat(9000) }] } })).status, 413);
+  assert.equal((await be.call('PATCH', `/api/chat/conversations/${c.id}`, { context: { sources: { bogus: false } } })).body.conversation.context.sources.bogus, undefined);
 });

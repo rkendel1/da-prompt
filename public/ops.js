@@ -164,7 +164,7 @@ function settingRow(s, ctx) {
 
 export async function renderSettingsPage(main, api, { toast, group: wanted }) {
   document.title = 'Settings · da-prompt';
-  main.innerHTML = '<section class="page settings"><p class="muted">Loading settings…</p></section>';
+  main.innerHTML = '<section class="page settings-page"><p class="muted">Loading settings…</p></section>';
   let view;
   let paxCatalog = [];
   let providers = [];
@@ -180,7 +180,7 @@ export async function renderSettingsPage(main, api, { toast, group: wanted }) {
   const g = view.groups.find((x) => x.id === group);
   const list = view.settings.filter((s) => s.group === group);
   const ctx = { providers, catalog: paxCatalog, admin: view.admin };
-  main.innerHTML = `<section class="page settings"><p class="eyebrow">persistent settings · ${view.file.persisted ? `saved ${esc(fmtTime(view.file.savedAt))}` : 'nothing saved yet'}</p>
+  main.innerHTML = `<section class="page settings-page"><p class="eyebrow">persistent settings · ${view.file.persisted ? `saved ${esc(fmtTime(view.file.savedAt))}` : 'nothing saved yet'}</p>
     <h1>Settings</h1>
     <p class="lede">Values are validated before they are saved and stored by the server (not in your browser). Precedence, highest first: this run's own options → saved here → environment variable → built-in default. Secrets are write-only.</p>
     <div class="settings-grid"><nav class="card gnav" aria-label="Settings groups">${view.groups.map((x) => `<a href="#/settings?group=${esc(x.id)}" ${x.id === group ? 'aria-current="page"' : ''}>${esc(x.label)}${view.settings.some((s) => s.group === x.id && s.restartPending) ? ' <span class="hdot warn" title="restart pending"></span>' : ''}</a>`).join('')}<a href="#/providers">Providers &amp; keys →</a></nav>

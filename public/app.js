@@ -99,6 +99,11 @@ function route() {
   const full = location.hash.replace(/^#/, '') || '/';
   const [hash, query = ''] = full.split('?');
   const params = new URLSearchParams(query);
+  for (const a of document.querySelectorAll('.side-link')) {
+    const to = a.getAttribute('href').replace(/^#/, '');
+    if (to !== '/' && (hash === to || hash.startsWith(`${to}/`))) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
   if (current?.es) current.es.close();
   const m = hash.match(/^\/runs\/([\w-]+)/);
   if (m) {

@@ -61,11 +61,17 @@ export const alive = (pid) => {
 
 /** The environment a terminal starts with: the backend's own, minus da-prompt's access password, plus terminal basics. */
 export function terminalEnv(base = process.env) {
+  // Started through `npm start`, the backend carries npm's launcher variables (npm_config_prefix=/opt/homebrew, ...) and
+  // PATH entries for the project's node_modules/.bin. A login shell must not inherit them: nvm refuses to load while
+  // npm_config_prefix is set, and the project's .bin is not the user's PATH. Only strip when npm really launched us.
+  const viaNpm = Boolean(base.npm_lifecycle_event || base.npm_execpath || base.npm_config_user_agent);
   const env = {};
   for (const [k, v] of Object.entries(base)) {
     if (k === 'FACTORY_PASSWORD' || k === 'DA_PROMPT_PASSWORD' || k === 'NODE_TEST_CONTEXT' || /^DA_PTY_/.test(k)) continue;
+    if (viaNpm && (/^npm_/i.test(k) || k === 'INIT_CWD')) continue;
     env[k] = v;
   }
+  if (viaNpm && env.PATH) env.PATH = env.PATH.split(path.delimiter).filter((d) => !/[\\/]node_modules[\\/]\.bin$|[\\/]node-gyp-bin$/.test(d)).join(path.delimiter);
   env.TERM = 'xterm-256color';
   env.COLORTERM = 'truecolor';
   env.DA_PROMPT_TERMINAL = '1';

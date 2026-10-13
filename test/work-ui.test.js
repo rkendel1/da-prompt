@@ -133,6 +133,66 @@ T('chat: copy response, each code block independently, a selection and an excerp
   assert.equal(await page.locator('.toast').filter({ hasText: /to the clipboard/ }).count(), 0);
 });
 
+T('chat: a new chat needs no project; the first message creates it, and the context panel switches what is sent', async () => {
+  const be = await boot();
+  const page = await open(be, '#/chat');
+  await page.waitForSelector('#chat-form');
+  assert.equal(await page.inputValue('#chat-project'), '', 'no project is selected by default');
+  assert.match(await page.textContent('.hello'), /How can I help/);
+  assert.equal(await page.isDisabled('#chat-send'), true, 'nothing to send yet');
+  assert.equal((await be.call('GET', '/api/chat/conversations')).body.conversations.length, 0, 'nothing is created until you send');
+  // Pin a note and switch history off BEFORE the chat exists: both travel with the first message.
+  await page.click('#ctx-btn');
+  await page.waitForSelector('#ctx-panel:not([hidden])');
+  assert.deepEqual(await page.$$eval('#ctx-panel [data-src]', (els) => els.map((e) => e.dataset.src)), ['history'], 'without a project only history is a source');
+  await page.fill('#note-text', 'We target Node 20.');
+  await page.click('[data-note-save]');
+  await page.waitForSelector('#ctx-panel [data-note-toggle]');
+  await page.uncheck('#ctx-panel [data-src=history]');
+  await page.keyboard.press('Escape');
+  await page.fill('#chat-input', 'Hello there');
+  await page.press('#chat-input', 'Enter');
+  await page.waitForURL(/#\/chat\/cnv_/);
+  await page.waitForSelector('.msg.assistant.complete');
+  const convo = (await be.call('GET', '/api/chat/conversations')).body.conversations[0];
+  assert.equal(convo.projectId, null);
+  const full = (await be.call('GET', `/api/chat/conversations/${convo.id}`)).body.conversation;
+  assert.equal(full.context.sources.history, false);
+  assert.equal(full.context.notes[0].text, 'We target Node 20.');
+  assert.match(be.fake.calls.at(-1).system, /We target Node 20\./);
+  assert.match(await page.textContent('#chat-project-bar'), /No project/);
+  assert.match(await page.textContent('.msg.assistant .ctx summary'), /1 pinned note/);
+  // Untick the note in the thread: the next message no longer carries it.
+  await page.click('#ctx-btn');
+  await page.uncheck('#ctx-panel [data-note-toggle]');
+  await page.waitForFunction(async (id) => !(await (await fetch(`api/chat/conversations/${id}`)).json()).conversation.context.notes[0].enabled, convo.id);
+  await page.keyboard.press('Escape');
+  await page.fill('#chat-input', 'Again');
+  await page.press('#chat-input', 'Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.msg.assistant.complete').length === 2);
+  assert.ok(!/We target Node 20/.test(be.fake.calls.at(-1).system));
+  assert.deepEqual(page.errors, []);
+});
+
+T('chat: with a project the panel lists every source with its size, and switching one off stops it being sent', async () => {
+  const be = await boot();
+  const c = await be.newConvo(be.a.id);
+  const page = await open(be, `#/chat/${c.id}`);
+  await page.waitForSelector('#chat-form');
+  await page.click('#ctx-btn');
+  await page.waitForSelector('#ctx-panel [data-src=docs]');
+  assert.deepEqual(await page.$$eval('#ctx-panel [data-src]', (els) => els.map((e) => e.dataset.src)), ['history', 'project', 'backlog', 'runs', 'git', 'files', 'docs', 'mentioned']);
+  assert.match(await page.textContent('#ctx-panel'), /README\.md/);
+  await page.uncheck('#ctx-panel [data-src=docs]');
+  await page.waitForFunction(async (id) => (await (await fetch(`api/chat/conversations/${id}`)).json()).conversation.context.sources.docs === false, c.id);
+  await page.keyboard.press('Escape');
+  await page.fill('#chat-input', 'Any thoughts?');
+  await page.press('#chat-input', 'Enter');
+  await page.waitForSelector('.msg.assistant.complete');
+  assert.ok(!/# Alpha/.test(be.fake.calls.at(-1).system), 'the README was not sent');
+  assert.match(be.fake.calls.at(-1).system, /name: Alpha/, 'other sources still are');
+});
+
 T('chat → task: review a draft, edit it, save with origin and project; nothing runs', async () => {
   const be = await boot();
   const c = await be.newConvo(be.a.id);

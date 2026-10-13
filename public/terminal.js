@@ -203,7 +203,7 @@ export async function renderTerminalPage(main, api, { toast, project: wantProjec
         setConn(v, session.state === 'running' ? 'disconnected' : 'live');
       } catch (err) {
         v.info = { ...v.info, state: 'closed' };
-        setConn(v, 'closed', err.message);
+        setConn(v, 'closed', /not found/.test(err.message) ? 'The server restarted or the terminal sat unused for a long time, which closes its shell and any job running in it. The output above is what was on screen; press “New terminal” to start again.' : err.message);
       }
     };
   }

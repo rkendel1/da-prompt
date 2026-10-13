@@ -97,3 +97,27 @@ test('a folder in a system location is refused with the reason', async () => {
   assert.equal(r.status, 400);
   assert.match(r.data.error, /system location|too broad/);
 });
+
+test('a folder that holds the data directory (e.g. ~/Developer containing da-prompt) can be authorized; the data directory itself is never offered', async () => {
+  const home = fs.mkdtempSync(path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), '.picker-test-'));
+  try {
+    fs.cpSync(makeRepo(), path.join(home, 'widgets'), { recursive: true });
+    const dataDir = path.join(home, 'da-prompt', 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const two = await createServer({ dataDir, defaultProvider: 'offline', providerFactory: () => new OfflineProvider({ faults: false, delayMs: 0 }) });
+    await new Promise((r) => two.server.listen(0, '127.0.0.1', r));
+    const b = `http://127.0.0.1:${two.server.address().port}`;
+    const post = (u, body) => fetch(b + u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    try {
+      assert.equal((await post('/api/projects/pick', { path: path.join(home, 'widgets'), authorize: true })).status, 200);
+      const names = (await (await fetch(`${b}/api/projects/directories`)).json()).directories.map((d) => d.name);
+      assert.ok(names.includes('widgets'));
+      assert.ok(!names.includes('da-prompt'));
+      assert.equal((await post('/api/projects/pick', { path: path.join(home, 'da-prompt') })).status, 400);
+    } finally {
+      await two.close();
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -20,6 +20,7 @@ import { redactUrl } from './gitutil.js';
 import { ProjectRegistry } from './registry.js';
 import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
 import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
+import { SOURCES } from './chat-context.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -737,6 +738,7 @@ export async function createServer(overrides = {}) {
   async function chatApi(req, res, parts, url) {
     try {
       const method = req.method;
+      if (parts[2] === 'sources' && method === 'GET') return json(res, 200, { sources: SOURCES });
       if (parts[2] !== 'conversations') throw new HttpError(404, 'not found');
       if (!parts[3]) {
         if (method === 'GET') return json(res, 200, { conversations: await chat.list({ projectId: url.searchParams.get('projectId') || undefined }) });
@@ -754,6 +756,7 @@ export async function createServer(overrides = {}) {
         await chat.load(id);
         return chatStream(req, res, id);
       }
+      if (sub === 'context' && method === 'GET') return json(res, 200, { context: await chat.contextPreview(id) });
       if (method !== 'POST') throw new HttpError(405, 'method not allowed');
       if (sub === 'messages' && !parts[5]) return json(res, 202, await chat.send(id, await readBody(req, 128 * 1024)));
       if (sub === 'messages' && parts[6] === 'retry') return json(res, 202, await chat.retry(id, idOr404(MESSAGE_ID_RE, parts[5], 'message'), await readBody(req, 4 * 1024)));
