@@ -17,6 +17,7 @@ import { probePax, listEvidence, STEPS as PAX_STEPS, SEMANTICS as PAX_SEMANTICS 
 import { buildEvidence } from './evidence.js';
 import { redact } from './security.js';
 import { redactUrl } from './gitutil.js';
+import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
 
@@ -31,6 +32,14 @@ const TYPES = {
   '.ico': 'image/x-icon',
 };
 const SECURITY_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin' };
+
+const TERMINAL_POLICY = {
+  trust: 'A terminal runs your login shell with the permissions of the user running the da-prompt server. It can read and change anything that user can.',
+  startDirectory: 'A terminal can only be started in a writable project folder that you authorized; the browser sends an opaque id, never a path.',
+  navigation: 'After it starts the shell is NOT confined to the project: cd, absolute paths and child processes can reach the rest of the filesystem. The header shows when the shell has left the project.',
+  access: 'Only an authenticated session (access password) or a browser on the server machine can create or use terminals; every request is re-checked and cross-origin requests are refused.',
+  cleanup: 'Closing a terminal, stopping the server, or abandoning a session (no browser attached for the idle limit) terminates the shell and its process tree.',
+};
 
 class HttpError extends Error {
   constructor(status, message, extra) {
@@ -135,6 +144,7 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'settings') return settingsApi(req, res, parts);
     if (parts[1] === 'system') return systemApi(req, res, parts, url);
     if (parts[1] === 'pax') return paxApi(req, res, parts);
+    if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
@@ -527,6 +537,105 @@ export async function createServer(overrides = {}) {
     req.pipe(upstream);
   }
 
+
+  // ── Embedded terminal (host shell; see src/terminal.js and the README "Embedded terminal" section) ──────────
+  const terminals = new TerminalManager(cfg);
+  const loopbackHost = (h) => /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(String(h || '').replace(/:\d+$/, '').replace(/^(\[::1\]):\d+$/, '$1'));
+  /** One principal per access mode; a session id alone never grants access (every call re-checks this). */
+  const principal = () => (cfg.password ? `pw:${crypto.createHash('sha256').update(cfg.password).digest('hex').slice(0, 16)}` : 'local');
+
+  function terminalGuard(req) {
+    if (cfg.terminalEnabled === false) throw new HttpError(403, 'The terminal is turned off on this server (Settings → Server → Terminal).');
+    if (!isAdmin(req, cfg)) throw new HttpError(403, 'The terminal runs commands as the user running this server, so it needs an authenticated session (set an access password) or a browser on the server machine. A proxied or remote request without a password is refused.');
+    // A page on another origin must not be able to drive a shell on localhost (CSRF) or reach it through a rebound DNS name.
+    const origin = req.headers.origin;
+    if (origin) {
+      let o;
+      try { o = new URL(origin); } catch { throw new HttpError(403, 'bad Origin'); }
+      if (o.host !== req.headers.host) throw new HttpError(403, 'Cross-origin terminal requests are refused.');
+    }
+    if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) throw new HttpError(403, 'Cross-site terminal requests are refused.');
+    if (!cfg.password && !loopbackHost(req.headers.host)) throw new HttpError(403, 'Open the terminal through http://localhost (or set an access password): an unprotected server only accepts terminal requests addressed to localhost.');
+  }
+
+  async function terminalApi(req, res, parts, url) {
+    try {
+      terminalGuard(req);
+      const owner = principal();
+      const method = req.method;
+      if (!parts[2] && method === 'GET') return json(res, 200, { ...terminals.availability(), sessions: terminals.list(owner), policy: TERMINAL_POLICY });
+      if (parts[2] === 'diagnostics' && method === 'GET') return json(res, 200, await terminals.diagnostics());
+      if (parts[2] !== 'sessions') throw new HttpError(404, 'not found');
+      if (!parts[3]) {
+        if (method === 'GET') return json(res, 200, { sessions: terminals.list(owner) });
+        if (method !== 'POST') throw new HttpError(405, 'method not allowed');
+        const body = await readBody(req, 8 * 1024);
+        // The start directory is an opaque id from the authorized list, resolved here. A path from the browser is never used.
+        const dir = resolveDirectory(cfg, body.directoryId);
+        if (dir.readOnly) throw new HttpError(403, 'That folder is read-only for da-prompt, and a shell cannot honour that: terminals only open in writable project folders.');
+        const s = terminals.create({ owner, dir: dir.real, project: { directoryId: dir.id, name: dir.name }, label: body.label, cols: body.cols, rows: body.rows });
+        return json(res, 201, { session: terminals.view(s) });
+      }
+      const s = terminals.get(parts[3], owner);
+      const sub = parts[4];
+      if (!sub && method === 'GET') return json(res, 200, { session: terminals.view(s) });
+      if (!sub && method === 'DELETE') {
+        await terminals.close(s);
+        return json(res, 200, { closed: true, id: s.id, exitCode: s.exitCode, signal: s.exitSignal });
+      }
+      if (sub === 'stream' && method === 'GET') return terminalStream(req, res, s, url);
+      if (method !== 'POST') throw new HttpError(405, 'method not allowed');
+      const body = await readBody(req, 128 * 1024);
+      if (sub === 'input') (terminals.write(s, typeof body.data === 'string' ? body.data : ''), json(res, 200, { ok: true }));
+      else if (sub === 'resize') json(res, 200, { session: terminals.view(terminals.resize(s, body.cols, body.rows)) });
+      else if (sub === 'signal') (terminals.signal(s, String(body.signal || 'INT').toUpperCase()), json(res, 200, { ok: true, signals: TERM_SIGNALS }));
+      else throw new HttpError(404, 'not found');
+    } catch (err) {
+      if (err instanceof TerminalError) throw new HttpError(err.status, err.message);
+      throw asHttp(err);
+    }
+  }
+
+  /** Output as server-sent events: `data` = { off, b64 } (resumable by byte offset), `state` = session view. Slow readers cannot stall the shell. */
+  function terminalStream(req, res, s, url) {
+    let sent = Math.max(0, Number(url.searchParams.get('after') ?? req.headers['last-event-id']) || 0);
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no', ...SECURITY_HEADERS });
+    res.write('retry: 1500\n\n');
+    let waiting = false;
+    let ended = false;
+    const state = () => res.write(`event: state\ndata: ${JSON.stringify(terminals.view(s))}\n\n`);
+    const pump = () => {
+      if (ended) return;
+      for (;;) {
+        const r = terminals.read(s, sent, 48 * 1024);
+        if (r.skipped) res.write(`event: truncated\ndata: ${JSON.stringify({ from: sent, to: r.off, dropped: r.skipped })}\n\n`);
+        if (!r.buf.length) {
+          sent = r.off;
+          return;
+        }
+        sent = r.off + r.buf.length;
+        if (!res.write(`id: ${sent}\nevent: data\ndata: ${JSON.stringify({ off: r.off, b64: r.buf.toString('base64') })}\n\n`)) {
+          if (!waiting) (waiting = true, res.once('drain', () => ((waiting = false), pump())));
+          return;
+        }
+      }
+    };
+    state();
+    pump();
+    const detach = terminals.attach(s, { onData: () => !waiting && pump(), onState: state, onClose: () => { pump(); state(); end(); } });
+    const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
+    function end() {
+      if (ended) return;
+      ended = true;
+      clearInterval(ping);
+      detach();
+      res.end();
+    }
+    req.on('close', end);
+    res.on('close', end); // a dead socket closes the response even when the request already finished
+    res.on('error', end);
+  }
+
   async function serveStatic(res, pathname) {
     const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
     const abs = path.resolve(publicDir, rel);
@@ -565,6 +674,7 @@ export async function createServer(overrides = {}) {
     for (const { controller } of factory.active.values()) controller.abort(new Error('server shutting down'));
     await Promise.allSettled([...factory.active.values()].map((a) => a.promise));
     previews.stopAll();
+    await terminals.closeAll();
     server.closeAllConnections?.();
     await new Promise((r) => server.close(r));
   };

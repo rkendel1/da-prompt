@@ -17,7 +17,7 @@ const add = (file, line, rule, message) => problems.push({ file: path.relative(r
 function walk(dir, out = []) {
   if (!fs.existsSync(dir)) return out;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+    if (e.name === 'node_modules' || e.name === 'vendor' || e.name.startsWith('.')) continue;
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p, out);
     else if (/\.(m?js)$/.test(e.name)) out.push(p);

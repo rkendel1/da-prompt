@@ -65,6 +65,14 @@ export function loadConfig(overrides = {}) {
     paxTimeoutMs: int('FACTORY_PAX_TIMEOUT_MS', 120_000),
     paxAutoRun: false,
     paxSteps: ['info', 'doctor', 'reality', 'drift'],
+    // Embedded terminal (a host shell for the authenticated local user; see src/terminal.js).
+    terminalEnabled: process.env.FACTORY_TERMINAL !== '0',
+    terminalShell: process.env.FACTORY_TERMINAL_SHELL || '',
+    terminalPython: process.env.FACTORY_TERMINAL_PYTHON || '',
+    terminalMaxSessions: int('FACTORY_TERMINAL_MAX_SESSIONS', 8),
+    terminalBufferBytes: int('FACTORY_TERMINAL_BUFFER_BYTES', 1_048_576),
+    terminalIdleMs: Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS ?? '', 10) >= 0 ? Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS, 10) : 30 * 60_000,
+    terminalExitedKeepMs: int('FACTORY_TERMINAL_EXITED_KEEP_MS', 10 * 60_000),
     // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).
     gitConfig: [],
   };
