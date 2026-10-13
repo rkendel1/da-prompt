@@ -163,7 +163,7 @@ export async function renderProjectsPage(main, api, { toast, id }) {
           ${p.location.readOnly ? '<dt>Access</dt><dd>read-only folder: tasks can read it; results are never applied back</dd>' : ''}
           <dt>Working mode</dt><dd>${esc(p.settings.workingMode || '—')}${p.settings.defaultRef ? ` · ref ${esc(p.settings.defaultRef)}` : ''}</dd>
           <dt>Created</dt><dd>${esc(ago(p.createdAt))}${p.migratedFrom ? ' · created from earlier runs' : ''}</dd><dt>Last used</dt><dd>${esc(ago(p.lastUsedAt))}</dd></dl></div>
-        <div class="card"><h3>Repository</h3>${g.isGit || p.kind === 'remote' ? `<dl class="kv" id="proj-git">
+        <div class="card"><h3>Repository</h3>${g.isGit || p.kind === 'remote' || p.repo.isGit ? `<dl class="kv" id="proj-git">${!g.isGit && p.kind === 'local' ? '<dt>Live state</dt><dd class="muted">unavailable — showing what was recorded</dd>' : ''}
           ${g.isGit ? `<dt>Branch</dt><dd>${esc(g.branch || 'detached')}</dd><dt>Working tree</dt><dd>${g.dirty ? `${g.counts.staged} staged · ${g.counts.unstaged} modified · ${g.counts.untracked} untracked` : 'clean'}</dd>` : ''}
           <dt>Remote</dt><dd class="mono">${esc((g.remotes?.[0]?.url) || p.repo.remoteUrl || (p.kind === 'remote' ? p.location.url : '— none'))}</dd>
           <dt>Default branch</dt><dd>${esc(p.repo.defaultBranch || '—')}</dd>

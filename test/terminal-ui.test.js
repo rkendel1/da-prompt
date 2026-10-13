@@ -160,9 +160,12 @@ T('interrupt button and resize: Interrupt stops the foreground process; resizing
   await page.click('#term-int');
   await run(page, 'echo INT=$?');
   await waitBuf(page, /\nINT=130\n/);
-    const before = (await be.call('GET', '/api/terminal')).body.sessions[0];
+  const size = () => page.evaluate(() => { const t = window.__daTerminal().active.term; return [t.cols, t.rows]; });
+  const before = await size();
   await page.setViewportSize({ width: 900, height: 600 });
-  await waitFor(async () => { const s = (await be.call('GET', '/api/terminal')).body.sessions[0]; return s.cols !== before.cols || s.rows !== before.rows; }, { timeoutMs: 8000, intervalMs: 100 });
+  await waitFor(async () => { const [c, r] = await size(); return c !== before[0] || r !== before[1]; }, { timeoutMs: 8000, intervalMs: 100 });
+  // The browser's new size reaches the backend's session (debounced POST).
+  await waitFor(async () => { const s = (await be.call('GET', '/api/terminal')).body.sessions[0]; const [c, r] = await size(); return s.cols === c && s.rows === r; }, { timeoutMs: 8000, intervalMs: 100 });
   const now = await page.evaluate(() => { const t = window.__daTerminal().active.term; return [t.cols, t.rows]; });
   await run(page, 'stty size');
   await waitBuf(page, new RegExp(`\\n${now[1]} ${now[0]}\\n`));

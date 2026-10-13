@@ -405,3 +405,5 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .danger-zone { border-color: var(--bad-soft); margin-top: 14px; }
 .callout.warn { border-left: 3px solid var(--warn); }
 @media (max-width: 760px) { .proj-row { grid-template-columns: 1fr; } }
+.proj-main .pill { justify-self: start; }
+.proj-bar .check.inline { background: none; border: 0; padding: 0; box-shadow: none; display: inline-flex; gap: 6px; align-items: center; }
