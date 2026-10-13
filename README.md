@@ -570,6 +570,48 @@ Keys can come from environment variables or be pasted on the Providers page (sav
 The Providers page also lets you change base URLs, set a default model, set Ollama's
 context window, and **Test** a model with a real tool call.
 
+### Using a hosted provider (no local model needed)
+
+Nothing in the factory requires Ollama: it is one provider among those above, and it is only the *automatic* default when no
+hosted provider is ready and nothing else was chosen. To run on a hosted provider:
+
+```bash
+export OPENAI_API_KEY=…                       # or ANTHROPIC_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY … (see the table)
+da-prompt providers list                      # status, where each URL/key comes from, and which provider is the default and why
+da-prompt providers test openai --model <model>   # connectivity → discovery → a real tool-calling request
+da-prompt providers use openai --model <model>    # saves it as the default (validated first); or set FACTORY_PROVIDER / FACTORY_MODEL
+da-prompt run "…" --provider openai --model <model>   # or choose it for one run
+```
+
+Default precedence (unchanged): `FACTORY_PROVIDER` / the saved default setting, then the provider the last run used, then the
+first ready provider (hosted presets are listed before Ollama). The model follows the same order: an explicit `--model`, then
+`FACTORY_MODEL` / the saved default model, then the model the last run used on that provider (if the provider still lists it),
+then the provider's preferred model. `da-prompt providers list` and the Providers page show the default provider, its model and
+what chose it. Ollama stays available as an optional local provider: leave it running and pick it per run
+(`--provider ollama`), or use `--planner-provider` to plan on a hosted model while agents run locally. There is **no automatic
+fallback** between providers: a failed call fails the attempt, and the failure message names its kind (authentication, model not
+found, rate limit, provider-side error, connection, timeout).
+
+The built-in agent engine is the default (`FACTORY_AGENT_ENGINE=builtin`) and works with every provider. Verification, the
+sandbox, evidence and delivery are the factory's own and do not depend on which provider or engine ran the task.
+
+**Mocked versus real.** `npm test` runs complete factory runs against *mock* OpenAI-compatible and Ollama servers
+(`test/mock-llm.js`, `test/providers.test.js`). They prove the wiring: selection, tool calls, verification and delivery. They say
+nothing about a real model's tool-calling quality, speed or rate limits; that needs a real-model run.
+
+**Real hosted-provider smoke test (operator, needs a key):**
+
+```bash
+export OPENAI_API_KEY=…                       # any hosted preset's key
+npm start &                                   # or: da-prompt server start
+da-prompt providers test openai --model <model>                 # expect connectivity ✓ discovery ✓ inference ✓
+da-prompt run "A one-page habit tracker with tests" --provider openai --model <model> --new --engine builtin       # follows the run to the end
+da-prompt runs show <run-id>                  # verdict, checklist and token usage; the first line shows provider / model
+```
+
+A run only counts as certified for that model if the run completes with every checklist item passing; record the model, the
+date and the token usage. This repository's tests do not include such a run.
+
 ### Agent engines (experimental): built-in or FX
 
 Planning, verification, feedback, review and delivery are always da-prompt's own. The *engine* only decides who runs one
@@ -589,6 +631,20 @@ FACTORY_AGENT_ENGINE=fx               # or set the default (Settings → Models 
 
 In the browser it is the **Agent engine** selector under the model picker; engines that are not installed or cannot use the
 chosen provider are greyed out with the reason (`GET /api/engines`). The run page and report show a non-default engine.
+
+| | `builtin` (default) | `fx` (experimental, optional) |
+| --- | --- | --- |
+| Providers | all, including Anthropic | OpenAI-compatible endpoints and Ollama's `/v1` API only |
+| Wait for a model's first response | up to 30 minutes per request | **about 120 seconds** (`@appport/fx` 0.1.2); not configurable from da-prompt |
+| Ollama `num_ctx` (context window) | set by da-prompt (32k default, per run) | not available: Ollama's server default applies |
+| Request timeout and transport retries | configurable in da-prompt; transient errors retried | no setting; a failure fails the attempt and the factory's attempt retries apply |
+| Text-written tool calls | recovered | refused (retried up to four times) |
+| Output-token limit | `FACTORY_MAX_OUTPUT_TOKENS` | `FACTORY_MAX_OUTPUT_TOKENS`, passed to the agent as `maxOutputTokens` |
+| Tools, sandbox, verification, token budget | da-prompt's | the same: da-prompt's |
+
+Prefer the **built-in engine for slow local models**: a long prompt processed on CPU can exceed fx's first-response window, which
+fails the attempt with a `LIBFX_MODEL_TIMEOUT` message that says so. Keep fx for hosted or fast OpenAI-compatible endpoints where
+you want to try the fx loop. fx's real-model tool quality is not certified by its own report (scripted tests only).
 
 Things to know: fx executes only structured tool calls. Local models that write a call as plain text (qwen3-coder does this
 often) are retried by the adapter up to four times, but the built-in engine's text-call fallback is more forgiving, so compare
@@ -622,8 +678,89 @@ Notes for local models:
 - **Model choice matters.** Agents write and fix real code over many turns. Coding models of
   roughly 14B parameters and up do much better than small chat models. You can use a larger
   model for planning only (the *Planner model* setting).
-- **No timeouts on slow hardware.** Requests to local models may take as long as they need
-  (up to 30 minutes per call).
+- **No timeouts on slow hardware (built-in engine).** Requests to local models may take as long as they need
+  (up to 30 minutes per call). The experimental `fx` engine does not: it gives a model about 120 seconds to start answering.
+- **Too slow or too heavy on your machine?** Use a hosted provider (see *Using a hosted provider*), or a hosted planner with local
+  agents. Ollama is the automatic default only while nothing else is ready or remembered.
+
+### Local tuning: diagnostics, preflight and benchmarks
+
+Everything in this section works **without a model**: nothing here needs Ollama, a key or network access, and none of it claims
+that any setting makes inference faster. It exists so that a later measured run on real hardware can choose a model, context,
+concurrency and engine with evidence.
+
+**Offline preflight: `da-prompt diagnostics`** resolves the provider, model and engine a run would use *from configuration only*
+and says why, whether the provider is local or hosted, whether its key is present (never the value), how each tuning setting is
+treated by each engine, and what is misconfigured. It makes no network request and no model call (`--json` for scripts; `--provider`,
+`--model`, `--engine`, `--num-ctx`, `--temperature`, `--tool-mode` check a hypothetical run). Checks that need a live provider
+(reachable? model offered? tool calling? latency?) are listed as *not performed* with the explicit command that performs each
+(`providers show|models|test`). API: `GET /api/diagnostics/inference`.
+
+**Tuning settings** (`da-prompt diagnostics -v` prints this for your configuration):
+
+| Setting | Source / override | Default | built-in engine | fx engine |
+| --- | --- | --- | --- | --- |
+| Max tokens per reply | `FACTORY_MAX_OUTPUT_TOKENS` / Settings (global) | 8192 | `max_tokens`, `num_predict` | passed as `maxOutputTokens` |
+| Parallel agents | `FACTORY_MAX_PARALLEL` / Settings; per run `--parallel` (1–8) | 3 | tasks executing at once | same |
+| Attempts per task, tool turns, token budget | `FACTORY_MAX_ATTEMPTS`, `FACTORY_MAX_AGENT_TURNS`, `FACTORY_TOKEN_BUDGET`; per run `--attempts --turns --budget` | 3 · 40 · 2 000 000 | yes | yes (budget checked less often) |
+| Run time limit, command timeout | run setting (120 min) · `FACTORY_COMMAND_TIMEOUT_MS` (3 min) | | yes | yes |
+| Context window (Ollama `num_ctx`) | per run (New Run form, API `providerOptions.numCtx`, headless `--num-ctx`) > Providers page > 32 768 | 32 768 | Ollama only | **not supported** (server default) |
+| Temperature, tool mode | per run | provider default · auto | yes | **not supported** |
+| Total request timeout | fixed | 30 min (15 min Anthropic) | fixed | none found in fx |
+| First-response timeout | fixed | — | not applicable (not streamed) | about 120 s, **fixed** |
+| Transport retries | fixed | 4 (Ollama: 2) | yes, incl. timeouts | none; the factory re-runs the attempt |
+
+Precedence for numbers is *run option > startup option > saved setting > environment > default* (see *Persistent settings*). An option
+the chosen engine cannot honour is reported by the preflight and logged as a warning at the start of the run; it is never silently
+dropped. Concurrency 1 is supported today (`--parallel 1`); the default is the same for local and hosted providers and was not
+changed. Concurrency governs only how many *tasks* run at once, each with its own agent loop; planning and the final summary are
+single calls. A built-in-engine provider error escalates the task immediately (existing behaviour); an fx error fails the attempt
+and the attempt retry applies.
+
+**Per-run diagnostics** are written next to every run (`<run>/diagnostics.jsonl`) and read with `da-prompt runs diagnostics <id>`
+(`--json` adds the call records; API `GET /api/runs/<id>/diagnostics`). They are observations only: they never influence decisions,
+retries, verification or delivery, a failure to write them cannot fail a run, and they hold no prompts, file contents, replies,
+headers or keys (exact credential values are also scrubbed from stored messages). At most 5 000 records are kept per run.
+
+| Field | Meaning | Measured by |
+| --- | --- | --- |
+| `purpose` | `plan`, `agent_turn` (built-in), `agent_prompt` (fx: one prompt = many model requests), `summary` | factory |
+| `durationMs` | wall time of the call on a monotonic clock | **factory** |
+| `firstResponse` | `supported:false` for built-in (the reply arrives whole); for fx the time to the first streamed event | factory |
+| `usage` | `{source:"provider", input, output}` or `{source:"unavailable"}` when the provider sent no counts (never a made-up zero); fx: per-prompt total (`scope:"prompt"`) | **provider** |
+| `request` | message count and characters sent (a size indicator, **not** tokens); `outputLimit`; fx: `modelRequests` | factory |
+| `retries`, `retryReasons` | transport retries inside the call (built-in) · malformed-tool-call re-prompts (fx) | factory |
+| `outcome`, `failure.kind` | `ok/error/cancelled`; `authentication`, `model_not_found`, `rate_limited`, `provider_error`, `connection`, `timeout`, `first_response_timeout`, `cancelled`, `budget`, `malformed_tool_call`, `malformed_response`, `other` | factory classification |
+| `response.toolCalls` | tool calls the model asked for in that reply (outcomes are in the run's `tool` events) | provider reply |
+| phases | `plan`, `agents`, `execution`, `verification`, `feedback`, `completion` durations | factory |
+
+The summary adds run duration, terminal status, checklist and final-check results, delivery and source-protection result, tool-call and
+failure counts, and *identical failing tool calls repeated* (a stuck loop; reported, never retried or skipped automatically).
+
+**Benchmarks: `npm run bench`** drives four fixed tasks (single-file edit, test-driven bug fix, multi-file implementation, repository
+investigation + implementation; `bench/tasks/*.json`) through the real factory as ordinary existing-project runs, then runs acceptance
+checks the model never sees. Every attempt is recorded, passed or not, and rates count all attempts.
+
+```bash
+npm run bench -- list
+npm run bench -- run --mock --out mock.json          # deterministic reference "model": proves the harness, measures NOTHING about a model
+npm run bench -- run --live --provider ollama --model qwen2.5-coder:14b --parallel 1 --num-ctx 16384 --repeat 3 --out ollama-p1.json
+npm run bench -- run --live --provider ollama --model qwen2.5-coder:14b --parallel 3 --num-ctx 16384 --repeat 3 --out ollama-p3.json
+npm run bench -- compare ollama-p1.json ollama-p3.json
+```
+
+`--live` is required to call a real provider (with an explicit `--provider` and `--model`; nothing is chosen automatically) and is
+never used by `npm test`. The report (`da-prompt.bench/1`) has the repository revision, mode, provider/model/engine and effective
+settings (hashed into `configId`), and per attempt: status (`passed` / `failed` / `incomplete` / `error`), phase durations, model
+calls, turns, tool calls, retries, tokens (labelled provider-reported or synthetic), verification, acceptance and delivery. `compare`
+lists configuration differences and per-task results side by side, refuses to treat mock and live results as comparable, and does not
+declare a winner. Change one setting per comparison. A mock report is not evidence about speed or quality, and CI only ever runs the mock.
+
+**Not yet validated (needs real local inference):** which model and quantisation to use; whether `--parallel 1` is faster than the
+default on a given machine; what context size is enough or too much; how large prompts get per turn on real tasks; whether Ollama's
+`/v1` API sends response headers before prompt evaluation (decides whether fx's 120 s first-response limit bites on CPU); how often
+local models need retries or malformed-tool-call re-prompts; and whether any prompt or history trimming is safe. No default was changed
+for any of these.
 
 ### Protect the server
 

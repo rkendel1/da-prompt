@@ -2,6 +2,9 @@
 
 import { requestWithRetry, requestStream, lineSplitter, describeError } from './http.js';
 
+// Fixed limit (not configurable): one request may take this long in total.
+export const REQUEST_TIMEOUT_MS = 15 * 60_000;
+
 export class AnthropicProvider {
   constructor({ id = 'anthropic', label = 'Anthropic', apiKey, model, plannerModel, baseUrl = 'https://api.anthropic.com', maxTokens = 8192, temperature, timeoutMs }) {
     if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set; add a key on the Providers page or choose another provider');
@@ -14,7 +17,7 @@ export class AnthropicProvider {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.maxTokens = maxTokens;
     this.temperature = temperature;
-    this.timeoutMs = timeoutMs || 15 * 60_000;
+    this.timeoutMs = timeoutMs || REQUEST_TIMEOUT_MS;
     this.noForcedTool = new Set(); // models that rejected a forced tool_choice
   }
 
@@ -54,7 +57,7 @@ export class AnthropicProvider {
           json = await send(withoutForce());
         }
       } else json = await send(forced ? withoutForce() : body);
-      return { content: json.content || [], stop_reason: json.stop_reason, usage: json.usage || {} };
+      return { content: json.content || [], stop_reason: json.stop_reason, usage: { ...(json.usage || {}), reported: Boolean(json.usage) } };
     } catch (err) {
       if (signal?.aborted) throw new Error('cancelled');
       throw new Error(`Anthropic API (${model}): ${describeError(err)}`);

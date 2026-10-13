@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 export const ENGINES = [
   { id: 'builtin', label: 'Built-in agents', description: 'da-prompt\'s own tool loop. Works with every provider.', package: null },
-  { id: 'fx', label: 'FX (@appport/fx)', description: 'The fx agent kernel drives the task with da-prompt\'s sandboxed tools. OpenAI-compatible endpoints and Ollama only.', package: '@appport/fx', experimental: true },
+  { id: 'fx', label: 'FX (@appport/fx)', description: 'The fx agent kernel drives the task with da-prompt\'s sandboxed tools. OpenAI-compatible endpoints and Ollama only; the model must start answering within about 120 s and fx has no num_ctx, timeout or retry settings, so prefer the built-in engine for slow local models.', package: '@appport/fx', experimental: true },
 ];
 export const ENGINE_IDS = ENGINES.map((e) => e.id);
 

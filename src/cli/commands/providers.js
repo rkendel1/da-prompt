@@ -14,15 +14,15 @@ async function find(client, id) {
 async function list(ctx) {
   const { out } = ctx;
   const client = await ctx.api();
-  const [{ providers, defaultProvider }, settings] = await Promise.all([listProviders(client, { refresh: true }), getSettings(client)]);
+  const [{ providers, defaultProvider, defaultModel: autoModel, defaultSource }, settings] = await Promise.all([listProviders(client, { refresh: true }), getSettings(client)]);
   const dp = settings.settings.find((s) => s.key === 'defaultProvider');
   const dm = settings.settings.find((s) => s.key === 'defaultModel');
   const pp = settings.settings.find((s) => s.key === 'defaultPlannerProvider');
   const pm = settings.settings.find((s) => s.key === 'defaultPlannerModel');
-  out.data({ defaultProvider, default: { provider: dp?.value || null, model: dm?.value || null, source: dp?.source }, planner: { provider: pp?.value || null, model: pm?.value || null, source: pp?.source }, providers: providers.map((p) => ({ id: p.id, label: p.label, type: p.type, status: p.status, message: p.message || null, models: (p.models || []).length, local: p.local, baseUrl: p.baseUrl, baseUrlSource: p.baseUrlSource, hasKey: p.hasKey, keySource: p.keySource, enabled: p.enabled })) });
+  out.data({ defaultProvider, defaultModel: autoModel || null, defaultSource: defaultSource || null, default: { provider: dp?.value || null, model: dm?.value || null, source: dp?.source }, planner: { provider: pp?.value || null, model: pm?.value || null, source: pp?.source }, providers: providers.map((p) => ({ id: p.id, label: p.label, type: p.type, status: p.status, message: p.message || null, models: (p.models || []).length, local: p.local, baseUrl: p.baseUrl, baseUrlSource: p.baseUrlSource, hasKey: p.hasKey, keySource: p.keySource, enabled: p.enabled })) });
   out.print(table(providers, [{ title: 'id', key: 'id' }, { title: 'provider', key: 'label', max: 24 }, { title: 'status', get: (p) => (p.status === 'ready' ? out.green(STATUS.ready) : out.yellow(STATUS[p.status] || p.status)) }, { title: 'models', get: (p) => (p.models || []).length }, { title: 'url / key from', get: (p) => `${p.baseUrl ? `${p.baseUrlSource || ''}` : ''}${p.needsKey || p.hasKey ? ` · key ${p.keySource || 'none'}` : ''}`.trim() || '—', max: 26 }, { title: 'note', get: (p) => p.message || '', max: 50 }], out));
   out.print('');
-  out.print(`Default: ${dp?.value || `(automatic → ${defaultProvider})`}${dm?.value ? ` / ${dm.value}` : ''}   ${out.dim(`source: ${dp?.source}`)}`);
+  out.print(`Default: ${dp?.value || `(automatic → ${defaultProvider}${autoModel ? ` / ${autoModel}` : ''})`}${dm?.value ? ` / ${dm.value}` : ''}   ${out.dim(dp?.value ? `source: ${dp.source}` : `chosen by: ${defaultSource || 'automatic'}`)}`);
   out.print(`Planner: ${pp?.value ? `${pp.value}${pm?.value ? ` / ${pm.value}` : ''}` : '(same as the default)'}`);
   return EXIT.OK;
 }

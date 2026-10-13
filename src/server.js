@@ -22,6 +22,8 @@ import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
 import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
 import { SOURCES } from './chat-context.js';
 import { engineStatus } from './engines/index.js';
+import { describeInference } from './contract.js';
+import { readRecords, summarizeRun } from './diagnostics.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -158,6 +160,15 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'tasks') return tasksApi(req, res, parts, url);
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'engines' && method === 'GET') return json(res, 200, { engines: await engineStatus(cfg), default: cfg.defaultEngine || 'builtin' });
+    if (parts[1] === 'diagnostics' && parts[2] === 'inference' && method === 'GET') {
+      // Offline preflight: configuration only. It never contacts a provider or sends a model request.
+      const q = (k) => url.searchParams.get(k) || undefined;
+      const providerOptions = {};
+      if (q('numCtx')) providerOptions.numCtx = Number(q('numCtx'));
+      if (q('temperature')) providerOptions.temperature = Number(q('temperature'));
+      if (q('toolMode')) providerOptions.toolMode = q('toolMode');
+      return json(res, 200, { inference: await describeInference(cfg, factory.providers, { provider: q('provider'), model: q('model'), engine: q('engine'), providerOptions }) });
+    }
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
@@ -240,6 +251,12 @@ export async function createServer(overrides = {}) {
       return json(res, 200, { events, lastSeq: all.at(-1)?.seq ?? (Number(url.searchParams.get('after')) || 0), total: all.length });
     }
     if (sub === 'evidence' && method === 'GET') return json(res, 200, { evidence: buildEvidence(run) });
+    if (sub === 'diagnostics' && method === 'GET') {
+      // Observations only (src/diagnostics.js): never prompts, file contents or replies; secrets are scrubbed when recorded.
+      const records = readRecords(store.runDir(id));
+      const limit = Math.max(0, Math.min(1000, Number(url.searchParams.get('calls') ?? 200) || 0));
+      return json(res, 200, { diagnostics: summarizeRun(run, await store.events(id), records), calls: records.filter((r) => r.type === 'call').slice(-limit) });
+    }
     if (sub === 'artifacts' && method === 'GET') {
       const delivery = [];
       for (const [name, label] of [['FACTORY_REPORT.md', 'Factory report'], ['test-results.json', 'Test results'], ['changes.patch', 'Patch'], ['project.tar.gz', isExisting(run) ? 'Changed files archive' : 'Project archive'], ['DELETED_FILES.txt', 'Deleted files']]) {

@@ -6,24 +6,44 @@ import { redact } from '../security.js';
 import { AGENT_TOOLS, BudgetError, agentSystem, completionFields, taskBrief, execTool, summarizeInput } from '../agents.js';
 import { loadEngineModule, fxEndpoint, EngineError } from './index.js';
 
+// Limits of this engine that da-prompt cannot change (see README "Agent engines"): fx's own first-response window comes from
+// inspecting the @appport/fx 0.1.2 source (openai_compatible_model_provider.zig), and is not exposed as an option.
+export const FX_FIRST_RESPONSE_SECONDS = 120;
+export const FX_MAX_ROUNDS = 3;
 const NUDGE = 'Continue the task using the tools, and call complete_task when it is done and verified.';
-const MAX_ROUNDS = 3;
+const MAX_ROUNDS = FX_MAX_ROUNDS;
 // Local models often write a tool call as plain text (e.g. `<function=write_file>`). fx refuses to run such text and does not
 // retry, and it drops the failed prompt from its history, so we start the attempt's prompt again. Earlier tool effects are
 // in the workspace, so the retry says so.
-const MAX_MALFORMED_RETRIES = 4;
+export const FX_MAX_MALFORMED_RETRIES = 4;
+const MAX_MALFORMED_RETRIES = FX_MAX_MALFORMED_RETRIES;
+export const FX_TIMEOUT_MESSAGE = `FX model error (LIBFX_MODEL_TIMEOUT): the model did not start answering in time. The FX engine allows about ${FX_FIRST_RESPONSE_SECONDS} seconds for the first response byte (@appport/fx 0.1.2) and offers no setting to change that, so a slow local model (a long prompt on CPU) can exceed it even though the built-in engine would wait. Switch this run to the built-in engine (--engine builtin; it waits up to 30 minutes per request), use a smaller or faster model, or use a hosted provider.`;
 const RECOVER = 'NOTE: your previous reply in this attempt wrote a tool call as plain text instead of using the tool-calling interface, so it could not run. Files you already wrote are still in the workspace — inspect it first (list_files / read_file) instead of redoing finished work. Always call tools through the structured tool-calling interface, and finish by calling complete_task.';
 
 export function makeFxRunner(cfg) {
-  return async function runAgentFx({ provider, ws, run, task, attempt, maxAttempts, feedback, upstream, lessons, settings, signal, emit, track }) {
+  return async function runAgentFx({ provider, ws, run, task, attempt, maxAttempts, feedback, upstream, lessons, settings, signal, emit, track, diag }) {
     const fx = await loadEngineModule(cfg, 'fx');
     const ep = fxEndpoint(provider);
     // fx reads the credential from a named environment variable on every request (it never passes through JS). The name
     // matches the secret filter in safeEnv(), so agent shells never see it.
     const envName = ep.apiKey ? `DA_PROMPT_FX_KEY_${crypto.randomBytes(6).toString('hex')}` : '';
     if (envName) process.env[envName] = ep.apiKey;
+    // FACTORY_MAX_OUTPUT_TOKENS, like the built-in adapters (fx's own default is "unset", i.e. the server's).
+    const outputTokens = Number.isSafeInteger(provider?.maxTokens) && provider.maxTokens > 0 ? provider.maxTokens : cfg.maxOutputTokens;
     const state = { completion: null, files: new Set(), commands: [], budget: null, turn: null, steps: 0 };
     let agent;
+    // fx reports each model request through onEvent (a documented option): time them on our own monotonic clock.
+    const onEvent = (ev) => {
+      const c = state.cur;
+      if (!c) return;
+      if (ev?.type === 'model.request') {
+        c.modelRequests++;
+        c.reqStart = performance.now();
+      } else if (ev?.type === 'model.response' && c.reqStart != null) {
+        c.requestMs.push(Math.round(performance.now() - c.reqStart));
+        c.reqStart = null;
+      }
+    };
     try {
       const model = await fx.createFxModel({ baseUrl: ep.baseUrl, model: ep.model, ...(envName ? { apiKeyEnv: envName } : {}) });
       const stop = () => queueMicrotask(() => state.turn?.cancel());
@@ -51,13 +71,15 @@ export function makeFxRunner(cfg) {
           return out.text.slice(0, 12_000);
         },
       }));
-      agent = await fx.createFxAgent({ model, tools, instructions: agentSystem(run, task, lessons).slice(0, 60_000), maxSteps: settings.maxAgentTurns });
+      agent = await fx.createFxAgent({ model, tools, instructions: agentSystem(run, task, lessons).slice(0, 60_000), maxSteps: settings.maxAgentTurns, maxOutputTokens: outputTokens, onEvent });
 
+      const record = (cur, extra) => diag?.fxPrompt({ ctx: { outputLimit: outputTokens }, taskId: task.id, attempt, durationMs: performance.now() - cur.t0, firstEventMs: cur.firstEventMs, modelRequests: cur.modelRequests, requestMs: cur.requestMs, toolCalls: cur.toolCalls, provider: { name: provider?.name, model: ep.model, dialect: provider?.dialect }, ...extra });
       let lastStop = null;
       let malformed = 0;
       for (let round = 0; round < MAX_ROUNDS + malformed && !state.completion && !state.budget; round++) {
         if (signal?.aborted) return { ok: false, error: 'cancelled' };
         const brief = taskBrief(run, task, { attempt, maxAttempts, feedback, upstream });
+        const cur = (state.cur = { t0: performance.now(), firstEventMs: null, modelRequests: 0, requestMs: [], toolCalls: 0, reqStart: null });
         const turn = agent.prompt(malformed && state.recovering ? `${brief}\n\n${RECOVER}` : round === 0 ? brief : NUDGE, { signal });
         state.recovering = false;
         state.turn = turn;
@@ -68,8 +90,9 @@ export function makeFxRunner(cfg) {
         };
         try {
           for await (const ev of turn) {
+            if (cur.firstEventMs == null && (ev.type === 'text_delta' || ev.type === 'tool_start' || ev.type === 'reasoning_delta')) cur.firstEventMs = performance.now() - cur.t0;
             if (ev.type === 'text_delta') text += ev.delta || '';
-            else if (ev.type === 'tool_start') { flush(); state.steps++; }
+            else if (ev.type === 'tool_start') { flush(); state.steps++; cur.toolCalls++; }
           }
         } catch { /* the failure is reported by turn.result */ }
         flush();
@@ -77,6 +100,7 @@ export function makeFxRunner(cfg) {
         try {
           result = await turn.result;
         } catch (e) {
+          record(cur, { err: e, retries: malformed });
           if (signal?.aborted) return { ok: false, error: 'cancelled' };
           if (e.kind === 'malformed_tool_call' && malformed < MAX_MALFORMED_RETRIES) {
             malformed++;
@@ -84,8 +108,10 @@ export function makeFxRunner(cfg) {
             emit('agent.message', { taskId: task.id, role: task.role, text: `The model wrote a tool call as plain text (retry ${malformed} of ${MAX_MALFORMED_RETRIES}).` });
             continue;
           }
+          if (e.code === 'LIBFX_MODEL_TIMEOUT') return { ok: false, error: FX_TIMEOUT_MESSAGE };
           return { ok: false, error: redact(`FX model error${e.kind || e.code ? ` (${e.kind || e.code})` : ''}: ${String(e.message || e).split('\n')[0]}`).slice(0, 600) };
         }
+        record(cur, { result, retries: malformed });
         track?.add({ input_tokens: result?.usage?.inputTokens || 0, output_tokens: result?.usage?.outputTokens || 0 });
         lastStop = result?.stopReason;
         if (lastStop === 'max_turn_requests' && !state.completion) break;

@@ -21,6 +21,8 @@ import crypto from 'node:crypto';
 import { ProviderRegistry } from './providers/registry.js';
 import { ENGINE_IDS, checkProvider, loadEngineModule } from './engines/index.js';
 import { makeFxRunner } from './engines/fx.js';
+import { RunDiagnostics, instrumentProvider } from './diagnostics.js';
+import { contractWarnings } from './contract.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
@@ -200,6 +202,10 @@ export class Factory {
       const probe = await this.providers.probe(spec);
       if (probe.status !== 'ready') throw new Error(`${spec.label} is not ready: ${probe.message || probe.status}`);
       model = probe.defaultModel;
+      // The model the last run used on this provider is remembered with it (providers.json "defaults"); honour it unless
+      // a configured default model or a per-provider default already decided, and only if the provider still lists it.
+      const saved = this.providers.settings.defaults || {};
+      if (!spec.defaultModel && saved.provider === providerId && saved.model && (probe.models || []).some((m) => m.id === saved.model)) model = saved.model;
       if (!model) throw new Error(`${spec.label} has no models available`);
     }
     const o = providerOptions || {};
@@ -475,14 +481,20 @@ export class Factory {
       await save();
       emit('run.status', { status, ...extra });
     };
+    const rawProvider = this.makeProvider(run);
+    const rawPlanner = this.makePlannerProvider(run);
+    // Observation only (src/diagnostics.js): times each model call and run phase; it cannot change what the call returns.
+    const diag = new RunDiagnostics({ dir: this.store.runDir(id), runId: id, engine: run.engine || 'builtin', secrets: () => [rawProvider.apiKey, rawPlanner.apiKey, this.cfg.githubToken, this.cfg.password] });
+    const provider = instrumentProvider(rawProvider, diag, 'agent');
+    const plannerProvider = instrumentProvider(rawPlanner, diag, 'planner');
     const layer = async (name, state) => {
       if (run.layers[name] === state) return;
       run.layers[name] = state;
       await save();
+      diag.phase(name, state);
       emit('layer', { layer: name, state });
     };
-    const provider = this.makeProvider(run);
-    const plannerProvider = this.makePlannerProvider(run);
+    for (const text of contractWarnings(run, this.providers)) emit('log', { level: 'warn', text });
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -529,7 +541,7 @@ export class Factory {
       // ── Execution loop (layers 3–6) ───────────────────────────────────────────────────────
       await setStatus('running');
       await layer('execution', 'active');
-      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer });
+      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer, diag });
       if (signal.aborted) throw signal.reason || new Error('cancelled');
       const tasks = run.plan.tasks;
       const allDone = tasks.every((t) => DONE_STATES.has(t.status));
@@ -573,7 +585,7 @@ export class Factory {
       const cancelled = signal.aborted;
       const reason = cancelled ? String(signal.reason?.message || 'cancelled') : err.message;
       for (const t of run.plan?.tasks || []) if (t.status === 'running') t.status = cancelled ? 'cancelled' : 'pending';
-      run.error = existing ? this.scrub(run, reason) : redact(reason);
+      run.error = this.hideSecrets(existing ? this.scrub(run, reason) : redact(reason));
       run.finishedAt = new Date().toISOString();
       run.status = cancelled ? 'cancelled' : err instanceof BudgetError ? 'needs_attention' : 'failed';
       await save();
@@ -602,7 +614,7 @@ export class Factory {
           .catch(async (err) => {
             if (err instanceof BudgetError || signal.aborted) throw err;
             t.status = 'escalated';
-            t.error = redact(err.message);
+            t.error = this.hideSecrets(redact(err.message));
             t.escalation = escalationFor(t, err.message);
             await save();
             emit('escalation', { taskId: t.id, reason: t.error, options: t.escalation.options });
@@ -622,7 +634,7 @@ export class Factory {
     await Promise.allSettled(running.values());
   }
 
-  async runTask(run, task, { ws, notes = ws, provider, signal, track, emit, save, layer }) {
+  async runTask(run, task, { ws, notes = ws, provider, signal, track, emit, save, layer, diag }) {
     const maxAttempts = run.settings.maxAttempts;
     const base = task.attemptBase || 0;
     let feedback = task.attempts.length > base ? task.attempts.at(-1).feedback : null;
@@ -642,15 +654,15 @@ export class Factory {
       const lessons = await readLessons(notes);
       const out = await this.agentRunner(run)({
         provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
-        settings: run.settings, signal, track,
+        settings: run.settings, signal, track, diag,
         emit: (type, data) => emit(type, { ...data, attempt: n }),
       });
       if (signal.aborted) return;
 
       if (!out.ok) {
         attempt.ok = false;
-        attempt.error = out.error;
-        feedback = `The agent did not complete the task: ${out.error}`;
+        attempt.error = this.hideSecrets(out.error);
+        feedback = `The agent did not complete the task: ${attempt.error}`;
       } else {
         attempt.result = out.result;
         // ── Layer 5: verify before moving on ──
@@ -674,7 +686,7 @@ export class Factory {
 
       // ── Layer 6: feedback ──
       attempt.finishedAt = new Date().toISOString();
-      attempt.feedback = redact(feedback);
+      attempt.feedback = this.hideSecrets(redact(feedback));
       await layer('feedback', 'active');
       await save();
       emit('feedback', { taskId: task.id, attempt: n, willRetry: n < maxAttempts, message: redact(feedback).slice(0, 3000), headline: headline(feedback) });
@@ -745,6 +757,17 @@ export class Factory {
   // ── Existing projects ───────────────────────────────────────────────────────────────────────────
 
   /** Remove server-side paths and credentials from text that is stored or shown. */
+  /**
+   * Remove the exact values of every configured credential from text that is stored or shown. redact() only knows common key
+   * shapes; a provider that echoes back a credential of any other shape in an error body must not get it persisted.
+   */
+  hideSecrets(text) {
+    let s = String(text ?? '');
+    const secrets = [...this.providers.all().map((p) => p.apiKey), this.cfg.githubToken, this.cfg.password];
+    for (const v of secrets) if (typeof v === 'string' && v.length >= 8) s = s.split(v).join('***');
+    return s;
+  }
+
   scrub(run, text) {
     const paths = [this.store.workspaceDir(run.id), this.store.runDir(run.id), this.cfg.dataDir];
     try {

@@ -1,0 +1,36 @@
+{
+  "id": "tdd-bugfix",
+  "kind": "test-driven bug fix",
+  "title": "Fix the cart total",
+  "idea": "The tests in test/cart.test.js fail. Find the bug in src/cart.js and fix it without changing the tests.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"cart\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/cart.test.js\"\n  }\n}\n",
+    "src/cart.js": "export function total(items) {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+    "test/cart.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { total } from '../src/cart.js';\ntest('total counts quantities', () => assert.equal(total([{ price: 2, qty: 3 }, { price: 5, qty: 1 }]), 11));\ntest('an empty cart is free', () => assert.equal(total([]), 0));\ntest('quantity defaults to one', () => assert.equal(total([{ price: 4 }]), 4));\n",
+    "README.md": "# cart\n"
+  },
+  "reference": {
+    "src/cart.js": "export function total(items) {\n  return items.reduce((sum, item) => sum + item.price * (item.qty ?? 1), 0);\n}\n"
+  },
+  "read": [
+    "test/cart.test.js",
+    "src/cart.js"
+  ],
+  "acceptance": [
+    {
+      "name": "the project's tests pass",
+      "files": {},
+      "command": "node --test test/cart.test.js"
+    },
+    {
+      "name": "the tests were not weakened",
+      "files": {
+        "accept.mjs": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst t = fs.readFileSync('test/cart.test.js', 'utf8');\nassert.match(t, /price: 2, qty: 3/);\nassert.match(t, /11\\)/);\nassert.equal((t.match(/^test\\(/gm) || []).length, 3);\n"
+      },
+      "command": "node accept.mjs"
+    }
+  ],
+  "expectChanged": [
+    "src/cart.js"
+  ]
+}

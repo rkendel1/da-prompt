@@ -1,0 +1,41 @@
+{
+  "id": "multi-file-feature",
+  "kind": "multi-file implementation",
+  "title": "Add a text utilities module",
+  "idea": "Add a small text utilities module under src/text/: slugify(s) (lower-case, words joined by single hyphens, no leading/trailing hyphen), truncate(s, max) (at most max characters, ending with an ellipsis character when shortened), and an index.js that re-exports both. Add tests in test/text.test.js.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"textkit\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/text.test.js\"\n  }\n}\n",
+    "src/index.js": "export const version = '1.0.0';\n",
+    "test/version.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { version } from '../src/index.js';\ntest('has a version', () => assert.equal(version, '1.0.0'));\n",
+    "README.md": "# textkit\n"
+  },
+  "reference": {
+    "src/text/slugify.js": "export function slugify(s) {\n  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n}\n",
+    "src/text/truncate.js": "export function truncate(s, max) {\n  const str = String(s);\n  return str.length <= max ? str : `${str.slice(0, Math.max(0, max - 1))}\u2026`;\n}\n",
+    "src/text/index.js": "export { slugify } from './slugify.js';\nexport { truncate } from './truncate.js';\n",
+    "test/text.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { slugify, truncate } from '../src/text/index.js';\ntest('slugify', () => assert.equal(slugify('  Hello, World!  '), 'hello-world'));\ntest('truncate', () => assert.equal(truncate('abcdef', 4), 'abc\u2026'));\ntest('short strings are unchanged', () => assert.equal(truncate('abc', 4), 'abc'));\n"
+  },
+  "read": [
+    "src/index.js"
+  ],
+  "acceptance": [
+    {
+      "name": "the project's tests pass",
+      "files": {},
+      "command": "node --test test/text.test.js"
+    },
+    {
+      "name": "behaviour matches the specification",
+      "files": {
+        "accept.mjs": "import assert from 'node:assert/strict';\nimport { slugify, truncate } from './src/text/index.js';\nassert.equal(slugify('  Hello, World!  '), 'hello-world');\nassert.equal(slugify('A  B--C'), 'a-b-c');\nassert.equal(truncate('abcdef', 4).length, 4);\nassert.ok(truncate('abcdef', 4).endsWith('\u2026'));\nassert.equal(truncate('abc', 5), 'abc');\n"
+      },
+      "command": "node accept.mjs"
+    }
+  ],
+  "expectChanged": [
+    "src/text/slugify.js",
+    "src/text/truncate.js",
+    "src/text/index.js",
+    "test/text.test.js"
+  ]
+}

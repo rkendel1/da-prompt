@@ -188,3 +188,125 @@ test('createRun rejects providers that are not usable, and the connection test r
   assert.equal(bad.ok, false);
   assert.match(bad.message, /not found/);
 });
+
+// ── Hosted execution readiness ──────────────────────────────────────────────────────────────
+// A mocked hosted endpoint proves the wiring (selection, tool calls, verification, delivery) with Ollama absent. It says
+// nothing about a real provider's speed, tool quality or limits; see "Real hosted-provider smoke test" in the README.
+import net from 'node:net';
+
+const deadPort = () =>
+  new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+const KEY = 'sk-hosted-test-0123456789abcdef';
+const allText = (dir) => {
+  const out = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) walk(f);
+      else if (e.size !== 0) out.push([f, fs.readFileSync(f, 'latin1')]);
+    }
+  };
+  walk(dir);
+  return out;
+};
+
+test('a complete run uses a hosted OpenAI-compatible endpoint with Ollama unavailable, and the gates still decide', async () => {
+  const hosted = await mock({ flavor: 'openai', models: ['hosted-coder'], apiKey: KEY });
+  const ollamaGone = `http://127.0.0.1:${await deadPort()}`;
+  const cfg = loadConfig({ dataDir: tmpDir(), env: { OPENAI_API_KEY: KEY, OPENAI_BASE_URL: hosted.url, OLLAMA_HOST: ollamaGone }, defaultProvider: 'openai', defaultModel: 'hosted-coder' });
+  const store = new RunStore(cfg.dataDir);
+  const factory = new Factory({ cfg, store, previews });
+
+  const found = await factory.providers.discover();
+  assert.equal(found.providers.find((p) => p.id === 'ollama').status, 'unreachable');
+  assert.equal(found.defaultProvider, 'openai');
+  assert.deepEqual([found.defaultModel, found.defaultSource], ['hosted-coder', 'configured']);
+
+  const created = await factory.createRun({ idea: 'A reading list', settings: { deploy: false } }); // no provider named: the configuration decides
+  assert.deepEqual([created.provider, created.model, created.engine], ['openai', 'hosted-coder', 'builtin']);
+  const run = await factory.start(created.id);
+  assert.equal(run.status, 'completed', run.error || JSON.stringify(run.checklist));
+
+  const chats = hosted.log.filter((r) => r.url === '/v1/chat/completions');
+  assert.ok(chats.length > 10, 'planning and every agent turn went to the hosted endpoint');
+  assert.ok(chats.every((r) => r.body.model === 'hosted-coder' && r.headers.authorization === `Bearer ${KEY}`));
+  assert.deepEqual(chats[0].body.tool_choice, { type: 'function', function: { name: 'submit_plan' } });
+  assert.ok(chats.some((r) => r.body.tools?.some((t) => t.function.name === 'write_file')), 'agents were offered the sandboxed tools');
+  const events = await store.events(run.id);
+  assert.ok(events.some((e) => e.type === 'tool' && e.tool === 'write_file' && e.ok), 'tool calls were executed in the workspace');
+  assert.ok(events.some((e) => e.type === 'verify' && e.taskId !== '_final'), 'task verification ran');
+  assert.ok(events.some((e) => e.type === 'verify' && e.taskId === '_final'), 'final verification ran');
+  assert.ok(run.checklist.length > 0 && run.checklist.every((c) => c.ok), JSON.stringify(run.checklist));
+  assert.ok(run.delivery, 'delivery was produced');
+  assert.ok(!hosted.log.some((r) => r.url.startsWith('/api/')), 'nothing spoke the Ollama protocol');
+
+  // The credential stays out of everything persisted and everything served.
+  for (const [file, text] of allText(cfg.dataDir)) assert.ok(!text.includes(KEY), `${file} must not contain the key`);
+  assert.ok(!JSON.stringify(found).includes(KEY));
+});
+
+test('a verification failure is not hidden by the provider: a hosted run whose checks fail does not complete', async () => {
+  const hosted = await mock({ flavor: 'openai', models: ['hosted-coder'] });
+  const { factory } = setup({ OPENAI_API_KEY: KEY, OPENAI_BASE_URL: hosted.url });
+  hosted.log.length = 0;
+  // The mock's brain injects one bug that only a second attempt fixes (see the full-run tests above).
+  const created = await factory.createRun({ idea: 'A reading list', provider: 'openai', model: 'hosted-coder', settings: { deploy: false, maxAttempts: 1 } });
+  const run = await factory.start(created.id);
+  // With a single attempt the bug is not fixed, so the verdict must say so rather than trust the model's claim of completion.
+  assert.notEqual(run.status, 'completed');
+  assert.ok(run.plan.tasks.some((t) => t.status === 'escalated'), 'the failed task is escalated, not reported as done');
+});
+
+test('provider and model selection: explicit choice, configured default, saved last choice, and visible defaults', async () => {
+  const api = await mock({ flavor: 'openai', models: ['alpha-coder', 'gpt-5'], apiKey: KEY });
+  const env = { OPENAI_API_KEY: KEY, OPENAI_BASE_URL: api.url, OLLAMA_HOST: `http://127.0.0.1:${await deadPort()}` };
+  const cfg = loadConfig({ dataDir: tmpDir(), env, defaultProvider: '', defaultModel: '' });
+  const factory = new Factory({ cfg, store: new RunStore(cfg.dataDir), previews });
+
+  // Nothing chosen yet: the first ready provider and its preferred model, and the page/CLI can say why.
+  let d = await factory.providers.discover();
+  assert.deepEqual([d.defaultProvider, d.defaultModel, d.defaultSource], ['openai', 'gpt-5', 'first ready provider']);
+  assert.equal((await factory.createRun({ idea: 'x', settings: { deploy: false } })).model, 'gpt-5');
+
+  // An explicit choice wins, and is remembered together with its model.
+  const explicit = await factory.createRun({ idea: 'x', provider: 'openai', model: 'alpha-coder', settings: { deploy: false } });
+  assert.equal(explicit.model, 'alpha-coder');
+  d = await factory.providers.discover();
+  assert.deepEqual([d.defaultProvider, d.defaultModel, d.defaultSource], ['openai', 'alpha-coder', 'last run']);
+  const next = await factory.createRun({ idea: 'x', settings: { deploy: false } });
+  assert.deepEqual([next.provider, next.model], ['openai', 'alpha-coder'], 'the remembered model is used, not just the remembered provider');
+
+  // A model that is no longer offered is not forced on the user.
+  factory.providers.remember('openai', 'retired-model');
+  assert.equal((await factory.createRun({ idea: 'x', settings: { deploy: false } })).model, 'gpt-5');
+
+  // A configured model (FACTORY_MODEL / settings) outranks the remembered one; precedence is otherwise unchanged.
+  const pinned = loadConfig({ dataDir: cfg.dataDir, env, defaultProvider: 'openai', defaultModel: 'gpt-5' });
+  const f2 = new Factory({ cfg: pinned, store: new RunStore(pinned.dataDir), previews });
+  f2.providers.remember('openai', 'alpha-coder');
+  assert.equal((await f2.createRun({ idea: 'x', settings: { deploy: false } })).model, 'gpt-5');
+  assert.equal((await f2.providers.discover()).defaultSource, 'configured');
+});
+
+test('provider failures say what kind of failure it was, and never include the key', async () => {
+  const api = await mock({ flavor: 'openai', models: ['m'], apiKey: KEY });
+  const wrong = 'sk-wrong-key-0123456789abcdef';
+  const bad = setup({ OPENAI_API_KEY: wrong, OPENAI_BASE_URL: api.url });
+  await assert.rejects(bad.factory.createRun({ idea: 'x', provider: 'openai' }), (e) => /not ready: Key rejected: authentication failed/.test(e.message) && !e.message.includes(wrong));
+
+  const refused = setup({ OPENAI_API_KEY: KEY, OPENAI_BASE_URL: `http://127.0.0.1:${await deadPort()}` });
+  await assert.rejects(refused.factory.createRun({ idea: 'x', provider: 'openai' }), /Cannot reach .*connection failed: connection refused/);
+  await assert.rejects(refused.factory.createRun({ idea: 'x', provider: 'anthropic' }), /not ready: Add an API key or set ANTHROPIC_API_KEY/);
+
+  const { describeError, HttpError } = await import('../src/providers/http.js');
+  assert.match(describeError(new HttpError(429, '{"error":{"message":"slow down"}}')), /^rate limited: HTTP 429: slow down/);
+  assert.match(describeError(new HttpError(503, 'overloaded')), /^provider-side error: HTTP 503/);
+  assert.match(describeError(new HttpError(404, '{"error":"no such model"}')), /^model or endpoint not found: HTTP 404/);
+  assert.match(describeError(Object.assign(new Error('x'), { code: 'ETIMEDOUT' })), /^inference timed out/);
+});

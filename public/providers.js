@@ -273,7 +273,7 @@ export async function renderProvidersPage(main, api, toast) {
   const list = $('#pv-list');
   const draw = (data) => {
     const sorted = [...data.providers].sort((a, b) => (b.status === 'ready') - (a.status === 'ready'));
-    list.innerHTML = sorted.map((p) => card(p, data.defaultProvider)).join('');
+    list.innerHTML = sorted.map((p) => card(p, data.defaultProvider, data)).join('');
     list.querySelectorAll('form[data-id]').forEach((f) => wire(f, data.providers.find((p) => p.id === f.dataset.id)));
   };
   const reload = async (refresh = true) => {
@@ -281,12 +281,12 @@ export async function renderProvidersPage(main, api, toast) {
     draw(await loadProviders(api, { refresh }));
   };
 
-  function card(p, def) {
+  function card(p, def, data = {}) {
     const offline = p.type === 'offline';
     const models = p.models || [];
     return `<form class="card pv-card ${p.status === 'ready' ? 'is-ready' : ''}" data-id="${esc(p.id)}" autocomplete="off">
       <div class="pv-head">
-        <div><h3>${esc(p.label)} ${p.id === def ? '<span class="pill">default</span>' : ''}</h3>
+        <div><h3>${esc(p.label)} ${p.id === def ? `<span class="pill" title="${esc(data.defaultSource ? `chosen by: ${data.defaultSource}` : '')}">default${data.defaultModel ? ` · ${esc(data.defaultModel)}` : ''}</span>` : ''}</h3>
           <span class="mono muted">${esc(TYPE_LABEL[p.type] || p.type)}${p.local && !offline ? ' · local' : ''}${p.custom ? ' · custom' : ''}</span></div>
         ${pill(p.status)}
       </div>
