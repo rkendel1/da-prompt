@@ -11,6 +11,12 @@ import { PreviewManager } from './deploy.js';
 import { Workspace } from './sandbox.js';
 import { renderPrompt, PROMPT_TEMPLATE, INPUT_FIELDS } from './prompt.js';
 import { buildReport } from './deliver.js';
+import { SettingsError } from './settings.js';
+import { runHealth, describeEnvironment } from './health.js';
+import { probePax, listEvidence, STEPS as PAX_STEPS, SEMANTICS as PAX_SEMANTICS } from './pax.js';
+import { buildEvidence } from './evidence.js';
+import { redact } from './security.js';
+import { redactUrl } from './gitutil.js';
 import { ProjectError, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
 
 const TYPES = {
@@ -34,7 +40,19 @@ class HttpError extends Error {
 }
 
 /** ProjectError carries its own HTTP status (403 unauthorized directory, 404 missing ref, ...). */
-const asHttp = (err) => (err instanceof HttpError ? err : new HttpError(err.status || 400, err.message, err.conflicts ? { conflicts: err.conflicts } : undefined));
+const asHttp = (err) => (err instanceof HttpError ? err : new HttpError(err.status || 400, err.message, err.conflicts ? { conflicts: err.conflicts } : err.errors ? { errors: err.errors } : undefined));
+
+/**
+ * Settings that grant host authority (folders, tokens, the PAX path, the password) may only be read or
+ * changed by an authenticated server, or by a browser on the host itself. A request relayed by a proxy is
+ * not "on the host", whatever address it arrives from.
+ */
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+function isAdmin(req, cfg) {
+  if (cfg.password) return true; // checkAuth has already accepted this request
+  if (req.headers['x-forwarded-for'] || req.headers.forwarded || req.headers['x-real-ip']) return false;
+  return LOOPBACK.has(req.socket.remoteAddress);
+}
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...SECURITY_HEADERS });
@@ -93,6 +111,7 @@ export async function createServer(overrides = {}) {
   const factory = new Factory({ cfg, store, previews });
   await factory.recover();
   const publicDir = path.join(cfg.root, 'public');
+  cfg.settings.onChange('maxPreviews', (v) => (previews.max = v));
 
   const getRun = async (id) => {
     if (!/^[0-9a-z-]{6,40}$/i.test(id) || !store.exists(id)) throw new HttpError(404, 'run not found');
@@ -106,12 +125,15 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'config' && method === 'GET') {
       const roots = authorizedRoots(cfg);
       return json(res, 200, {
-        defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null,
+        defaults: cfg.defaults, pax: { autoRun: cfg.paxAutoRun, steps: cfg.paxSteps, catalog: Object.entries(PAX_STEPS).map(([id, s]) => ({ id, title: s.title, class: s.class })) }, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null,
         // Existing projects: capabilities only. Server paths are never sent to the browser.
         projects: { local: roots.length > 0, roots: roots.map((r) => ({ label: r.label, readOnly: r.readOnly })), github: true, githubHosts: cfg.gitHosts, canPublish: Boolean(cfg.githubToken) },
       });
     }
     if (parts[1] === 'projects') return projectsApi(req, res, parts);
+    if (parts[1] === 'settings') return settingsApi(req, res, parts);
+    if (parts[1] === 'system') return systemApi(req, res, parts, url);
+    if (parts[1] === 'pax') return paxApi(req, res, parts);
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
@@ -168,6 +190,32 @@ export async function createServer(overrides = {}) {
       }
       return json(res, 202, { run: publicRun(await store.load(id), factory, previews) });
     }
+    if (sub === 'evidence' && method === 'GET') return json(res, 200, { evidence: buildEvidence(run) });
+    if (sub === 'artifacts' && method === 'GET') {
+      const delivery = [];
+      for (const [name, label] of [['FACTORY_REPORT.md', 'Factory report'], ['test-results.json', 'Test results'], ['changes.patch', 'Patch'], ['project.tar.gz', isExisting(run) ? 'Changed files archive' : 'Project archive'], ['DELETED_FILES.txt', 'Deleted files']]) {
+        const f = path.join(store.deliveryDir(id), name);
+        if (fs.existsSync(f)) delivery.push({ name, label, bytes: fs.statSync(f).size, href: `api/runs/${id}/download/${name}` });
+      }
+      const pax = (await listEvidence(store.paxDir(id))).map((a) => ({ ...a, href: `api/runs/${id}/download/pax/${a.name}`, sha256: run.pax?.steps?.flatMap((s) => s.artifacts).find((x) => x.name === a.name)?.sha256 }));
+      return json(res, 200, { delivery, pax });
+    }
+    if (sub === 'pax' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 200, { run: publicRun(await factory.runPax(id, { steps: body.steps, confirmTests: body.confirmTests === true }), factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
+    if (sub === 'review' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 200, { run: publicRun(await factory.review(id, { decision: body.decision, note: body.note }), factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
     if (sub === 'changes' && method === 'GET') {
       try {
         return json(res, 200, await factory.changes(id, url.searchParams.get('path') || ''));
@@ -219,6 +267,14 @@ export async function createServer(overrides = {}) {
       return res.end(buildReport(run));
     }
     if (sub === 'download' && method === 'GET') {
+      if (parts[4] === 'pax' && parts[5]) {
+        const n = parts[5];
+        if (!/^[a-z0-9.-]+$/.test(n) || n.includes('..')) throw new HttpError(404, 'unknown file');
+        const f = path.join(store.paxDir(id), n);
+        if (!fs.existsSync(f)) throw new HttpError(404, 'no such evidence file');
+        res.writeHead(200, { 'content-type': n.endsWith('.json') ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8', 'content-disposition': `attachment; filename="pax-${id}-${n}"`, ...SECURITY_HEADERS });
+        return fs.createReadStream(f).pipe(res);
+      }
       const name = parts[4] || 'project.tar.gz';
       if (!['project.tar.gz', 'FACTORY_REPORT.md', 'test-results.json', 'changes.patch', 'DELETED_FILES.txt'].includes(name)) throw new HttpError(404, 'unknown file');
       const file = path.join(store.deliveryDir(id), name);
@@ -292,6 +348,58 @@ export async function createServer(overrides = {}) {
       }
     } catch (err) {
       throw asHttp(err);
+    }
+    throw new HttpError(404, 'not found');
+  }
+
+  // ── Settings, health and PAX (the browser-first operating surface) ──────────────────────────────
+
+  async function settingsApi(req, res, parts) {
+    const admin = isAdmin(req, cfg);
+    if (parts.length === 2 && req.method === 'GET') return json(res, 200, cfg.settings.view({ admin }));
+    if (parts.length === 2 && req.method === 'PUT') {
+      const body = await readBody(req);
+      try {
+        const result = cfg.settings.update(body.values ?? body, { admin });
+        // Never log values (they can be secrets): only which settings changed.
+        if (result.changed.length) console.log(`settings saved: ${result.changed.join(', ')}`);
+        healthCache = null;
+        factory.providers.cache.clear();
+        return json(res, 200, { ...result, ...cfg.settings.view({ admin }) });
+      } catch (err) {
+        throw asHttp(err instanceof SettingsError ? err : new SettingsError(400, err.message));
+      }
+    }
+    throw new HttpError(405, 'method not allowed');
+  }
+
+  let healthCache = null;
+  async function systemApi(req, res, parts, url) {
+    if (parts[2] === 'health' && req.method === 'GET') {
+      if (url.searchParams.get('refresh') === '1' || !healthCache || Date.now() - healthCache.at > 5000) healthCache = { at: Date.now(), result: await runHealth({ cfg, factory }) };
+      return json(res, 200, { ...healthCache.result, admin: isAdmin(req, cfg), auth: Boolean(cfg.password), environment: describeEnvironment() });
+    }
+    throw new HttpError(404, 'not found');
+  }
+
+  async function paxApi(req, res, parts) {
+    if (!parts[2] && req.method === 'GET') {
+      const status = await probePax(cfg);
+      return json(res, 200, {
+        status,
+        environment: describeEnvironment(),
+        config: { path: cfg.paxPath || '', autoRun: cfg.paxAutoRun, steps: cfg.paxSteps, timeoutMs: cfg.paxTimeoutMs, pathSource: cfg.settings.source('paxPath') },
+        catalog: Object.entries(PAX_STEPS).map(([id, s]) => ({ id, title: s.title, class: s.class, about: s.about, available: status.steps?.[id]?.available ?? false, reason: status.steps?.[id]?.reason ?? (status.state === 'ok' ? null : 'PAX is not usable') })),
+        semantics: PAX_SEMANTICS,
+      });
+    }
+    if (parts[2] === 'probe' && req.method === 'POST') {
+      const body = await readBody(req);
+      const candidate = typeof body.path === 'string' ? body.path.trim() : undefined;
+      // Running an arbitrary executable to see what it is = host authority.
+      if (candidate && !isAdmin(req, cfg)) throw new HttpError(403, 'Testing a different PAX executable needs an authenticated session (set an access password) or a browser on the server machine.');
+      if (candidate && (/[\0\r\n;&|<>$`"'\\*?]/.test(candidate) || candidate.length > 400)) throw new HttpError(400, 'that is not a plain executable name or path');
+      return json(res, 200, { status: await probePax(cfg, { candidate }) });
     }
     throw new HttpError(404, 'not found');
   }
@@ -419,7 +527,7 @@ export async function createServer(overrides = {}) {
     } catch (err) {
       const status = err.status || 500;
       if (status === 500) console.error(err);
-      if (!res.headersSent) json(res, status, { error: err.message || 'internal error', ...(err.extra || {}) });
+      if (!res.headersSent) json(res, status, { error: redactUrl(redact(String(err.message || 'internal error'))), ...(err.extra || {}) });
       else res.end();
     }
   });

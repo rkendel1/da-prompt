@@ -21,11 +21,18 @@
       </a>
       <a class="new-run" href="#/">+ New run</a>
       <nav class="runs" id="runs" aria-label="Runs"></nav>
-      <a class="side-link" href="#/providers">&lt;providers&gt; models &amp; keys</a>
-      <a class="side-link" href="#/prompt">&lt;prompt&gt; operating prompt</a>
+      <nav class="sidenav" aria-label="Operations">
+        <a class="side-link" href="#/history">&lt;history&gt; all runs</a>
+        <a class="side-link" href="#/setup"><span class="hdot" id="health-dot" aria-hidden="true"></span>&lt;setup&gt; system health</a>
+        <a class="side-link" href="#/settings">&lt;settings&gt; saved configuration</a>
+        <a class="side-link" href="#/pax">&lt;pax&gt; project evidence</a>
+        <a class="side-link" href="#/providers">&lt;providers&gt; models &amp; keys</a>
+        <a class="side-link" href="#/prompt">&lt;prompt&gt; operating prompt</a>
+      </nav>
     </aside>
 
     <main class="main" id="main" tabindex="-1"></main>
+    <div id="backend-banner" class="banner" role="alert" hidden>The da-prompt backend is not responding. Nothing on this page is changing; it will reconnect automatically.</div>
   </div>
 
   <template id="tpl-new">
@@ -34,6 +41,7 @@
       <h1>Turn an idea into a working app.</h1>
       <p class="lede">The factory plans a task graph, spins up specialized agents, runs them in parallel, verifies every step, fixes what fails, deploys, and hands you the code.</p>
 
+      <div id="setup-banner" class="card callout fail" role="status" hidden></div>
       <div class="new-grid">
         <form id="new-form" class="card prompt-card" autocomplete="off">
           <div class="tag">&lt;project&gt;</div>
@@ -75,6 +83,11 @@
           <div id="model-picker" class="model-picker"></div>
           <div class="tag">&lt;/model&gt;</div>
 
+          <fieldset class="pax-opt" id="pax-opt">
+            <legend>Observation evidence</legend>
+            <label class="field check"><input name="pax" id="pax-check" type="checkbox"> <span id="pax-label">Collect PAX observations after verification</span></label>
+            <p class="muted" id="pax-hint"></p>
+          </fieldset>
           <label class="field"><span>Deliver files to <em>optional folder</em></span><input name="outputDir" id="output-dir" placeholder="~/Projects/my-app  (a new or empty folder; leave blank to download from the run page)"></label>
 
           <details class="advanced">
@@ -87,6 +100,7 @@
               <label class="field wide" id="repo-field" hidden><span>Push result to repo (https)</span><input name="repoUrl" placeholder="https://github.com/you/new-app.git"></label>
             </div>
           </details>
+          <section class="scope" id="run-scope" aria-labelledby="scope-title"><h3 id="scope-title">Before you start: what this run may do</h3><ul class="plain" id="scope-list"></ul></section>
           <p class="form-error" id="form-error" role="alert" hidden></p>
           <button class="primary" type="submit">Start the factory →</button>
         </form>

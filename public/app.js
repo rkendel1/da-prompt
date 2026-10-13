@@ -1,5 +1,6 @@
 // da-prompt factory UI. No framework: hash routing, fetch, EventSource.
 import { mountModelPicker, renderProvidersPage } from './providers.js';
+import { renderSetupPage, renderSettingsPage, renderPaxPage, renderHistoryPage, renderEvidence, refreshHealthDot, loadHealth } from './ops.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const main = $('#main');
@@ -16,8 +17,26 @@ const EXAMPLES = [
 let config = null;
 let current = null; // { id, run, events, es, tab, selectedTask, file }
 
+let backendUp = true;
+function setBackend(up) {
+  if (up === backendUp) return;
+  backendUp = up;
+  const b = $('#backend-banner');
+  if (b) b.hidden = up;
+  if (up && current?.id) reconnectRun();
+}
+
 async function api(path, options = {}) {
-  const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
+  let res;
+  try {
+    res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
+    setBackend(true);
+  } catch {
+    setBackend(false);
+    const err = new Error('The da-prompt backend is not reachable. Check that the server is running; this page will reconnect on its own.');
+    err.unreachable = true;
+    throw err;
+  }
   const body = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text();
   if (!res.ok) {
     const err = new Error(body?.error || `Request failed (${res.status})`);
@@ -70,7 +89,9 @@ async function refreshRuns() {
 
 // ── Router ──────────────────────────────────────────────────────────────────────────────────
 function route() {
-  const hash = location.hash.replace(/^#/, '') || '/';
+  const full = location.hash.replace(/^#/, '') || '/';
+  const [hash, query = ''] = full.split('?');
+  const params = new URLSearchParams(query);
   if (current?.es) current.es.close();
   const m = hash.match(/^\/runs\/([\w-]+)/);
   if (m) {
@@ -79,6 +100,18 @@ function route() {
   } else if (hash === '/prompt') {
     current = null;
     renderPrompt();
+  } else if (hash === '/setup') {
+    current = null;
+    renderSetupPage(main, api, { toast });
+  } else if (hash === '/settings') {
+    current = null;
+    renderSettingsPage(main, api, { toast, group: params.get('group') });
+  } else if (hash === '/pax') {
+    current = null;
+    renderPaxPage(main, api, { toast });
+  } else if (hash === '/history') {
+    current = null;
+    renderHistoryPage(main, api);
   } else if (hash === '/providers') {
     current = null;
     renderProvidersPage(main, api, toast);
@@ -105,6 +138,7 @@ function renderNew() {
   });
   const picker = mountModelPicker($('#model-picker'), api);
   const project = mountProjectPicker(form);
+  mountNewRunExtras(form, picker, project);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
   form.tokenBudget.value = config.defaults.tokenBudget;
@@ -140,6 +174,7 @@ function renderNew() {
         maxAttempts: Number(fd.get('maxAttempts')),
         tokenBudget: Number(fd.get('tokenBudget')),
         deploy: fd.get('deploy') === 'on',
+        pax: fd.get('pax') === 'on',
       },
     };
     try {
@@ -151,6 +186,75 @@ function renderNew() {
       btn.disabled = false;
     }
   });
+}
+
+
+// First-run banner, PAX option and the "what this run may do" summary on the New Run screen.
+function mountNewRunExtras(form, picker, project) {
+  const banner = $('#setup-banner');
+  loadHealth(api).then((h) => {
+    if (!h.needsSetup && h.ready) return;
+    const fails = h.checks.filter((c) => c.status === 'fail');
+    if (!banner.isConnected) return;
+    banner.hidden = false;
+    banner.innerHTML = `<h2>Finish setup before your first run</h2><p>${esc(fails[0]?.summary || 'The factory is not ready to run real work yet.')}</p><a class="btn accent" href="#/setup">Open setup &amp; health →</a>`;
+  }).catch(() => {});
+
+  const pax = $('#pax-check');
+  const hint = $('#pax-hint');
+  api('api/pax').then((d) => {
+    if (!pax.isConnected) return;
+    if (d.status.state === 'ok') {
+      pax.checked = Boolean(d.config.autoRun);
+      hint.innerHTML = `PAX ${esc(d.status.version)} is available on the server. Steps: ${esc(d.config.steps.join(', '))}. The output is stored beside the run and shown separately — it is not verification. <a href="#/pax">Details</a>`;
+    } else {
+      pax.disabled = true;
+      pax.checked = false;
+      hint.innerHTML = `PAX is not usable on the server (${esc(d.status.state)}): ${esc(d.status.message || '')} <a href="#/pax">See the PAX page</a>`;
+    }
+    renderScope();
+  }).catch(() => {
+    pax.disabled = true;
+    hint.textContent = 'PAX status could not be read.';
+  });
+
+  async function renderScope() {
+    const fd = new FormData(form);
+    const m = project.mode();
+    let choice = {};
+    try {
+      choice = (await picker).getChoice();
+    } catch {
+      /* picker not ready */
+    }
+    const L = [];
+    const dir = $('#directory-id');
+    const dirLabel = dir?.selectedOptions?.[0]?.textContent?.split(' — ')[0] || 'the selected directory';
+    if (m === 'new') {
+      L.push('<b>Creates</b> a new application in the run\'s isolated workspace. You download it, or export it to a new folder you name.');
+    } else if (m === 'local') {
+      const snap = fd.get('workingMode') === 'snapshot';
+      L.push(`<b>Reads</b> ${esc(dirLabel)} to build ${snap ? 'a copy of the working tree (including uncommitted files)' : 'a clone of the last commit'}.`);
+      L.push('<b>May modify</b> only that isolated workspace on the server. Your directory is not written during the run.');
+      L.push('<b>Applying</b> the result to your directory is a separate action after you review the diff and approve it; nothing is staged or committed.');
+      L.push('<b>Publishing</b> is not available for local runs.');
+    } else {
+      const repo = String(fd.get('sourceRepo') || '').trim() || 'the repository';
+      L.push(`<b>Reads</b> ${esc(repo)}${fd.get('ref') ? ` @ ${esc(fd.get('ref'))}` : ''} into an isolated clone on a new <code>da-prompt/…</code> branch.`);
+      L.push('<b>May modify</b> only that clone; the source branch is never changed.');
+      L.push(fd.get('publish') === 'on' ? '<b>Publishing is ON</b>: when the run finishes, only the run branch is pushed and a pull request is opened (a draft unless everything is verified).' : '<b>Publishing is off</b>: pushing and opening a pull request are explicit actions after you approve the diff.');
+    }
+    if (m !== 'new') L.push(fd.get('allowInstall') === 'on' ? '<b>Dependency installs are allowed</b> (they run the project\'s own scripts).' : 'Dependency installs, migrations and deploy commands are not run.');
+    L.push(fd.get('deploy') === 'on' ? `<b>Deploy:</b> ${m === 'new' ? 'a live preview of the new app will start on the server.' : 'a local preview of the result may start on the server.'}` : '<b>Deploy:</b> nothing is deployed.');
+    L.push(fd.get('pax') === 'on' ? '<b>PAX:</b> observations are collected after verification, separately from it.' : '<b>PAX:</b> not collected for this run.');
+    L.push(`<b>Models:</b> ${esc(choice.provider || 'default provider')}${choice.model ? ` · ${esc(choice.model)}` : ''}${choice.planner?.provider || choice.plannerProvider ? ` (planner ${esc(choice.planner?.provider || choice.plannerProvider)})` : ''}.`);
+    const list = $('#scope-list');
+    if (list) list.innerHTML = L.map((x) => `<li>${x}</li>`).join('');
+  }
+  form.addEventListener('change', renderScope);
+  form.addEventListener('input', renderScope);
+  setTimeout(renderScope, 400);
+  renderScope();
 }
 
 // Project section: new project | local directory | GitHub repository. Paths never come from the browser:
@@ -313,6 +417,9 @@ function connect() {
   const es = new EventSource(`api/runs/${id}/events`);
   current.es = es;
   let pending = null;
+  // EventSource reconnects by itself and resumes from the last event id, so no event is replayed twice.
+  es.onopen = () => setLive(true);
+  es.onerror = () => setLive(false);
   es.onmessage = (msg) => {
     if (current?.id !== id) return es.close();
     const e = JSON.parse(msg.data);
@@ -332,6 +439,28 @@ function connect() {
       }
     }, 250);
   };
+}
+
+function setLive(on) {
+  if (current) current.live = on;
+  const el = $('#live-ind');
+  if (el) {
+    el.className = `live ${on ? 'on' : 'off'}`;
+    el.textContent = on ? 'live' : 'reconnecting…';
+  }
+}
+
+// After the backend comes back (or the tab regains focus) re-open the stream and reload the run's state.
+async function reconnectRun() {
+  if (!current?.id) return;
+  const id = current.id;
+  try {
+    current.run = (await api(`api/runs/${id}`)).run;
+    if (current?.es?.readyState === 2) connect();
+    renderRun({ keepTab: true });
+  } catch {
+    /* still down */
+  }
 }
 
 function renderRun({ keepTab = false } = {}) {
@@ -354,6 +483,7 @@ function renderRun({ keepTab = false } = {}) {
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
           <span>${fmtNum(tokens)} tokens · ${run.usage?.calls || 0} calls</span>
           <span>${esc(dur(run.startedAt || run.createdAt, run.finishedAt))}</span>
+          ${run.executing || ACTIVE.has(run.status) ? `<span id="live-ind" class="live ${current.live === false ? 'off' : 'on'}" role="status">${current.live === false ? 'reconnecting…' : 'live'}</span>` : ''}
           <span>${esc(run.settings.maxParallel)} parallel · ${esc(run.settings.maxAttempts)} attempts</span>
         </div>
       </div>
@@ -375,12 +505,17 @@ function renderRun({ keepTab = false } = {}) {
       }).join('')}
     </div>
     ${stagesHtml(run)}
-    ${run.error ? `<div class="card escalation" style="margin-bottom:16px"><h3>Run stopped</h3><p>${esc(run.error)}</p>${canResume ? '<p class="muted">Resume to continue from where it stopped.</p>' : ''}</div>` : ''}
+    ${failureCard(run, canResume)}
+    ${nextActions(run, canResume)}
     <div class="tabs" role="tablist">
-      ${[['overview', 'Overview'], ['graph', 'Task graph'], ['activity', 'Activity'], ['files', 'Files'], ['delivery', 'Delivery']]
+      ${[['overview', 'Overview'], ['graph', 'Task graph'], ['activity', 'Activity'], ['files', 'Files'], ['evidence', 'Evidence'], ['delivery', 'Delivery']]
         .map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${current.tab === k}">${l}<span class="count" data-count="${k}"></span></button>`).join('')}
     </div>`;
 
+  root.querySelectorAll('[data-goto]').forEach((b) => (b.onclick = () => {
+    current.tab = b.dataset.goto;
+    renderRun();
+  }));
   root.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => {
     current.tab = b.dataset.tab;
     renderRun();
@@ -393,7 +528,45 @@ function renderRun({ keepTab = false } = {}) {
   if (keepTab && !live && tab.dataset.tab === current.tab) return;
   tab.dataset.tab = current.tab;
   tab.dataset.delivered = run.delivery ? '1' : '';
-  ({ overview: renderOverview, graph: renderGraph, activity: renderActivity, files: renderFiles, delivery: renderDelivery })[current.tab](tab, run, escalated);
+  ({ overview: renderOverview, graph: renderGraph, activity: renderActivity, files: renderFiles, evidence: renderEvidenceTab, delivery: renderDelivery })[current.tab](tab, run, escalated);
+}
+
+
+// What failed, what was observed, whether anything changed, and what the user can do next (and where).
+function failureCard(run, canResume) {
+  const tasks = run.plan?.tasks || [];
+  const esc1 = tasks.filter((t) => t.status === 'escalated');
+  const stopped = run.error || (['failed', 'cancelled', 'interrupted'].includes(run.status) && !run.executing);
+  if (!stopped && !esc1.length) return '';
+  const stages = run.project?.stages || {};
+  const lastStage = Object.entries(stages).filter(([, s]) => s.state === 'failed').map(([k, s]) => `${k}: ${s.detail || 'failed'}`)[0];
+  const changed = run.changes?.files?.length;
+  const what = run.error || (esc1.length ? `${esc1.length} task(s) could not be completed: ${esc1.map((t) => `${t.id} (${t.error || 'failed verification'})`).join('; ')}` : `The run is ${run.status.replace(/_/g, ' ')}.`);
+  const done = tasks.filter((t) => t.status === 'completed').length;
+  const next = [];
+  if (canResume) next.push('<b>Resume</b> continues from where it stopped (button above).');
+  if (esc1.length) next.push('<b>Retry, edit or skip</b> each escalated task in the Overview tab.');
+  if (run.status === 'needs_attention' && run.error && /token budget/.test(run.error)) next.push('Raise the token budget in <a href="#/settings?group=execution">Settings</a>, then Resume.');
+  if (/not ready|ECONN|unreachable|rejected|key/i.test(run.error || '')) next.push('Check the model provider on <a href="#/setup">Setup &amp; health</a>.');
+  next.push('Inspect what happened in the <b>Activity</b> and <b>Evidence</b> tabs.');
+  return `<div class="card escalation failure" role="alert" style="margin-bottom:16px"><h3>${esc(run.status === 'cancelled' ? 'Run cancelled' : run.status === 'needs_attention' ? 'Run needs your attention' : 'Run stopped')}</h3>
+    <dl class="fail-dl"><dt>What failed</dt><dd>${esc(what)}</dd>
+    <dt>What the factory observed</dt><dd>${esc(lastStage || `${done}/${tasks.length || 0} tasks completed; status ${run.status.replace(/_/g, ' ')}.`)}</dd>
+    <dt>Was anything changed</dt><dd>${run.source ? `Your ${run.source.mode === 'github' ? 'repository' : 'directory'} was <b>not</b> modified — edits happen in an isolated workspace${changed ? ` (${changed} file${changed === 1 ? '' : 's'} changed there so far)` : ''}.` : 'Only the run\'s own workspace was written.'}</dd>
+    <dt>What you can do next</dt><dd><ul class="plain">${next.map((n) => `<li>${n}</li>`).join('')}</ul></dd></dl></div>`;
+}
+
+function nextActions(run, canResume) {
+  if (run.executing || !['completed', 'needs_attention'].includes(run.status) || !run.source || !run.delivery) return '';
+  const review = run.review?.decision;
+  const items = [];
+  if (!review) items.push(['Review the changes', 'Look at the diff and the evidence, then approve or reject.', 'delivery']);
+  if (review === 'approved' && run.source.mode === 'local' && !run.delivery.local?.applied) items.push(['Apply to your directory', 'Approved. Applying is its own step, with a conflict check.', 'delivery']);
+  if (review === 'approved' && run.source.mode === 'github' && !run.delivery.publication?.pr) items.push(['Push and open a pull request', 'Approved. Publishing is its own step.', 'delivery']);
+  if (review === 'rejected') items.push(['Changes rejected', 'Nothing will be applied or published. Retry tasks or start a new run.', 'overview']);
+  if (run.delivery.publication?.pr) items.push(['Pull request ready', run.delivery.publication.pr.url, 'delivery']);
+  if (!items.length) return '';
+  return `<div class="card nexts" style="margin-bottom:16px"><h2>Next</h2><ul class="plain">${items.map(([t, d, tab]) => `<li><button class="btn" data-goto="${tab}">${esc(t)}</button> <span class="muted">${esc(d)}</span></li>`).join('')}</ul></div>`;
 }
 
 const STAGE_NAMES = { connect: 'Connect', inspect: 'Inspect', baseline: 'Baseline' };
@@ -450,6 +623,11 @@ function verificationCard(run) {
     }).join('')}</div>`;
 }
 
+async function renderEvidenceTab(el, run) {
+  const catalog = config.pax?.catalog || [];
+  await renderEvidence(el, run, api, { toast, catalog, reload: async () => { current.run = (await api(`api/runs/${run.id}`)).run; renderRun(); } });
+}
+
 function updateTabCounts() {
   const run = current?.run;
   if (!run) return;
@@ -468,8 +646,9 @@ async function act(action, btn) {
     if (action === 'cancel') await api(`api/runs/${id}/cancel`, { method: 'POST' });
     if (action === 'resume') await api(`api/runs/${id}/resume`, { method: 'POST' });
     if (action === 'deploy') {
+      if (current.run.source && !current.run.settings.deploy && !confirm('Start a local preview of this existing project on the server? It runs the start command the plan proposed. Nothing is deployed anywhere else.')) return void (btn.disabled = false);
       toast('Starting preview…');
-      await api(`api/runs/${id}/deploy`, { method: 'POST' });
+      await api(`api/runs/${id}/deploy`, { method: 'POST', body: JSON.stringify({ authorize: true }) });
       toast('Preview is live');
     }
     if (action === 'delete') {
@@ -845,6 +1024,16 @@ async function renderDeliveryExisting(el, run) {
   const report = await api(`api/runs/${run.id}/report`).catch(() => '');
   const dl = (name, label, cls = '') => `<a class="btn ${cls}" href="api/runs/${esc(run.id)}/download/${name}">${label}</a>`;
   const busy = run.executing;
+  const rv = run.review;
+  const approved = rv?.decision === 'approved';
+  const canDecide = !busy && d.integrity?.ok && run.changes?.files.length;
+  const reviewCard = `<div class="card" id="review-card"><h2>Review <span class="pill ${approved ? 'completed' : rv ? 'failed' : 'skipped'}">${esc(rv ? rv.decision : 'not reviewed')}</span></h2>
+    <p>Check the diff (Files tab) and the evidence, then decide. Applying and publishing stay disabled until you approve <b>these exact changes</b>; if they change afterwards you must approve again.</p>
+    ${rv ? `<p class="mono muted">${esc(rv.decision)} ${esc(new Date(rv.at).toLocaleString())} · ${rv.files} file(s)${rv.note ? ` · “${esc(rv.note)}”` : ''}</p>` : ''}
+    ${!d.readiness?.ready && d.readiness?.reasons?.length ? `<p class="muted">The factory still reports: ${esc(d.readiness.reasons.join('; '))}. Approval is your decision; it does not change those results.</p>` : ''}
+    ${!canDecide ? `<p class="muted">${d.integrity?.ok ? (run.changes?.files.length ? 'The run is still executing.' : 'There are no changes to review.') : 'Source protection failed, so these changes cannot be approved.'}</p>` : ''}
+    <label class="field"><span>Note <em>optional</em></span><input id="review-note" maxlength="500" placeholder="Why you approved or rejected" ${canDecide ? '' : 'disabled'}></label>
+    <div class="actions"><button class="btn accent" data-review="approve" ${canDecide && !approved ? '' : 'disabled'}>Approve changes</button><button class="btn" data-review="reject" ${canDecide ? '' : 'disabled'}>Reject</button>${rv ? '<button class="btn" data-review="clear">Withdraw decision</button>' : ''}</div></div>`;
   el.innerHTML = `<div class="grid-2">
     <div class="card md">${md(report)}</div>
     <div class="stack">
@@ -857,6 +1046,7 @@ async function renderDeliveryExisting(el, run) {
           <tr><th>working branch</th><td>${esc(s.branch)}${d.commit?.sha ? ` @ ${esc(d.commit.sha.slice(0, 12))}` : ''}</td></tr>
           <tr><th>changed files</th><td>${run.changes?.files.length ?? 0} · +${run.changes?.additions ?? 0} −${run.changes?.deletions ?? 0}</td></tr>
         </table></div>
+      ${reviewCard}
       <div class="card"><h2>Downloads</h2><div class="actions">
         ${d.patch ? dl('changes.patch', 'Patch (.patch)', 'accent') : ''}
         ${d.archive ? dl('project.tar.gz', 'Changed files (.tar.gz)') : ''}
@@ -869,23 +1059,44 @@ async function renderDeliveryExisting(el, run) {
       ${s.mode === 'github' ? `<div class="card" id="pub-card"><h2>GitHub</h2>
         <p>${pub ? `Publication: <span class="pill ${pub.state === 'failed' ? 'failed' : pub.state === 'nothing-to-publish' ? 'skipped' : 'completed'}">${esc(pub.state)}</span>` : s.publish ? 'Publishing was enabled for this run.' : 'Not published. Pushing and opening a pull request are explicit actions.'}</p>
         ${pub?.error ? `<p class="form-error">${esc(pub.error)}</p>` : ''}${pub?.prError ? `<p class="form-error">${esc(pub.prError)}</p>` : ''}
-        ${pub?.pr ? `<p><a class="btn accent" href="${esc(pub.pr.url)}" target="_blank" rel="noopener">Pull request #${pub.pr.number}${pub.pr.draft ? ' (draft)' : ''} ↗</a></p>` : ''}
-        ${pub?.branch ? `<p class="mono">pushed ${esc(pub.branch)}${pub.sha ? ` @ ${esc(pub.sha.slice(0, 12))}` : ''}</p>` : ''}
-        <div class="actions"><button class="btn ${pub?.pr ? '' : 'accent'}" data-pub="pr" ${busy || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>${pub?.state === 'failed' || pub?.prError ? 'Retry: push &amp; open pull request' : pub?.pr ? 'Re-run publish (idempotent)' : 'Push branch &amp; open pull request'}</button>
-        <button class="btn" data-pub="push" ${busy || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>Push branch only</button></div>
-        ${config.projects?.canPublish ? '<p class="muted">Pushes only the run branch (never forced, never the base branch). Opens a draft PR unless everything is verified.</p>' : '<p class="muted">Set GITHUB_TOKEN on the server to enable pushing.</p>'}
+        ${pub?.pr ? `<p><a class="btn accent" href="${esc(pub.pr.url)}" target="_blank" rel="noopener">Open pull request #${pub.pr.number}${pub.pr.draft ? ' (draft)' : ''} ↗</a> <button class="btn" type="button" data-copy="${esc(pub.pr.url)}">Copy link</button></p>` : ''}
+        ${pub?.branch ? `<p class="mono">pushed ${esc(pub.branch)}${pub.sha ? ` @ ${esc(pub.sha.slice(0, 12))}` : ''} <button class="btn" type="button" data-copy="${esc(pub.branch)}">Copy branch</button></p>` : ''}
+        <div class="actions"><button class="btn ${pub?.pr ? '' : 'accent'}" data-pub="pr" ${busy || !approved || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''} >${pub?.state === 'failed' || pub?.prError ? 'Retry: push &amp; open pull request' : pub?.pr ? 'Re-run publish (idempotent)' : 'Push branch &amp; open pull request'}</button>
+        <button class="btn" data-pub="push" ${busy || !approved || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>Push branch only</button></div>
+        ${!config.projects?.canPublish ? '<p class="muted">No GitHub token is configured on the server. <a href="#/settings?group=github">Add one in Settings</a>.</p>' : !approved ? '<p class="muted">Approve the changes in the Review card to enable publishing.</p>' : '<p class="muted">Pushes only the run branch (never forced, never the base branch). Opens a draft PR unless everything is verified.</p>'}
       </div>` : `<div class="card" id="local-card"><h2>Your directory</h2>
         ${d.local?.applied ? `<p class="mono">✓ applied ${d.local.applied.files.length} file(s) to the source directory (nothing staged or committed)</p>` : ''}
         ${d.local?.branch ? `<p class="mono">✓ branch <b>${esc(d.local.branch.branch)}</b> added to your repository (nothing checked out)</p>` : ''}
         <ul class="conflicts" id="conflicts" hidden></ul>
         <p class="muted">Nothing was written to your directory during the run. Apply only if no file the run changed has changed in your directory since it started; otherwise nothing is written.${s.readOnly ? ' This directory is in a read-only root, so use the patch.' : ''}</p>
-        <div class="actions"><button class="btn accent" data-apply="working-tree" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Apply to my directory</button>
-        ${s.workingMode === 'clone' ? `<button class="btn" data-apply="branch" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Add as a branch in my repository</button>` : ''}</div>
+        <div class="actions"><button class="btn accent" data-apply="working-tree" ${busy || !approved || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Apply to my directory</button>
+        ${s.workingMode === 'clone' ? `<button class="btn" data-apply="branch" ${busy || !approved || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Add as a branch in my repository</button>` : ''}</div>
       </div>`}
       ${run.outputDir ? `<div class="card"><h2>Project folder</h2>${d.output?.ok ? `<p>Full resulting project exported to <code>${esc(run.outputDir)}</code> (a new folder; your source was not touched).</p>` : `<p class="form-error">Could not export to <code>${esc(run.outputDir)}</code>: ${esc(d.output?.error || 'not delivered')}.</p>`}</div>` : ''}
       ${run.security ? `<div class="card"><h2>Security review <span class="muted mono">changed files</span></h2><p>${run.security.blocking} blocking · ${run.security.findings.length} total findings</p>${run.security.findings.length ? `<ul class="plain mono">${run.security.findings.slice(0, 20).map((f) => `<li>[${esc(f.severity)}] ${esc(f.rule)} — ${esc(f.file)}:${f.line}</li>`).join('')}</ul>` : ''}</div>` : ''}
     </div></div>`;
+  el.querySelectorAll('[data-review]').forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try {
+      current.run = (await api(`api/runs/${run.id}/review`, { method: 'POST', body: JSON.stringify({ decision: b.dataset.review, note: $('#review-note')?.value || '' }) })).run;
+      toast(b.dataset.review === 'approve' ? 'Changes approved' : b.dataset.review === 'reject' ? 'Changes rejected' : 'Decision withdrawn');
+    } catch (e) {
+      toast(e.message);
+    }
+    renderRun();
+  }));
+  el.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(b.dataset.copy);
+      toast('Copied');
+    } catch {
+      toast('Copy is not available in this browser context');
+    }
+  }));
   el.querySelectorAll('[data-pub]').forEach((b) => (b.onclick = async () => {
+    const repo = s.repo ? `${s.repo.owner}/${s.repo.name}` : s.label;
+    const msg = b.dataset.pub === 'pr' ? `Push the branch ${s.branch} to ${repo} and open a pull request against ${s.baseBranch || 'the base branch'}?` : `Push the branch ${s.branch} to ${repo}? No pull request will be opened.`;
+    if (!confirm(`${msg}\n\nOnly the run branch is pushed (never forced). The base branch is not changed.`)) return;
     b.disabled = true;
     try {
       current.run = (await api(`api/runs/${run.id}/publish`, { method: 'POST', body: JSON.stringify({ pullRequest: b.dataset.pub === 'pr' }) })).run;
@@ -897,6 +1108,9 @@ async function renderDeliveryExisting(el, run) {
     renderRun();
   }));
   el.querySelectorAll('[data-apply]').forEach((b) => (b.onclick = async () => {
+    const n = run.changes?.files.length || 0;
+    const msg = b.dataset.apply === 'branch' ? `Add the run's work to your repository as the branch da-prompt/${run.id}? Nothing is checked out.` : `Write ${n} file${n === 1 ? '' : 's'} into your directory “${s.label}”? Nothing is staged or committed, and nothing is written if any of those files changed since the run started.`;
+    if (!confirm(msg)) return;
     b.disabled = true;
     try {
       current.run = (await api(`api/runs/${run.id}/apply`, { method: 'POST', body: JSON.stringify({ mode: b.dataset.apply }) })).run;
@@ -967,9 +1181,22 @@ function md(src) {
 }
 
 // Boot ----------------------------------------------------------------------------------------
-config = await api('api/config');
+// Boot. If the backend is down, say so and keep retrying instead of leaving a blank page.
+for (;;) {
+  try {
+    config = await api('api/config');
+    break;
+  } catch (e) {
+    main.innerHTML = `<section class="page"><div class="card escalation" role="alert"><h3>The da-prompt backend is not reachable</h3><p>${esc(e.message)}</p><p class="muted">Retrying every few seconds…</p></div></section>`;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
 window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && reconnectRun());
 route();
+refreshHealthDot(api);
+setInterval(() => refreshHealthDot(api), 60_000);
+setInterval(() => api('api/health').catch(() => {}), 4000); // drives the "backend not responding" banner
 setInterval(() => {
   refreshRuns();
   if (current?.run && ACTIVE.has(current.run.status) && current.tab !== 'activity') {

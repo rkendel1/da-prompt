@@ -272,7 +272,7 @@ export async function renderProvidersPage(main, api, toast) {
       <div class="settings">
         <label class="field wide"><span>Base URL ${p.baseUrlSource && p.baseUrlSource !== 'saved' && p.baseUrlSource !== 'default' ? `<em>from ${esc(p.baseUrlSource)}</em>` : ''}</span>
           <input name="baseUrl" value="${esc(p.baseUrl || '')}"></label>
-        ${p.local && !p.needsKey && !p.hasKey ? '' : `<label class="field wide"><span>API key ${p.keySource ? `<em>${p.keySource === 'saved' ? 'saved' : `from ${esc(p.keySource)}`} ${esc(p.keyHint || '')}</em>` : ''} ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">get a key ↗</a>` : ''}</span>
+        ${p.local && !p.needsKey && !p.hasKey ? '' : `<label class="field wide"><span>API key ${p.keySource ? `<em>${p.keySource === 'saved' ? 'saved' : `from ${esc(p.keySource)}`} </em>` : ''} ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">get a key ↗</a>` : ''}</span>
           <input name="apiKey" type="password" placeholder="${p.hasKey ? 'leave blank to keep the current key' : p.keyEnv ? `paste a key, or set ${esc(p.keyEnv)}` : 'paste a key'}"></label>`}
         ${models.length ? `<label class="field"><span>Default model</span><select name="defaultModel">
           <option value="">Automatic${p.defaultModel ? ` (${esc(p.defaultModel)})` : ''}</option>

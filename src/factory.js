@@ -15,6 +15,9 @@ import {
   verificationSummary, changeSummary, changePatch, verifyIntegrity, resolveDirectory, applyToSource, exportBranch, addExcludes,
 } from './project.js';
 import { publishRun, buildPrBody } from './publish.js';
+import { collectPaxEvidence } from './pax.js';
+import { PAX_STEP_IDS } from './settings.js';
+import crypto from 'node:crypto';
 import { ProviderRegistry } from './providers/registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
@@ -91,9 +94,13 @@ export class Factory {
       commandTimeoutMs: d.commandTimeoutMs,
       // Existing projects are never deployed unless the request explicitly authorizes a local preview.
       deploy: existing ? s.deploy === true : s.deploy !== false,
+      // PAX evidence is opt-in per run (default from Settings). The steps are fixed at creation so a run is reproducible.
+      pax: typeof s.pax === 'boolean' ? s.pax : Boolean(this.cfg.paxAutoRun),
+      paxSteps: (Array.isArray(s.paxSteps) ? s.paxSteps : this.cfg.paxSteps || []).filter((x) => PAX_STEP_IDS.includes(x)),
     };
     const repoUrl = !existing && typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
+    if (repoUrl && /^https:\/\/[^/?#]*@/.test(repoUrl)) throw new Error('repoUrl must not contain credentials; add a GitHub token in Settings instead');
     const id = this.store.newId();
     const outputDir = resolveOutputDir(this.cfg, body.outputDir);
     if (outputDir) await checkOutputDir(outputDir, id);
@@ -367,6 +374,8 @@ export class Factory {
       await this.complete(run, { ws, notes, provider, signal, track, emit, save, allDone });
       const ok = run.checklist.every((c) => c.ok);
       await layer('completion', ok ? 'done' : 'failed');
+      // PAX observations are collected after the factory's own verification and are stored apart from it.
+      if (run.settings.pax && !signal.aborted) await this.collectPax(run, { ws, emit, save, signal });
 
       // ── Deliver ───────────────────────────────────────────────────────────────────────────
       run.finishedAt = new Date().toISOString();
@@ -746,6 +755,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!isExisting(run) || run.source.mode !== 'github') throw new ProjectError(409, 'only GitHub-backed runs can be published');
     if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
+    await this.assertApproved(run, 'publish them');
     const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true });
     run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
     await writeReport(run, this.store.deliveryDir(id));
@@ -761,6 +771,7 @@ export class Factory {
     if (!run.delivery?.integrity?.ok) throw new ProjectError(409, 'the run has not been delivered with a clean source-protection check');
     const dir = resolveDirectory(this.cfg, run.source.directoryId); // re-authorized on every use
     if (dir.readOnly) throw new ProjectError(403, 'this directory is in a read-only root; download the patch instead');
+    await this.assertApproved(run, mode === 'branch' ? 'add them to your repository' : 'apply them to your directory');
     const wsDir = this.store.workspaceDir(id);
     const emit = (t, d) => this.store.event(id, t, d);
     run.delivery.local ||= {};
@@ -784,6 +795,71 @@ export class Factory {
     await writeReport(run, this.store.deliveryDir(id));
     await this.store.save(run);
     return run;
+  }
+
+  // ── PAX evidence and review ─────────────────────────────────────────────────────────────────────
+
+  /** Run the run's selected PAX steps against its workspace. The result is `run.pax`; it never touches the verdict. */
+  async collectPax(run, { ws, emit, save, signal, steps }) {
+    const chosen = (steps || run.settings.paxSteps || []).filter((x) => PAX_STEP_IDS.includes(x));
+    emit('log', { text: `Collecting PAX evidence (${chosen.join(', ') || 'no steps selected'})…` });
+    const scrub = [this.store.runDir(run.id), this.cfg.dataDir];
+    run.pax = await collectPaxEvidence(this.cfg, { wsRoot: ws.root, evidenceDir: this.store.paxDir(run.id), steps: chosen, signal, scrub, emit: (t, d) => emit(t, d) });
+    await save();
+    emit('pax.done', { state: run.pax.state, summary: run.pax.summary || null, message: run.pax.message || null });
+    return run.pax;
+  }
+
+  /** Explicit action: collect (or refresh) PAX evidence for a run that is not executing. */
+  async runPax(id, { steps, confirmTests = false } = {}) {
+    if (this.active.has(id)) throw new ProjectError(409, 'the run is still executing; wait for it to finish');
+    const run = await this.store.load(id);
+    if (!fs.existsSync(path.join(this.store.workspaceDir(id)))) throw new ProjectError(409, 'the run has no workspace to observe');
+    const chosen = (Array.isArray(steps) && steps.length ? steps : run.settings.paxSteps?.length ? run.settings.paxSteps : this.cfg.paxSteps).filter((x) => PAX_STEP_IDS.includes(x));
+    if (!chosen.length) throw new ProjectError(400, 'choose at least one PAX step');
+    if (chosen.includes('test') && confirmTests !== true) throw new ProjectError(400, 'the "test" step runs the project\'s native tests through PAX and can change files; confirm it explicitly ({"confirmTests": true})');
+    const ws = new Workspace(this.store.workspaceDir(id), isExisting(run) ? { protectGit: true } : {});
+    const emit = (t, d) => this.store.event(id, t, d);
+    const controller = new AbortController();
+    this.active.set(id, { controller, promise: Promise.resolve() });
+    try {
+      await this.collectPax(run, { ws, emit, save: () => this.store.save(run), signal: controller.signal, steps: chosen });
+      if (isExisting(run)) await writeReport(run, this.store.deliveryDir(id));
+    } finally {
+      this.active.delete(id);
+    }
+    return run;
+  }
+
+  /** Hash of the exact change set, so an approval cannot silently carry over to different changes. */
+  async changesHash(run) {
+    const patch = await changePatch(this.cfg, run, this.store.workspaceDir(run.id));
+    return crypto.createHash('sha256').update(patch).digest('hex');
+  }
+
+  /** Record the reviewer's decision about the delivered changes. Apply and publish require an approval of these exact changes. */
+  async review(id, { decision, note = '' } = {}) {
+    if (this.active.has(id)) throw new ProjectError(409, 'the run is still executing');
+    if (!['approve', 'reject', 'clear'].includes(decision)) throw new ProjectError(400, 'decision must be approve, reject or clear');
+    const run = await this.store.load(id);
+    if (!isExisting(run) || !run.delivery?.integrity) throw new ProjectError(409, 'only a delivered run against an existing project can be reviewed');
+    if (decision === 'clear') {
+      delete run.review;
+    } else {
+      if (decision === 'approve' && !run.delivery.integrity.ok) throw new ProjectError(409, 'source protection failed for this run; its changes cannot be approved');
+      if (decision === 'approve' && !run.changes?.files?.length) throw new ProjectError(409, 'the run changed no files; there is nothing to approve');
+      run.review = { decision: decision === 'approve' ? 'approved' : 'rejected', at: new Date().toISOString(), note: redact(String(note || '')).slice(0, 500), changesHash: await this.changesHash(run), files: run.changes?.files.length || 0 };
+    }
+    await this.store.save(run);
+    this.store.event(id, 'review', { decision: run.review?.decision || 'cleared', files: run.review?.files ?? null });
+    return run;
+  }
+
+  async assertApproved(run, what) {
+    const r = run.review;
+    if (r?.decision === 'rejected') throw new ProjectError(409, `these changes were rejected in review; approve them again before you ${what}`);
+    if (r?.decision !== 'approved') throw new ProjectError(409, `review the changes and approve them before you ${what}`);
+    if ((await this.changesHash(run)) !== r.changesHash) throw new ProjectError(409, `the changes are different from the ones you approved; review and approve them again before you ${what}`);
   }
 
   /** Live changed-file list, or the diff of one file, from the run's workspace. */

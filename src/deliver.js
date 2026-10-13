@@ -169,6 +169,15 @@ export function buildReport(run) {
     L.push('');
   }
   if (existing && !run.deployment) L.push('## Deployment', run.settings.deploy ? 'No deployment was started.' : 'Not requested for this run (nothing was deployed).', '');
+  if (run.pax) {
+    L.push('## PAX observation (separate from verification)', `_${run.pax.semantics}_`, '');
+    if (run.pax.state !== 'collected') L.push(`PAX evidence was not collected: ${run.pax.state}${run.pax.message ? ` — ${run.pax.message}` : ''}.`, '');
+    else {
+      L.push(`PAX ${run.pax.binary?.version || '?'} (${run.pax.binary?.source === 'configured' ? 'configured path' : 'from PATH'})`, '');
+      for (const s of run.pax.steps) L.push(`- **${s.title}** (\`${s.command}\`) → ${s.outcome}${s.exitCode != null ? ` (exit ${s.exitCode})` : ''} — ${s.detail}`);
+      L.push('');
+    }
+  }
   if (run.deployment) {
     L.push('## Deployment');
     if (run.deployment.ok) L.push(`Live preview: ${run.deployment.url} (health ${run.deployment.healthPath} → ${run.deployment.status})`);
@@ -196,6 +205,7 @@ export async function packageDelivery(run, ws, deliveryDir) {
     final: run.finalVerification || [],
     tasks: (run.plan?.tasks || []).map((t) => ({ id: t.id, status: t.status, verification: t.attempts?.at(-1)?.verification || [] })),
     security: run.security || null,
+    pax: run.pax ? { state: run.pax.state, steps: (run.pax.steps || []).map((s) => ({ id: s.id, outcome: s.outcome, exitCode: s.exitCode })) } : null,
   };
   await fsp.writeFile(path.join(deliveryDir, 'test-results.json'), JSON.stringify(tests, null, 2));
   const archive = path.join(deliveryDir, 'project.tar.gz');
@@ -260,6 +270,7 @@ export async function packageExistingDelivery(cfg, run, ws, deliveryDir, { commi
     final: (run.finalVerification || []).map(({ command, state, ok, exitCode, durationMs }) => ({ command, state, ok, exitCode, durationMs })),
     tasks: (run.plan?.tasks || []).map((t) => ({ id: t.id, status: t.status, verification: (t.attempts?.at(-1)?.verification || []).map(({ command, state, ok, exitCode }) => ({ command, state, ok, exitCode })) })),
     security: run.security || null,
+    pax: run.pax ? { state: run.pax.state, steps: (run.pax.steps || []).map((s) => ({ id: s.id, outcome: s.outcome, exitCode: s.exitCode })) } : null,
     changes: changes.files,
   };
   await fsp.writeFile(path.join(deliveryDir, 'test-results.json'), JSON.stringify(tests, null, 2));

@@ -177,3 +177,6 @@ export function setup({ provider, cfg: extra = {}, previews } = {}) {
 export const finish = async (factory, run) => factory.start(run.id);
 
 export const authorizedKey = (cfg) => authorizedRoots(cfg)[0].key;
+
+/** Approve a delivered run's changes (apply and publish require it). */
+export const approve = (factory, id) => factory.review(id, { decision: 'approve' });

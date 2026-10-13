@@ -170,6 +170,15 @@ test('an existing-project run: stages, changed files with diff, delivery, apply'
   assert.match(delivery, /Pre-existing|Passing/);
   assert.ok(await page.$('a[href$="download/changes.patch"]'));
   assert.equal(await page.$('[data-pub]'), null, 'no GitHub controls on a local run');
+  // Applying is separate from reviewing: it stays disabled until the exact changes are approved.
+  assert.equal(await page.isDisabled('[data-apply=working-tree]'), true);
+  await page.click('[data-review=approve]');
+  await page.waitForSelector('#review-card .pill.completed');
+  assert.equal(await page.isDisabled('[data-apply=working-tree]'), false);
+  page.once('dialog', (dlg) => {
+    assert.match(dlg.message(), /Write 1 file into your directory “widgets”\? Nothing is staged or committed/);
+    dlg.accept();
+  });
   await page.click('[data-apply=working-tree]');
   await page.waitForFunction(() => /applied 1 file/.test(document.querySelector('#local-card')?.textContent || ''));
   assert.ok(fs.existsSync(path.join(roots.dirs.widgets, 'docs/da-prompt-change-request.md')));
