@@ -156,7 +156,7 @@ T('interrupt button and resize: Interrupt stops the foreground process; resizing
   const page = await newPage(be);
   await open(page);
   await run(page, 'sleep 500');
-  await new Promise((r) => setTimeout(r, 400));
+  await waitFor(() => { try { return execFileSync('pgrep', ['-f', '^sleep 500$'], { encoding: 'utf8' }).trim().length > 0; } catch { return false; } }, { timeoutMs: 15000, intervalMs: 50 }); // interrupt only once it really runs
   await page.click('#term-int');
   await run(page, 'echo INT=$?');
   await waitBuf(page, /\nINT=130\n/);
@@ -309,7 +309,7 @@ T('an unprotected server reached through a non-local address, or a host without 
   const empty = await boot({ projects: {} });
   const page3 = await newPage(empty);
   await page3.waitForSelector('.empty-term');
-  assert.match(await page3.textContent('.empty-term'), /Authorize a project folder/);
+  assert.match(await page3.textContent('.empty-term'), /Register a project first/);
 });
 
 T('check tools shows what a login shell finds (and flags what is missing) without exposing the environment', async () => {
