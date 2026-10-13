@@ -104,6 +104,8 @@ export function summaryOf(run, evidence) {
     status: run.status,
     executing: Boolean(run.executing),
     task: run.inputs?.idea,
+    projectId: run.projectId,
+    projectName: run.projectName,
     project: run.source ? { mode: run.source.mode, label: run.source.label, workingMode: run.source.workingMode, baseBranch: run.source.baseBranch || null, branch: run.source.branch || null } : { mode: 'new' },
     provider: run.provider,
     model: run.model,
@@ -147,7 +149,7 @@ export function renderRunSummary(run, evidence, out) {
   L.push(`${out.bold(run.title)}  ${out.dim(run.id)}`);
   L.push(`  status    ${statusPaint(out, run.status)}${run.executing ? out.cyan(' (executing)') : ''}   ${out.dim(`${dur(run.startedAt || run.createdAt, run.finishedAt)} · ${ago(run.createdAt)}`)}`);
   L.push(`  task      ${String(run.inputs?.idea || '').split('\n')[0].slice(0, 100)}`);
-  L.push(`  project   ${run.source ? `${run.source.mode === 'github' ? 'GitHub' : 'local'} ${run.source.label}${run.source.workingMode ? ` · ${run.source.workingMode}` : ''}${run.source.branch ? ` · branch ${run.source.branch}` : ''}` : 'new application'}`);
+  L.push(`  project   ${run.source ? `${run.source.mode === 'github' ? 'GitHub' : 'local'} ${run.source.label}${run.source.workingMode ? ` · ${run.source.workingMode}` : ''}${run.source.branch ? ` · branch ${run.source.branch}` : ''}` : 'new application'}${run.projectId ? `  (registered project ${run.projectName || ''} ${run.projectId})` : ''}`);
   L.push(`  model     ${run.provider}${run.model ? ` / ${run.model}` : ''}${run.plannerProvider && (run.plannerProvider !== run.provider || run.plannerModel !== run.model) ? `   planner ${run.plannerProvider} / ${run.plannerModel}` : ''}`);
   if (run.error) L.push(`  ${out.red('error')}     ${run.error}`);
   if (tasks.length) {

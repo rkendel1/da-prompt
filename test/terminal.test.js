@@ -400,7 +400,7 @@ test('a client that never reads cannot stall the shell or grow server memory; a 
   await new Promise((r) => sock.once('connect', r));
   sock.write(`GET ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\n\r\n`);
   sock.pause();
-  await be.type(s.id, 'sleep 5 & yes "flood flood flood flood" | head -c 8000000; echo FIN\r');
+  await be.type(s.id, 'sleep 5 & yes "flood flood flood flood" | head -c 8000000; echo; echo FIN\r');
   const reader = be.sse(s.id, 0);
   await reader.waitText(/\nFIN/, 90000);
   const v = (await be.call('GET', `/api/terminal/sessions/${s.id}`)).body.session;

@@ -380,3 +380,30 @@ table.plain td:first-child b, table.plain th { white-space: nowrap; }
 .empty-term { margin: 12px; }
 table.mini td { padding: 3px 14px 3px 0; font-size: 13px; }
 .term-host .xterm-viewport { background-color: transparent !important; }
+
+/* ── Projects page ─────────────────────────────────────────────────────────────────────────── */
+.proj-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 14px 0; }
+.proj-bar input[type=search] { flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--card); }
+.proj-bar select { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--card); }
+.proj-bar .spacer { flex: 0; }
+.proj-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.proj-row { display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; }
+.proj-row.archived { opacity: .7; }
+.proj-main { display: grid; gap: 2px; text-decoration: none; }
+.proj-why { color: var(--warn); font-size: 13px; }
+.proj-acts { display: flex; gap: 6px; }
+.proj-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.proj-head h1 { margin: 0; }
+.proj-head form.inline { display: flex; gap: 6px; }
+.proj-primary { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 16px; }
+.btn.disabled { opacity: .45; pointer-events: none; }
+.proj-form { display: grid; gap: 10px; margin: 8px 0 16px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin: 14px 0; }
+dl.kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin: 0; }
+dl.kv dt { color: var(--muted); font-size: 13px; }
+dl.kv dd { margin: 0; word-break: break-all; }
+.danger-zone { border-color: var(--bad-soft); margin-top: 14px; }
+.callout.warn { border-left: 3px solid var(--warn); }
+@media (max-width: 760px) { .proj-row { grid-template-columns: 1fr; } }
+.proj-main .pill { justify-self: start; }
+.proj-bar .check.inline { background: none; border: 0; padding: 0; box-shadow: none; display: inline-flex; gap: 6px; align-items: center; }

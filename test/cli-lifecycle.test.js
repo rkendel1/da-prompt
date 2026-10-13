@@ -157,8 +157,8 @@ test('setup is non-interactive, validates before saving, and touches only its ow
   assert.equal(fs.readFileSync(path.join(home, '.zshrc'), 'utf8'), '# mine\n', 'shell profiles are never edited');
   const files = fs.readdirSync(home).filter((f) => !['cfg', 'data', '.zshrc'].includes(f));
   assert.deepEqual(files, [], 'nothing else was written to HOME');
-  const again = await spawnCli(['projects', 'list', '--json'], { env: e.env });
-  assert.equal(again.json.projects[0].name, 'a');
+  const again = await spawnCli(['projects', 'list', '--folders', '--json'], { env: e.env });
+  assert.equal(again.json.authorizedFolders[0].name, 'a');
   assert.equal((await spawnCli(['server', 'stop'], { env: e.env })).code, 0);
 });
 

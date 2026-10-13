@@ -55,7 +55,13 @@ const buffer = (page) => page.evaluate(() => {
   for (let i = 0; i < b.length; i++) out.push(b.getLine(i).translateToString(true));
   return out.join('\n');
 });
-const waitBuf = (page, re, timeout = 20000) => waitFor(async () => (re instanceof RegExp ? re.test(await buffer(page)) : (await buffer(page)).includes(re)), { timeoutMs: timeout, intervalMs: 50 });
+const waitBuf = async (page, re, timeout = 20000) => {
+  try {
+    await waitFor(async () => (re instanceof RegExp ? re.test(await buffer(page)) : (await buffer(page)).includes(re)), { timeoutMs: timeout, intervalMs: 50 });
+  } catch (e) {
+    throw new Error(`${e.message}: ${re} — screen tail:\n${(await buffer(page)).trim().split('\n').slice(-12).join('\n')}`);
+  }
+};
 const connState = (page) => page.evaluate(() => document.querySelector('#term-meta [data-state]')?.dataset.state || '');
 const open = async (page) => {
   await page.waitForSelector('#term-new:not([disabled])');
@@ -156,13 +162,18 @@ T('interrupt button and resize: Interrupt stops the foreground process; resizing
   const page = await newPage(be);
   await open(page);
   await run(page, 'sleep 500');
-  await new Promise((r) => setTimeout(r, 400));
+  await waitFor(() => { try { return execFileSync('pgrep', ['-f', '^sleep 500$'], { encoding: 'utf8' }).trim().length > 0; } catch { return false; } }, { timeoutMs: 15000, intervalMs: 50 }); // interrupt only once it really runs
   await page.click('#term-int');
+  // The interrupt flushes pending tty input (real behaviour): type the next command only once the prompt is back.
+  await waitFor(async () => { const lines = (await buffer(page)).trim().split('\n'); const last = lines.at(-1) || ''; return /[#$] $/.test(`${last} `) && !/sleep 500/.test(last) && lines.some((l) => /sleep 500/.test(l)); }, { timeoutMs: 15000, intervalMs: 50 });
   await run(page, 'echo INT=$?');
   await waitBuf(page, /\nINT=130\n/);
-    const before = (await be.call('GET', '/api/terminal')).body.sessions[0];
+  const size = () => page.evaluate(() => { const t = window.__daTerminal().active.term; return [t.cols, t.rows]; });
+  const before = await size();
   await page.setViewportSize({ width: 900, height: 600 });
-  await waitFor(async () => { const s = (await be.call('GET', '/api/terminal')).body.sessions[0]; return s.cols !== before.cols || s.rows !== before.rows; }, { timeoutMs: 8000, intervalMs: 100 });
+  await waitFor(async () => { const [c, r] = await size(); return c !== before[0] || r !== before[1]; }, { timeoutMs: 8000, intervalMs: 100 });
+  // The browser's new size reaches the backend's session (debounced POST).
+  await waitFor(async () => { const s = (await be.call('GET', '/api/terminal')).body.sessions[0]; const [c, r] = await size(); return s.cols === c && s.rows === r; }, { timeoutMs: 8000, intervalMs: 100 });
   const now = await page.evaluate(() => { const t = window.__daTerminal().active.term; return [t.cols, t.rows]; });
   await run(page, 'stty size');
   await waitBuf(page, new RegExp(`\\n${now[1]} ${now[0]}\\n`));
@@ -309,7 +320,7 @@ T('an unprotected server reached through a non-local address, or a host without 
   const empty = await boot({ projects: {} });
   const page3 = await newPage(empty);
   await page3.waitForSelector('.empty-term');
-  assert.match(await page3.textContent('.empty-term'), /Authorize a project folder/);
+  assert.match(await page3.textContent('.empty-term'), /Register a project first/);
 });
 
 T('check tools shows what a login shell finds (and flags what is missing) without exposing the environment', async () => {

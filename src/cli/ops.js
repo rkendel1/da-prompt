@@ -1,4 +1,5 @@
 // Operations shared by several commands. Each one calls the backend API; none holds its own state.
+import fs from 'node:fs';
 import path from 'node:path';
 import { CliError, EXIT, usageError } from './core.js';
 import { readState } from './state.js';
@@ -92,13 +93,23 @@ const REPO_RE = /^(https:\/\/[^\s/]+\/[\w.-]+\/[\w.-]+?(\.git)?|[\w.-]+\/[\w.-]+
  */
 export async function resolveProject(client, spec, { ref, workingMode } = {}) {
   if (!spec) throw usageError('No project selected.', 'Name one with --project, select one with "da-prompt projects use <project>", or use --new for a new application.');
+  // A registered project (stable id, or its unique display name) is the common reference; folders and repos are the fallback.
+  const asProject = (p) => ({ mode: 'registered', kind: p.kind, projectId: p.id, label: p.name, readOnly: p.location.readOnly || undefined, ...(workingMode ? { workingMode } : {}), ...(ref ? { ref } : {}) });
+  if (/^prj_[\w-]+$/.test(spec)) return asProject((await client.get(`/api/projects/${spec}`)).project);
+  const registered = (await client.get('/api/projects?archived=all', { timeoutMs: 60_000 })).projects;
+  const named = registered.filter((p) => p.name === spec || p.name.toLowerCase() === spec.toLowerCase());
+  if (named.length === 1) return asProject(named[0]);
+  if (named.length > 1) throw usageError(`"${spec}" matches ${named.length} registered projects (${named.map((p) => p.id).join(', ')}).`, 'Use the project id from "da-prompt projects list".');
   if (/^[0-9a-f]{10}:/.test(spec)) return { mode: 'local', directoryId: spec, ...(workingMode ? { workingMode } : {}), label: spec };
   const { directories } = await client.get('/api/projects/directories', { timeoutMs: 60_000 });
   const byName = directories.filter((d) => d.name === spec || d.name.replace(/ \(root\)$/, '') === spec);
   if (byName.length === 1) return { mode: 'local', directoryId: byName[0].id, ...(workingMode ? { workingMode } : {}), label: byName[0].name, readOnly: byName[0].readOnly };
   if (byName.length > 1) throw usageError(`"${spec}" matches ${byName.length} authorized projects (${byName.map((d) => d.id).join(', ')}).`, 'Use the project id from "da-prompt projects list".');
   if (/^(\.|\/|~|\.\.)/.test(spec) || spec.includes('\\')) {
-    const r = await client.post('/api/projects/resolve', { path: path.resolve(spec.startsWith('~') ? spec.replace(/^~/, process.env.HOME || '') : spec) });
+    const abs = path.resolve(spec.startsWith('~') ? spec.replace(/^~/, process.env.HOME || '') : spec);
+    const r = await client.post('/api/projects/resolve', { path: abs });
+    const reg = registered.find((p) => p.location?.path && abs === p.location.path) || registered.find((p) => p.location?.path && p.location.path === (() => { try { return fs.realpathSync(abs); } catch { return abs; } })());
+    if (reg) return asProject(reg);
     return { mode: 'local', directoryId: r.id, ...(workingMode ? { workingMode } : {}), label: r.name, readOnly: r.readOnly };
   }
   if (REPO_RE.test(spec)) return { mode: 'github', repoUrl: spec, ...(ref ? { ref } : {}), label: spec };

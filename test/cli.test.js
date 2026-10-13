@@ -229,9 +229,10 @@ test('providers: unreachable, unauthorised and missing-key failures are distingu
 // ── projects ────────────────────────────────────────────────────────────────────────────────────
 
 test('projects: opaque ids, read-only roots, and a path only resolves inside an authorized root', async () => {
-  const list = await cli(['projects', 'list', '--json'], { backend: be });
+  const list = await cli(['projects', 'list', '--folders', '--json'], { backend: be });
   assert.equal(list.code, 0);
-  const app = list.json.projects.find((p) => p.name === 'app');
+  assert.deepEqual(list.json.projects, [], 'nothing is registered yet: folders are only candidates');
+  const app = list.json.authorizedFolders.find((p) => p.name === 'app');
   assert.ok(app);
   assert.match(app.id, /^[0-9a-f]{10}:app$/);
   assert.ok(!JSON.stringify(list.json).includes(roots.root), 'server paths are not sent to clients');
@@ -267,8 +268,8 @@ test('projects: read-only roots are labelled, GitHub projects are connected with
   const ro = makeRoot({ lib: (d) => fs.writeFileSync(path.join(d, 'README.md'), '# lib\n') }, { readOnly: true });
   const beRo = await startBackend({ ...ro.cfg });
   try {
-    const list = await cli(['projects', 'list', '--json'], { backend: beRo });
-    assert.equal(list.json.projects.find((p) => p.name === 'lib').readOnly, true);
+    const list = await cli(['projects', 'list', '--folders', '--json'], { backend: beRo });
+    assert.equal(list.json.authorizedFolders.find((p) => p.name === 'lib').readOnly, true);
     const use = await cli(['projects', 'use', 'lib'], { backend: beRo });
     assert.match(use.out, /read-only/);
   } finally {

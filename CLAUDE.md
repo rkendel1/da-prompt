@@ -38,4 +38,6 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - Terminal tests: the typed command line is echoed by the PTY, so wait for output with a leading newline (`/\nMARK/`), not for the bare word. Use `/bin/bash` in UI tests (dash has no history); a test must never leave `sleep` children behind (they keep the test runner's pipes open and the run hangs).
 - `req.on('close')` does not fire for a dead socket once the request body was read; SSE cleanup must also listen on `res`.
 - `npm test` preloads `test/setup-env.cjs`, which strips FACTORY_*/DA_PROMPT_*/PORT/HOST/keys/tokens from the environment (except `DA_PROMPT_PAX_BIN`).
+- Projects (`src/registry.js`, `public/projects.js`, `/api/projects/<prj_id>`): the registry is the one project system; features take a `projectId` and obtain the workspace only through `registry.locate()` (re-validates, refuses archived/missing/inaccessible/attention). Never store a path or directoryId as a project's identity, never auto-follow a folder that holds a different repository, never delete files on removal. Keep conflict checks inside the serialized `mutate()`.
+- Registry tests: two temp repos with identical content and commit time get the same first-commit hash and look like the same repository; give them different messages.
 

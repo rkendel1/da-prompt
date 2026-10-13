@@ -22,6 +22,7 @@
       <a class="new-run" href="#/">+ New run</a>
       <nav class="runs" id="runs" aria-label="Runs"></nav>
       <nav class="sidenav" aria-label="Operations">
+        <a class="side-link" href="#/projects">&lt;projects&gt; registered workspaces</a>
         <a class="side-link" href="#/terminal">&lt;terminal&gt; host shell</a>
         <a class="side-link" href="#/history">&lt;history&gt; all runs</a>
         <a class="side-link" href="#/setup"><span class="hdot" id="health-dot" aria-hidden="true"></span>&lt;setup&gt; system health</a>
@@ -50,8 +51,14 @@
             <legend class="sr-only">Project</legend>
             <div class="seg" role="radiogroup" aria-label="Project source">
               <label><input type="radio" name="sourceMode" value="new" checked><span>New project</span></label>
+              <label><input type="radio" name="sourceMode" value="registered"><span>Registered project</span></label>
               <label><input type="radio" name="sourceMode" value="local"><span>Local directory</span></label>
               <label><input type="radio" name="sourceMode" value="github"><span>GitHub repository</span></label>
+            </div>
+            <div class="src" id="src-registered" hidden>
+              <label class="field"><span>Project <em>from <a href="#/projects">Projects</a> — registered once, remembered</em></span><select name="projectId" id="project-id"></select></label>
+              <label class="field"><span>Isolation</span><select name="regWorkingMode" id="reg-working-mode"></select></label>
+              <label class="field check" id="reg-publish-field" hidden><input name="regPublish" id="reg-publish" type="checkbox"> <span>Push the run branch and open a pull request when finished</span></label>
             </div>
             <div class="src" id="src-local" hidden>
               <label class="field"><span>Authorized directory <em>chosen from the server's list</em></span><select name="directoryId" id="directory-id"></select></label>

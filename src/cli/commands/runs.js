@@ -66,7 +66,7 @@ export async function startRun(ctx, { forceNew = false } = {}) {
   if (forceNew || opts.new) {
     if (opts.project) throw usageError('--new and --project cannot be combined.');
   } else source = await projectFor(ctx, client);
-  if (opts.publish && source?.mode !== 'github') throw usageError('--publish only applies to GitHub projects (local runs never push).');
+  if (opts.publish && source?.mode !== 'github' && !(source?.mode === 'registered' && source.kind === 'remote')) throw usageError('--publish only applies to GitHub projects (local runs never push).');
   const settings = {};
   const set = (k, v) => v !== undefined && (settings[k] = v);
   set('maxParallel', num(opts.parallel, 'parallel', 1, 8));
@@ -86,7 +86,7 @@ export async function startRun(ctx, { forceNew = false } = {}) {
     ...(opts['planner-provider'] || opts['planner-model'] ? { planner: { provider: opts['planner-provider'], model: opts['planner-model'] } } : {}),
     outputDir: opts.output,
     settings,
-    ...(source ? { source: { mode: source.mode, directoryId: source.directoryId, repoUrl: source.repoUrl, ref: source.ref, workingMode: source.workingMode, publish: opts.publish || undefined, allowInstall: opts['allow-install'] || undefined } } : {}),
+    ...(source ? { source: { ...(source.projectId ? { projectId: source.projectId } : { mode: source.mode }), directoryId: source.directoryId, repoUrl: source.repoUrl, ref: source.ref, workingMode: source.workingMode, publish: opts.publish || undefined, allowInstall: opts['allow-install'] || undefined } } : {}),
   };
   const { run } = await client.post('/api/runs', body, { timeoutMs: 120_000 });
   out.info(`Run ${run.id} started${source ? ` on ${source.label || source.directoryId || source.repoUrl}` : ' (new application)'} · ${run.provider}${run.model ? ` / ${run.model}` : ''}`);
@@ -208,16 +208,17 @@ export async function followRun(ctx, client, id, { from = 0, verbose = false, wa
 
 async function list(ctx) {
   const { out, opts } = ctx;
-  const { runs } = await (await ctx.api()).get('/api/runs');
+  const byId = /^prj_[\w-]+$/.test(opts.project || '');
+  const { runs } = await (await ctx.api()).get(`/api/runs${byId ? `?projectId=${opts.project}` : ''}`);
   let rows = runs;
   if (opts.status) rows = rows.filter((r) => r.status === opts.status);
   if (opts.active) rows = rows.filter((r) => r.executing);
-  if (opts.project) rows = rows.filter((r) => `${r.source?.label || 'new'}`.toLowerCase().includes(opts.project.toLowerCase()));
+  if (opts.project && !byId) rows = rows.filter((r) => `${r.projectName || ''} ${r.source?.label || 'new'}`.toLowerCase().includes(opts.project.toLowerCase()));
   const limit = num(opts.limit, 'limit') ?? 20;
   const shown = rows.slice(0, limit);
-  out.data({ total: rows.length, runs: shown.map((r) => ({ id: r.id, title: r.title, status: r.status, executing: r.executing, project: r.source ? `${r.source.mode}:${r.source.label}` : 'new', provider: r.provider, model: r.model, createdAt: r.createdAt, startedAt: r.startedAt, finishedAt: r.finishedAt, tasks: r.tasks, completedTasks: r.completedTasks, verdict: r.verdict || null, review: r.review || null, publication: r.publication || null, pax: r.pax || null })) });
+  out.data({ total: rows.length, runs: shown.map((r) => ({ id: r.id, title: r.title, status: r.status, executing: r.executing, project: r.source ? `${r.source.mode}:${r.source.label}` : 'new', projectId: r.projectId || null, projectName: r.projectName || null, projectRemoved: r.projectRemoved || undefined, provider: r.provider, model: r.model, createdAt: r.createdAt, startedAt: r.startedAt, finishedAt: r.finishedAt, tasks: r.tasks, completedTasks: r.completedTasks, verdict: r.verdict || null, review: r.review || null, publication: r.publication || null, pax: r.pax || null })) });
   if (!shown.length) out.print('No runs match.');
-  else out.print(table(shown, [{ title: 'id', key: 'id' }, { title: 'status', get: (r) => statusPaint(out, r.status) + (r.executing ? '*' : '') }, { title: 'project', get: (r) => (r.source ? r.source.label : 'new'), max: 22 }, { title: 'tasks', get: (r) => (r.tasks ? `${r.completedTasks}/${r.tasks}` : '—') }, { title: 'verified', get: (r) => (r.verdict || (r.checklistOk === undefined ? '—' : r.checklistOk ? 'checklist ok' : 'checklist fail')).replace(/-/g, ' '), max: 24 }, { title: 'age', get: (r) => ago(r.createdAt) }, { title: 'task', key: 'title', max: 42 }], out));
+  else out.print(table(shown, [{ title: 'id', key: 'id' }, { title: 'status', get: (r) => statusPaint(out, r.status) + (r.executing ? '*' : '') }, { title: 'project', get: (r) => r.projectName || (r.source ? r.source.label : 'new'), max: 22 }, { title: 'tasks', get: (r) => (r.tasks ? `${r.completedTasks}/${r.tasks}` : '—') }, { title: 'verified', get: (r) => (r.verdict || (r.checklistOk === undefined ? '—' : r.checklistOk ? 'checklist ok' : 'checklist fail')).replace(/-/g, ' '), max: 24 }, { title: 'age', get: (r) => ago(r.createdAt) }, { title: 'task', key: 'title', max: 42 }], out));
   if (rows.length > shown.length) out.print(out.dim(`… ${rows.length - shown.length} more (use --limit)`));
   return EXIT.OK;
 }

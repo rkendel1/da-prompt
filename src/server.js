@@ -17,6 +17,7 @@ import { probePax, listEvidence, STEPS as PAX_STEPS, SEMANTICS as PAX_SEMANTICS 
 import { buildEvidence } from './evidence.js';
 import { redact } from './security.js';
 import { redactUrl } from './gitutil.js';
+import { ProjectRegistry } from './registry.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -118,8 +119,11 @@ export async function createServer(overrides = {}) {
   const cfg = loadConfig(overrides);
   const store = new RunStore(cfg.dataDir);
   const previews = new PreviewManager({ max: cfg.maxPreviews });
-  const factory = new Factory({ cfg, store, previews });
+  const registry = new ProjectRegistry(cfg);
+  const factory = new Factory({ cfg, store, previews, registry });
   await factory.recover();
+  // Earlier runs that worked on an existing project get a registered project (once per location/repository).
+  await registry.adoptRuns(store).catch((e) => console.error(`project migration skipped: ${redactUrl(redact(String(e.message)))}`));
   const publicDir = path.join(cfg.root, 'public');
   cfg.settings.onChange('maxPreviews', (v) => (previews.max = v));
 
@@ -153,7 +157,7 @@ export async function createServer(overrides = {}) {
     if (parts[1] !== 'runs') throw new HttpError(404, 'not found');
 
     if (parts.length === 2) {
-      if (method === 'GET') return json(res, 200, { runs: (await store.list()).map((r) => ({ ...r, executing: factory.isActive(r.id) })) });
+      if (method === 'GET') return json(res, 200, { runs: await runRows(url) });
       if (method === 'POST') {
         const body = await readBody(req);
         let run;
@@ -320,6 +324,18 @@ export async function createServer(overrides = {}) {
   async function projectsApi(req, res, parts) {
     const method = req.method;
     try {
+      // The persistent registry (src/registry.js): list/register here, one project at /api/projects/<prj_id>[/…].
+      if (!parts[2] && method === 'GET') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const rows = await registry.list({ q: q.get('q') || '', status: q.get('status') || '', archived: q.get('archived') || 'false', refresh: q.get('refresh') === '1' });
+        const admin = isAdmin(req, cfg);
+        return json(res, 200, { projects: rows.map((p) => registry.view(p, { admin })) });
+      }
+      if (!parts[2] && method === 'POST') {
+        const rec = await registry.register(await readBody(req, 16 * 1024), { admin: isAdmin(req, cfg) });
+        return json(res, 201, { project: registry.view(rec, { admin: isAdmin(req, cfg) }) });
+      }
+      if (/^prj_[\w-]+$/.test(parts[2] || '')) return await registryApi(req, res, parts);
       if (parts[2] === 'directories' && method === 'GET') return json(res, 200, await listDirectories(cfg));
       // Maps a path on the server machine to an opaque id, but only inside an authorized root. It grants nothing a
       // directoryId would not, and (like other host-authority actions) only an authenticated or local client may ask.
@@ -332,7 +348,11 @@ export async function createServer(overrides = {}) {
       }
       if (parts[2] === 'inspect' && method === 'POST') {
         const body = await readBody(req);
-        const src = body.source && typeof body.source === 'object' ? body.source : body;
+        let src = body.source && typeof body.source === 'object' ? body.source : body;
+        if (src.projectId) {
+          const located = await registry.locate(src.projectId, { purpose: 'inspect it' });
+          src = located.project.kind === 'local' ? { mode: 'local', directoryId: located.dir.id } : { mode: 'github', repoUrl: located.project.remote.url, ref: src.ref || located.project.settings?.defaultRef };
+        }
         if (src.mode === 'github') {
           const info = await inspectRemote(cfg, { repoUrl: src.repoUrl, ref: src.ref });
           return json(res, 200, {
@@ -571,9 +591,21 @@ export async function createServer(overrides = {}) {
         if (method !== 'POST') throw new HttpError(405, 'method not allowed');
         const body = await readBody(req, 8 * 1024);
         // The start directory is an opaque id from the authorized list, resolved here. A path from the browser is never used.
-        const dir = resolveDirectory(cfg, body.directoryId);
+        let dir;
+        let project;
+        if (body.projectId) {
+          // A registered project: validated now (exists, authorized, same repository, not archived); the session only records its id.
+          const located = await registry.locate(body.projectId, { purpose: 'open a terminal', writable: true });
+          if (located.project.kind !== 'local') throw new HttpError(409, `"${located.project.name}" is a remote repository: it has no local folder to open. Register a local checkout as a project to use a terminal.`);
+          dir = located.dir;
+          project = { projectId: located.project.id, directoryId: dir.id, name: located.project.name };
+          registry.touch(located.project.id);
+        } else {
+          dir = resolveDirectory(cfg, body.directoryId);
+          project = { directoryId: dir.id, name: dir.name };
+        }
         if (dir.readOnly) throw new HttpError(403, 'That folder is read-only for da-prompt, and a shell cannot honour that: terminals only open in writable project folders.');
-        const s = terminals.create({ owner, dir: dir.real, project: { directoryId: dir.id, name: dir.name }, label: body.label, cols: body.cols, rows: body.rows });
+        const s = terminals.create({ owner, dir: dir.real, project, label: body.label, cols: body.cols, rows: body.rows });
         return json(res, 201, { session: terminals.view(s) });
       }
       const s = terminals.get(parts[3], owner);
@@ -636,6 +668,47 @@ export async function createServer(overrides = {}) {
     res.on('error', end);
   }
 
+  /** Run rows with the project's *current* name (history stays attached to the id even after a rename or removal). */
+  async function runRows(url) {
+    const known = new Map((await registry.load()).projects.map((p) => [p.id, p]));
+    const only = url?.searchParams.get('projectId');
+    return (await store.list())
+      .filter((r) => !only || r.projectId === only)
+      .map((r) => {
+        const p = r.projectId ? known.get(r.projectId) : null;
+        return { ...r, executing: factory.isActive(r.id), ...(r.projectId ? { projectName: p?.name || r.projectName, projectRemoved: !p } : {}) };
+      });
+  }
+
+  async function registryApi(req, res, parts) {
+    const method = req.method;
+    const admin = isAdmin(req, cfg);
+    const id = parts[2];
+    const sub = parts[3];
+    const send = (p, extra = {}) => json(res, 200, { project: registry.view(p, { admin }), ...extra });
+    if (!sub) {
+      if (method === 'GET') {
+        const { project, git } = await registry.status(id);
+        return json(res, 200, { project: registry.view(project, { admin }), git, runs: (await runRows()).filter((r) => r.projectId === id).length });
+      }
+      if (method === 'PATCH') return send(await registry.update(id, await readBody(req, 16 * 1024)));
+      if (method === 'DELETE') {
+        const removed = await registry.remove(id, await readBody(req, 4 * 1024));
+        return json(res, 200, { removed: true, id: removed.id, name: removed.name, note: 'Only the registration was removed. Your folder or repository, its runs and artifacts were not touched.' });
+      }
+    }
+    if (sub === 'runs' && method === 'GET') {
+      await registry.find(id);
+      return json(res, 200, { runs: await runRows(new URL(`http://x/?projectId=${encodeURIComponent(id)}`)) });
+    }
+    if (method !== 'POST') throw new HttpError(405, 'method not allowed');
+    if (sub === 'validate') return send((await registry.validate(id)).project);
+    if (sub === 'repair') return send(await registry.repair(id, await readBody(req, 16 * 1024), { admin }));
+    if (sub === 'archive') return send(await registry.setArchived(id, true));
+    if (sub === 'restore') return send(await registry.setArchived(id, false));
+    throw new HttpError(404, 'not found');
+  }
+
   async function serveStatic(res, pathname) {
     const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
     const abs = path.resolve(publicDir, rel);
@@ -679,7 +752,7 @@ export async function createServer(overrides = {}) {
     await new Promise((r) => server.close(r));
   };
 
-  return { server, cfg, store, factory, previews, close };
+  return { server, cfg, store, factory, previews, registry, terminals, close };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

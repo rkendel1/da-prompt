@@ -1,6 +1,7 @@
 // da-prompt factory UI. No framework: hash routing, fetch, EventSource.
 import { mountModelPicker, renderProvidersPage } from './providers.js';
 import { renderTerminalPage } from './terminal.js';
+import { renderProjectsPage } from './projects.js';
 import { renderSetupPage, renderSettingsPage, renderPaxPage, renderHistoryPage, renderEvidence, refreshHealthDot, loadHealth } from './ops.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -109,9 +110,12 @@ function route() {
   } else if (hash === '/settings') {
     current = null;
     renderSettingsPage(main, api, { toast, group: params.get('group') });
+  } else if (hash === '/projects' || hash.startsWith('/projects/')) {
+    current = null;
+    renderProjectsPage(main, api, { toast, id: hash.split('/')[2] || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0].startsWith('/projects')) pageCleanup = c; else c?.(); });
   } else if (hash === '/terminal') {
     current = null;
-    renderTerminalPage(main, api, { toast }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0] === '/terminal') pageCleanup = c; else c(); });
+    renderTerminalPage(main, api, { toast, project: params.get('project') || '' }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0] === '/terminal') pageCleanup = c; else c(); });
   } else if (hash === '/pax') {
     current = null;
     renderPaxPage(main, api, { toast });
@@ -123,7 +127,7 @@ function route() {
     renderProvidersPage(main, api, toast);
   } else {
     current = null;
-    renderNew();
+    renderNew({ project: params.get('project') || '' });
   }
   refreshRuns();
   main.focus({ preventScroll: true });
@@ -131,7 +135,7 @@ function route() {
 }
 
 // ── New run ─────────────────────────────────────────────────────────────────────────────────
-function renderNew() {
+function renderNew({ project: preselect = '' } = {}) {
   main.replaceChildren($('#tpl-new').content.cloneNode(true));
   document.title = 'New run · da-prompt';
   const form = $('#new-form');
@@ -143,7 +147,7 @@ function renderNew() {
     }
   });
   const picker = mountModelPicker($('#model-picker'), api);
-  const project = mountProjectPicker(form);
+  const project = mountProjectPicker(form, { preselect });
   mountNewRunExtras(form, picker, project);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
@@ -235,20 +239,21 @@ function mountNewRunExtras(form, picker, project) {
     }
     const L = [];
     const dir = $('#directory-id');
-    const dirLabel = dir?.selectedOptions?.[0]?.textContent?.split(' — ')[0] || 'the selected directory';
+    const isReg = form.querySelector('[name=sourceMode]:checked').value === 'registered';
+    const dirLabel = (isReg ? $('#project-id') : dir)?.selectedOptions?.[0]?.textContent?.split(' — ')[0] || 'the selected directory';
     if (m === 'new') {
       L.push('<b>Creates</b> a new application in the run\'s isolated workspace. You download it, or export it to a new folder you name.');
     } else if (m === 'local') {
-      const snap = fd.get('workingMode') === 'snapshot';
+      const snap = (isReg ? fd.get('regWorkingMode') : fd.get('workingMode')) === 'snapshot';
       L.push(`<b>Reads</b> ${esc(dirLabel)} to build ${snap ? 'a copy of the working tree (including uncommitted files)' : 'a clone of the last commit'}.`);
       L.push('<b>May modify</b> only that isolated workspace on the server. Your directory is not written during the run.');
       L.push('<b>Applying</b> the result to your directory is a separate action after you review the diff and approve it; nothing is staged or committed.');
       L.push('<b>Publishing</b> is not available for local runs.');
     } else {
-      const repo = String(fd.get('sourceRepo') || '').trim() || 'the repository';
+      const repo = (isReg ? $('#project-id').selectedOptions?.[0]?.textContent?.split(' — ')[0] : String(fd.get('sourceRepo') || '').trim()) || 'the repository';
       L.push(`<b>Reads</b> ${esc(repo)}${fd.get('ref') ? ` @ ${esc(fd.get('ref'))}` : ''} into an isolated clone on a new <code>da-prompt/…</code> branch.`);
       L.push('<b>May modify</b> only that clone; the source branch is never changed.');
-      L.push(fd.get('publish') === 'on' ? '<b>Publishing is ON</b>: when the run finishes, only the run branch is pushed and a pull request is opened (a draft unless everything is verified).' : '<b>Publishing is off</b>: pushing and opening a pull request are explicit actions after you approve the diff.');
+      L.push((isReg ? fd.get('regPublish') : fd.get('publish')) === 'on' ? '<b>Publishing is ON</b>: when the run finishes, only the run branch is pushed and a pull request is opened (a draft unless everything is verified).' : '<b>Publishing is off</b>: pushing and opening a pull request are explicit actions after you approve the diff.');
     }
     if (m !== 'new') L.push(fd.get('allowInstall') === 'on' ? '<b>Dependency installs are allowed</b> (they run the project\'s own scripts).' : 'Dependency installs, migrations and deploy commands are not run.');
     L.push(fd.get('deploy') === 'on' ? `<b>Deploy:</b> ${m === 'new' ? 'a live preview of the new app will start on the server.' : 'a local preview of the result may start on the server.'}` : '<b>Deploy:</b> nothing is deployed.');
@@ -265,7 +270,7 @@ function mountNewRunExtras(form, picker, project) {
 
 // Project section: new project | local directory | GitHub repository. Paths never come from the browser:
 // local directories are picked from the server's authorized list and referenced by opaque id.
-function mountProjectPicker(form) {
+function mountProjectPicker(form, { preselect = '' } = {}) {
   const cfg = config.projects || {};
   const radios = [...form.querySelectorAll('[name=sourceMode]')];
   const summary = $('#src-summary');
@@ -273,7 +278,13 @@ function mountProjectPicker(form) {
   const modeSel = $('#working-mode');
   let dirs = null;
   let info = null;
-  const mode = () => form.querySelector('[name=sourceMode]:checked').value;
+  const radio = () => form.querySelector('[name=sourceMode]:checked').value;
+  const regSel = $('#project-id');
+  const regModeSel = $('#reg-working-mode');
+  let regProjects = null;
+  // "new" | "local" | "github": the effective kind of work (a registered project is local or remote).
+  const mode = () => (radio() === 'registered' ? regInfo?.mode || 'local' : radio());
+  let regInfo = null;
 
   const local = radios.find((r) => r.value === 'local');
   if (!cfg.local) {
@@ -298,7 +309,7 @@ function mountProjectPicker(form) {
         <b>Publishing:</b> off — local runs never push or open pull requests
         ${info.detected ? `<br><b>Detected:</b> ${esc(info.detected.summary)}` : ''}${warnList(info.warnings)}`);
     } else if (m === 'github' && info?.mode === 'github') {
-      const publish = form.publish.checked && cfg.canPublish;
+      const publish = (radio() === 'registered' ? $('#reg-publish').checked : form.publish.checked) && cfg.canPublish;
       showSummary(`<b>Reads:</b> ${esc(info.repo)} @ ${esc(info.ref.name)}${info.ref.kind === 'default' ? ' (default branch)' : ` (${esc(info.ref.kind)})`}<br>
         <b>Edits happen in:</b> an isolated clone on a new branch <code>da-prompt/&lt;run id&gt;</code>; ${esc(info.ref.name)} is never modified<br>
         <b>Publishing:</b> ${publish ? 'ON — pushes only the run branch and opens a pull request' : 'off — you get a patch and archive; nothing is pushed'}${warnList(info.warnings)}`);
@@ -349,10 +360,54 @@ function mountProjectPicker(form) {
     }
   };
 
+  const regSelected = () => regProjects?.find((p) => p.id === regSel.value);
+  const inspectRegistered = async () => {
+    info = null;
+    regInfo = null;
+    const p = regSelected();
+    $('#reg-publish-field').hidden = !p || p.kind !== 'remote';
+    if (!p) return showSummary(regProjects?.length ? '' : 'No projects are registered yet. <a href="#/projects">Register one</a> (a folder or a repository) and it will be here every time.', !regProjects?.length);
+    if (p.status !== 'available') return showSummary(`<b>${esc(p.name)} is ${esc(p.status)}.</b> ${esc(p.errors?.[0]?.message || '')} <a href="#/projects/${esc(p.id)}">Open the project to fix it</a>`, true);
+    showSummary('Inspecting…');
+    try {
+      info = await api('api/projects/inspect', { method: 'POST', body: JSON.stringify({ source: { projectId: p.id } }) });
+      regInfo = info;
+      if (info.mode === 'local') {
+        regModeSel.innerHTML = info.workingModes.map((w) => `<option value="${esc(w)}">${w === 'clone' ? 'Clone — committed state (HEAD), on its own branch' : 'Snapshot — copy of the working tree, including uncommitted changes'}</option>`).join('');
+        regModeSel.value = info.workingModes.includes(p.settings?.workingMode) ? p.settings.workingMode : info.defaultWorkingMode;
+        regModeSel.disabled = false;
+      } else {
+        regModeSel.innerHTML = '<option value="clone">Clone — an isolated clone on a new branch</option>';
+        regModeSel.disabled = true;
+      }
+      form.dispatchEvent(new Event('change'));
+      render();
+    } catch (e) {
+      showSummary(esc(e.message), true);
+    }
+  };
+  const loadRegistered = async () => {
+    if (!regProjects) {
+      try {
+        regProjects = (await api('api/projects')).projects;
+      } catch (e) {
+        regProjects = [];
+        showSummary(esc(e.message), true);
+      }
+      regSel.innerHTML = regProjects.length
+        ? regProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.location.label || p.location.url)}${p.status !== 'available' ? ` · ${esc(p.status)}` : ''}</option>`).join('')
+        : '<option value="">(no registered projects)</option>';
+      if (preselect && regProjects.some((p) => p.id === preselect)) regSel.value = preselect;
+    }
+    inspectRegistered();
+  };
+
   const apply = () => {
     const m = mode();
-    $('#src-local').hidden = m !== 'local';
-    $('#src-github').hidden = m !== 'github';
+    const r = radio();
+    $('#src-registered').hidden = r !== 'registered';
+    $('#src-local').hidden = r !== 'local';
+    $('#src-github').hidden = r !== 'github';
     $('#install-field').hidden = m === 'new';
     $('#idea-label').innerHTML = m === 'new' ? 'Idea <em>required</em>' : 'What do you want to change? <em>required</em>';
     form.idea.placeholder = m === 'new' ? 'A shared reading list for book clubs…' : 'Add password reset to this application…';
@@ -361,11 +416,19 @@ function mountProjectPicker(form) {
     $('#deploy-label').textContent = m === 'new' ? 'Deploy a live preview' : 'Authorize a local preview of the result (off by default)';
     form.deploy.checked = m === 'new';
     info = null;
-    if (m === 'local') loadDirs();
+    if (r === 'registered') loadRegistered();
+    else if (m === 'local') loadDirs();
     else showSummary('');
   };
   radios.forEach((r) => r.addEventListener('change', apply));
+  if (preselect) {
+    radios.find((r) => r.value === 'registered').checked = true;
+    apply();
+  }
   dirSel.addEventListener('change', inspectLocal);
+  regSel.addEventListener('change', inspectRegistered);
+  regModeSel.addEventListener('change', render);
+  $('#reg-publish').addEventListener('change', render);
   modeSel.addEventListener('change', render);
   $('#check-repo').addEventListener('click', inspectRepo);
   form.sourceRepo.addEventListener('change', () => form.sourceRepo.value.trim() && inspectRepo());
@@ -375,12 +438,20 @@ function mountProjectPicker(form) {
   return {
     mode,
     validate(fd) {
+      if (radio() === 'registered') {
+        const p = regSelected();
+        return !p ? 'Choose a registered project (or register one under Projects).' : p.status !== 'available' ? `${p.name} is ${p.status}; fix it on its project page first.` : '';
+      }
       if (mode() === 'local' && !fd.get('directoryId')) return 'Choose one of the authorized directories.';
       if (mode() === 'github' && !String(fd.get('sourceRepo') || '').trim()) return 'Enter the GitHub repository to change.';
       return '';
     },
     source(fd) {
       const m = mode();
+      if (radio() === 'registered') {
+        const p = regSelected();
+        return { projectId: p.id, workingMode: p.kind === 'local' ? fd.get('regWorkingMode') || undefined : undefined, publish: p.kind === 'remote' && fd.get('regPublish') === 'on', allowInstall: fd.get('allowInstall') === 'on' };
+      }
       if (m === 'local') return { mode: m, directoryId: fd.get('directoryId'), workingMode: fd.get('workingMode') || undefined, allowInstall: fd.get('allowInstall') === 'on' };
       if (m === 'github') return { mode: m, repoUrl: fd.get('sourceRepo'), ref: fd.get('ref') || undefined, publish: fd.get('publish') === 'on', allowInstall: fd.get('allowInstall') === 'on' };
       return undefined;
@@ -483,7 +554,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}${run.projectId ? ` · project <a href="#/projects/${esc(run.projectId)}">${esc(run.projectName || 'project')}</a>` : ''}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
