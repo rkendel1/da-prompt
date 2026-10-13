@@ -141,6 +141,22 @@ da-prompt runs skip <id> <task>
 A run executes on the backend, so closing the terminal does not stop it; `--cancel-on-interrupt` makes Ctrl-C cancel
 instead of detach, and `--wait-timeout SECONDS` stops *following* (exit 7) without touching the run.
 
+### Editing a stopped run (and interrupting a running one)
+
+A run that stopped (failed, cancelled, needs attention) can be changed and continued instead of started over; work already
+done is kept. In the browser use **Edit run** on the run page (**Interrupt & edit** while it is executing): pick another
+provider, model, planner or agent engine, change the limits, edit the request, tick *Install dependencies*, or add a **note to
+the agents** (added to their prompt as the newest instruction, and it wins over older text). *Save* keeps it stopped; *Save &
+resume* carries on. A model or provider you pick is validated exactly as when a run starts.
+
+```bash
+da-prompt runs update <id> --provider openai --model gpt-5 --note "Use TypeScript strict mode" --resume
+da-prompt runs update <id> --interrupt --attempts 4 --budget 3000000     # stop it, change it, leave it stopped
+da-prompt runs rerun <id> --allow-install                                 # or a NEW run from the same request
+```
+API: `PATCH /api/runs/<id>` with any of `provider, model, providerOptions, planner, engine, settings, inputs, allowInstall, note,
+interrupt, resume`. A task that escalated is still retried, edited or skipped from the Overview tab.
+
 ### Changes, verification and evidence
 
 ```bash
@@ -169,6 +185,28 @@ da-prompt pax evidence <run-id>
 PAX output is *evidence*, shown apart from agent claims and from the factory's own verification, and it never changes a
 run's verdict. Missing, incompatible (a different program called `pax`, e.g. the POSIX archiver), timing-out and failing
 PAX are each reported as such; drift is a finding (exit 6 with `--fail-on-findings`), a tool failure is exit 1.
+
+### Dependencies and the baseline
+
+Before an existing-project run changes anything it runs the project's own checks (tests, lint, build) to learn what already
+fails. On a fresh isolated clone those checks cannot run until the dependencies are installed, so **Install dependencies**
+does that first, in the run's isolated workspace (your own directory is never touched and `node_modules` is never part of
+the change). It also lets agents install more if a task needs it. It runs the project's own install scripts, which is why it
+is a choice and not always on.
+
+Where to turn it on, most specific first:
+- **This run:** the *Install dependencies* checkbox on New Run (`--allow-install`, `source.allowInstall`).
+- **This project:** Projects → the project → *Dependencies* (Server default / Install before the baseline / Never install).
+- **Everywhere:** Settings → Execution → *Install dependencies* (`FACTORY_ALLOW_INSTALL=1`).
+
+What gets installed: Node (`npm ci`, falling back to `npm install` when the lockfile is stale; pnpm, yarn and bun are
+recognised), Rust (`cargo fetch`), Go (`go mod download`), Ruby (`bundle install`) and PHP (`composer install`). Python, Java
+and .NET are left to the agents because they need an environment of their own. The results are shown in the run's Baseline
+card and the `install` events.
+
+If a baseline could not run because dependencies were missing, the Baseline card offers **Re-run with dependency installs**
+(`POST /api/runs/<id>/rerun`, `da-prompt runs rerun <id> --allow-install`): a new run with the same request, model and
+project; the first run is kept as it was.
 
 ### Apply and publish (explicit by default; local apply can be made automatic)
 

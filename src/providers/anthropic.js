@@ -15,6 +15,7 @@ export class AnthropicProvider {
     this.maxTokens = maxTokens;
     this.temperature = temperature;
     this.timeoutMs = timeoutMs || 15 * 60_000;
+    this.noForcedTool = new Set(); // models that rejected a forced tool_choice
   }
 
   describe() {
@@ -31,15 +32,28 @@ export class AnthropicProvider {
     };
     if (this.temperature != null) body.temperature = this.temperature;
     if (tools?.length) body.tools = tools;
-    if (tools?.length && meta.forceTool) body.tool_choice = { type: 'tool', name: meta.forceTool };
+    // Some models (newer ones, and any with extended thinking) refuse a forced tool_choice. Remember that per model and ask
+    // for the tool in words instead: the caller already handles a reply that did not call it.
+    const forced = tools?.length && meta.forceTool;
+    const send = (b) => requestWithRetry(`${this.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
+      body: b,
+      signal,
+      timeoutMs: this.timeoutMs,
+    });
+    const withoutForce = () => ({ ...body, system: [{ type: 'text', text: `${system}\n\nYou must reply by calling the tool "${meta.forceTool}".`, cache_control: { type: 'ephemeral' } }] });
     try {
-      const json = await requestWithRetry(`${this.baseUrl}/v1/messages`, {
-        method: 'POST',
-        headers: { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
-        body,
-        signal,
-        timeoutMs: this.timeoutMs,
-      });
+      let json;
+      if (forced && !this.noForcedTool.has(model)) {
+        try {
+          json = await send({ ...body, tool_choice: { type: 'tool', name: meta.forceTool } });
+        } catch (err) {
+          if (signal?.aborted || !/tool_choice/i.test(String(err.message || describeError(err)))) throw err;
+          this.noForcedTool.add(model);
+          json = await send(withoutForce());
+        }
+      } else json = await send(forced ? withoutForce() : body);
       return { content: json.content || [], stop_reason: json.stop_reason, usage: json.usage || {} };
     } catch (err) {
       if (signal?.aborted) throw new Error('cancelled');

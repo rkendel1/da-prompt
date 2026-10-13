@@ -593,3 +593,9 @@ dialog::backdrop { background: rgba(28, 27, 25, .45); }
 .fp-item:hover, .fp-item:focus-visible { background: var(--card); }
 .fp-list li:last-child .fp-item { border-bottom: 0; }
 .fp-empty { padding: 12px; }
+
+dialog.edit-run { width: min(820px, 96vw); max-height: 92vh; overflow: auto; }
+.edit-run h3 { margin: 16px 0 6px; font-size: 14px; }
+.edit-run .task-form { display: grid; gap: 10px; }
+.edit-run p { margin: 0; }
+.edit-run .task-form { gap: 8px; }

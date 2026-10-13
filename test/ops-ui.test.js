@@ -395,7 +395,8 @@ test('lifecycle: refresh during a run keeps access and reconnects, cancel stops 
     assert.match(stopped, /What failed/);
     assert.match(stopped, /What the factory observed/);
     assert.match(stopped, /Your directory was not modified/);
-    assert.match(stopped, /Resume continues from where it stopped/);
+    assert.match(stopped, /Edit run.*then Resume to continue from where it stopped/);
+    assert.equal(await page.isVisible('[data-act=edit]'), true);
     assert.equal(await page.isVisible('[data-act=resume]'), true);
     assert.equal(await page.$('[data-act=cancel]'), null, 'no cancel control once stopped');
     // resume

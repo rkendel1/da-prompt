@@ -164,6 +164,17 @@ const EXISTING_RULES = `<existing_project_rules>
 
 /** The operating prompt for a run: the same seven layers, with the goal and rules adapted for existing projects. */
 export function renderRunPrompt(run) {
+  return `${renderRunPromptBase(run)}${updatesBlock(run)}`;
+}
+
+/** Instructions the user added to a run after it started (Edit run → "Note to the agents"). Newest last; they override earlier text. */
+function updatesBlock(run) {
+  const g = Array.isArray(run.guidance) ? run.guidance.filter((x) => x && typeof x.text === 'string').slice(-20) : [];
+  if (!g.length) return '';
+  return `\n\n<updates>\nThe user changed or added to the request while this run was in progress. These are newer than everything above and take precedence where they differ. Follow them.\n${g.map((x, i) => `${i + 1}. ${x.text}`).join('\n')}\n</updates>`;
+}
+
+function renderRunPromptBase(run) {
   const base = renderPrompt(run.inputs);
   if (!run.source || run.source.mode === 'new') return base;
   const goal = EXISTING_GOAL.split('{{IDEA}}').join(run.inputs.idea);

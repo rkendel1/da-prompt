@@ -164,6 +164,7 @@ function renderNew({ project: preselect = '' } = {}) {
   const picker = mountModelPicker($('#model-picker'), api);
   const project = mountProjectPicker(form, { preselect });
   mountNewRunExtras(form, picker, project);
+  form.allowInstall.checked = Boolean(config.defaults.allowInstall);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
   form.tokenBudget.value = config.defaults.tokenBudget;
@@ -272,7 +273,7 @@ function mountNewRunExtras(form, picker, project) {
       L.push('<b>May modify</b> only that clone; the source branch is never changed.');
       L.push((isReg ? fd.get('regPublish') : fd.get('publish')) === 'on' ? '<b>Publishing is ON</b>: when the run finishes, only the run branch is pushed and a pull request is opened (a draft unless everything is verified).' : '<b>Publishing is off</b>: pushing and opening a pull request are explicit actions after you approve the diff.');
     }
-    if (m !== 'new') L.push(fd.get('allowInstall') === 'on' ? '<b>Dependency installs are allowed</b> (they run the project\'s own scripts).' : 'Dependency installs, migrations and deploy commands are not run.');
+    if (m !== 'new') L.push(fd.get('allowInstall') === 'on' ? '<b>Dependencies are installed</b> in the isolated workspace before the baseline, and agents may install more (this runs the project\'s own install scripts; your directory is not touched).' : 'Dependency installs, migrations and deploy commands are not run.');
     L.push(fd.get('deploy') === 'on' ? `<b>Deploy:</b> ${m === 'new' ? 'a live preview of the new app will start on the server.' : 'a local preview of the result may start on the server.'}` : '<b>Deploy:</b> nothing is deployed.');
     L.push(fd.get('pax') === 'on' ? '<b>PAX:</b> observations are collected after verification, separately from it.' : '<b>PAX:</b> not collected for this run.');
     L.push(`<b>Models:</b> ${esc(choice.provider || 'default provider')}${choice.model ? ` · ${esc(choice.model)}` : ''}${choice.planner?.provider || choice.plannerProvider ? ` (planner ${esc(choice.planner?.provider || choice.plannerProvider)})` : ''}.`);
@@ -398,6 +399,7 @@ function mountProjectPicker(form, { preselect = '' } = {}) {
     regInfo = null;
     const p = regSelected();
     $('#reg-publish-field').hidden = !p || p.kind !== 'remote';
+    if (p) form.allowInstall.checked = p.settings?.allowInstall ?? Boolean(config.defaults.allowInstall); // the project's own default, else the server's
     if (!p) return showSummary(regProjects?.length ? '' : 'No projects are registered yet. <a href="#/projects">Register one</a> (a folder or a repository) and it will be here every time.', !regProjects?.length);
     if (p.status !== 'available') return showSummary(`<b>${esc(p.name)} is ${esc(p.status)}.</b> ${esc(p.errors?.[0]?.message || '')} <a href="#/projects/${esc(p.id)}">Open the project to fix it</a>`, true);
     showSummary('Inspecting…');
@@ -600,8 +602,8 @@ function renderRun({ keepTab = false } = {}) {
       <div class="actions">
         ${run.previewLive ? `<a class="btn accent" href="preview/${esc(run.id)}/" target="_blank" rel="noopener">Open app ↗</a>` : ''}
         ${!run.previewLive && run.deployment?.ok && !run.executing ? '<button class="btn" data-act="deploy">Restart preview</button>' : ''}
-        ${run.executing ? '<button class="btn danger" data-act="cancel">Cancel</button>' : ''}
-        ${canResume ? '<button class="btn" data-act="resume">Resume</button>' : ''}
+        ${run.executing ? '<button class="btn" data-act="edit" title="Stop the run where it is, change it, and carry on">Interrupt &amp; edit</button><button class="btn danger" data-act="cancel">Cancel</button>' : ''}
+        ${canResume ? '<button class="btn" data-act="edit" title="Change the provider, model, limits or request, or add a note to the agents">Edit run</button><button class="btn" data-act="resume">Resume</button>' : ''}
         ${run.source && run.delivery?.patch ? `<a class="btn" href="api/runs/${esc(run.id)}/download/changes.patch">Download patch</a>` : ''}
         ${!run.source && run.delivery?.archive ? `<a class="btn" href="api/runs/${esc(run.id)}/download/project.tar.gz">Download code</a>` : ''}
         ${!run.executing ? '<button class="btn danger" data-act="delete" title="Delete run">Delete</button>' : ''}
@@ -654,7 +656,7 @@ function failureCard(run, canResume) {
   const what = run.error || (esc1.length ? `${esc1.length} task(s) could not be completed: ${esc1.map((t) => `${t.id} (${t.error || 'failed verification'})`).join('; ')}` : `The run is ${run.status.replace(/_/g, ' ')}.`);
   const done = tasks.filter((t) => t.status === 'completed').length;
   const next = [];
-  if (canResume) next.push('<b>Resume</b> continues from where it stopped (button above).');
+  if (canResume) next.push('<b>Edit run</b> (button above) to pick another provider or model, change limits or add a note for the agents, then <b>Resume</b> to continue from where it stopped.');
   if (esc1.length) next.push('<b>Retry, edit or skip</b> each escalated task in the Overview tab.');
   if (run.status === 'needs_attention' && run.error && /token budget/.test(run.error)) next.push('Raise the token budget in <a href="#/settings?group=execution">Settings</a>, then Resume.');
   if (/not ready|ECONN|unreachable|rejected|key/i.test(run.error || '')) next.push('Check the model provider on <a href="#/setup">Setup &amp; health</a>.');
@@ -719,7 +721,12 @@ function baselineCard(run) {
   const b = run.project?.baseline;
   if (!run.project?.inspection) return '';
   if (!b?.length) return `<div class="card"><h2>Baseline</h2><p class="muted">${run.project.stages?.baseline?.state === 'skipped' ? 'No test, lint or build command was detected, so there is no baseline and nothing can be claimed as verified.' : 'Running the project\'s own checks before any change…'}</p></div>`;
-  return `<div class="card"><h2>Baseline <span class="muted mono">before any change</span></h2><table class="plain">${b.map((x) => `<tr><td>${esc(x.command)}</td><td><span class="pill ${esc(x.status)}">${esc(x.status)}</span></td><td class="muted">${esc(x.limitation || x.signature?.[0] || '')}</td></tr>`).join('')}</table></div>`;
+  const inst = run.project.install || [];
+  const missing = b.some((x) => x.limitation) && !run.source?.allowInstall;
+  return `<div class="card"><h2>Baseline <span class="muted mono">before any change</span></h2>
+    ${inst.length ? `<p class="muted">Dependencies installed first:</p><table class="plain">${inst.map((x) => `<tr><td>${esc(x.command)}</td><td><span class="pill ${esc(x.status)}">${esc(x.status)}</span></td><td class="muted">${x.status === 'passed' ? `${Math.round((x.durationMs || 0) / 1000)}s` : esc((x.output || '').split('\n').filter(Boolean).slice(-1)[0] || '')}</td></tr>`).join('')}</table>` : ''}
+    <table class="plain">${b.map((x) => `<tr><td>${esc(x.command)}</td><td><span class="pill ${esc(x.status)}">${esc(x.status)}</span></td><td class="muted">${esc(x.limitation || x.signature?.[0] || '')}</td></tr>`).join('')}</table>
+    ${missing ? `<div class="callout warn" style="margin-top:10px"><p>Some checks could not run because dependencies are not installed, and installing was off for this run. Re-run the same request with installs allowed: dependencies are installed in the isolated workspace first, so the baseline means something.</p><button class="btn accent" type="button" id="rerun-install"${run.executing ? ' disabled' : ''}>Re-run with dependency installs</button></div>` : ''}</div>`;
 }
 
 function verificationCard(run) {
@@ -751,6 +758,7 @@ function updateTabCounts() {
 
 async function act(action, btn) {
   const id = current.id;
+  if (action === 'edit') return openEditRun(current.run);
   btn.disabled = true;
   try {
     if (action === 'cancel') await api(`api/runs/${id}/cancel`, { method: 'POST' });
@@ -844,6 +852,18 @@ function renderOverview(el, run, escalated) {
         </div>` : ''}
       </div>
     </div>`;
+  $('#rerun-install', el)?.addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    try {
+      const { run: fresh } = await api(`api/runs/${run.id}/rerun`, { method: 'POST', body: JSON.stringify({ allowInstall: true }) });
+      toast('Started a new run with dependency installs on');
+      location.hash = `#/runs/${fresh.id}`;
+    } catch (err) {
+      toast(err.message);
+      b.disabled = false;
+    }
+  });
   el.querySelectorAll('[data-do]').forEach((b) => (b.onclick = () => {
     const t = tasks.find((x) => x.id === b.dataset.task);
     if (b.dataset.do === 'edit') {
@@ -969,6 +989,7 @@ function describe(e) {
     case 'stage': return [who, `<b>${esc(STAGE_NAMES[e.stage] || e.stage)}</b>: ${esc(e.state)}${e.detail ? ` — ${esc(e.detail)}` : ''}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'bad' : ''];
     case 'source': return [who, `Source: ${esc(e.mode)} ${esc(e.label)}${e.ref ? ` @ ${esc(e.ref)}` : ''} · isolation ${esc(e.workingMode)} · base ${esc(String(e.baseSha || '').slice(0, 10))} · branch ${esc(e.branch)}${e.note ? ` · ${esc(e.note)}` : ''}`];
     case 'inspect': return [who, `Inspected: ${esc(e.summary)}${e.instructions?.length ? ` · instructions: ${esc(e.instructions.join(', '))}` : ''}`, 'ok'];
+    case 'install': return [who, `Install <span class="${e.status === 'passed' ? 'ok' : 'bad'}">${e.status === 'passed' ? '✓' : '✗'}</span> ${esc(e.command)} → ${esc(e.status)}${e.durationMs ? ` (${Math.round(e.durationMs / 1000)}s)` : ''}`, e.status === 'passed' ? 'ok' : 'warn'];
     case 'baseline': return [who, `Baseline <span class="${e.status === 'passed' ? 'ok' : 'bad'}">${e.status === 'passed' ? '✓' : '✗'}</span> ${esc(e.command)} → ${esc(e.status)}${e.limitation ? ` (${esc(e.limitation)})` : ''}`, e.status === 'passed' ? 'ok' : 'warn'];
     case 'publish': return [who, e.state === 'failed' ? `Publish failed (${esc(e.step)}): ${esc(e.error)}` : `Publish: ${esc(e.state)}${e.branch ? ` ${esc(e.branch)}` : ''}${e.pr ? ` — <a href="${esc(e.pr.url)}" target="_blank" rel="noopener">pull request #${e.pr.number}</a>` : ''}${e.prError ? ` — ${esc(e.prError)}` : ''}`, e.state === 'failed' || e.prError ? 'bad' : 'ok'];
     case 'apply': return [who, e.mode === 'branch' ? `Branch exported to your repository: ${esc(e.branch)}` : e.ok ? `Applied ${e.files} file(s) to your directory` : `Apply refused: ${(e.conflicts || []).length} conflicting file(s)`, e.ok === false ? 'bad' : 'ok'];
@@ -1317,3 +1338,76 @@ setInterval(() => {
     if (meta) meta.textContent = dur(current.run.startedAt || current.run.createdAt, current.run.finishedAt);
   }
 }, 5000);
+
+
+// Edit run ----------------------------------------------------------------------------------
+// Change a stopped run (or interrupt a running one) and carry on: provider, model, planner, engine, limits, the request
+// text, and a note to the agents. Work already done is kept; the next attempt uses the new choices.
+async function openEditRun(run) {
+  const dlg = document.createElement('dialog');
+  dlg.className = 'task-dialog edit-run';
+  dlg.setAttribute('aria-label', 'Edit run');
+  const s = run.settings;
+  const i = run.inputs || {};
+  dlg.innerHTML = `<form class="task-form" id="er-form" autocomplete="off">
+    <h2>${run.executing ? 'Interrupt &amp; edit run' : 'Edit run'}</h2>
+    <p class="muted">${run.executing ? 'Saving stops the run where it is, applies your changes, and (with Save &amp; resume) carries on.' : 'Work already done is kept. The next attempt uses your changes.'}</p>
+    ${run.error ? `<p class="callout warn" role="note"><b>Why it stopped:</b> ${esc(run.error)}</p>` : ''}
+    <h3>Model</h3>
+    <div id="er-picker" class="model-picker"></div>
+    <h3>Request</h3>
+    <label class="field"><span>${run.source ? 'What to change' : 'Idea'}</span><textarea name="idea" rows="3" maxlength="4000">${esc(i.idea)}</textarea></label>
+    <label class="field"><span>Requirements</span><textarea name="requirements" rows="2">${esc(i.requirements)}</textarea></label>
+    <details class="advanced"><summary>Stack, limits and access</summary><div class="settings">
+      <label class="field wide"><span>Stack / constraints</span><input name="stack" value="${esc(i.stack)}"></label>
+      <label class="field wide"><span>Budget / limits</span><input name="limits" value="${esc(i.limits)}"></label>
+      <label class="field wide"><span>Access / keys</span><input name="tools" value="${esc(i.tools)}"></label></div></details>
+    <label class="field"><span>Note to the agents <em>optional, added to the prompt as the newest instruction</em></span><textarea name="note" rows="3" maxlength="2000" placeholder="e.g. Use TypeScript strict mode. Do not touch the billing module."></textarea></label>
+    <h3>Limits</h3>
+    <div class="settings">
+      <label class="field"><span>Parallel agents</span><input name="maxParallel" type="number" min="1" max="8" value="${esc(s.maxParallel)}"></label>
+      <label class="field"><span>Attempts per task</span><input name="maxAttempts" type="number" min="1" max="5" value="${esc(s.maxAttempts)}"></label>
+      <label class="field"><span>Turns per attempt</span><input name="maxAgentTurns" type="number" min="2" max="200" value="${esc(s.maxAgentTurns)}"></label>
+      <label class="field"><span>Token budget</span><input name="tokenBudget" type="number" min="10000" step="10000" value="${esc(s.tokenBudget)}"></label>
+      <label class="field"><span>Time limit (minutes)</span><input name="timeoutMinutes" type="number" min="1" value="${esc(s.timeoutMinutes)}"></label>
+      ${run.source ? `<label class="field check"><input name="allowInstall" type="checkbox" ${run.source.allowInstall ? 'checked' : ''}> <span>Install dependencies (agents may install what they need)</span></label>` : ''}
+    </div>
+    <p class="error" id="er-error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="btn" id="er-cancel">Cancel</button><button type="submit" class="btn" data-save>Save</button><button type="submit" class="btn accent" data-save-resume>Save &amp; resume</button></div>
+  </form>`;
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
+  const picker = await mountModelPicker($('#er-picker', dlg), api, {
+    initial: { provider: run.provider, model: run.model, plannerProvider: run.plannerProvider !== run.provider ? run.plannerProvider : undefined, plannerModel: run.plannerModel, engine: run.engine || 'builtin', numCtx: run.providerOptions?.numCtx },
+  });
+  $('#er-cancel', dlg).onclick = () => dlg.close();
+  $('#er-form', dlg).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const resume = e.submitter?.hasAttribute('data-save-resume');
+    const f = e.target;
+    const choice = picker.getChoice();
+    const body = {
+      ...(choice.provider ? { provider: choice.provider, model: choice.model, providerOptions: choice.providerOptions, ...(choice.planner ? { planner: choice.planner } : {}), ...(choice.engine ? { engine: choice.engine } : {}) } : {}),
+      inputs: { idea: f.idea.value, requirements: f.requirements.value, stack: f.stack.value, limits: f.limits.value, tools: f.tools.value },
+      settings: { maxParallel: f.maxParallel.value, maxAttempts: f.maxAttempts.value, maxAgentTurns: f.maxAgentTurns.value, tokenBudget: f.tokenBudget.value, timeoutMinutes: f.timeoutMinutes.value },
+      ...(f.allowInstall ? { allowInstall: f.allowInstall.checked } : {}),
+      ...(f.note.value.trim() ? { note: f.note.value } : {}),
+      interrupt: Boolean(current.run?.executing),
+      resume,
+    };
+    dlg.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    try {
+      await api(`api/runs/${run.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      dlg.close();
+      toast(resume ? 'Saved; resuming' : 'Saved. Press Resume to continue');
+      current.run = (await api(`api/runs/${run.id}`)).run;
+      renderRun();
+    } catch (err) {
+      const box = $('#er-error', dlg);
+      box.textContent = err.message;
+      box.hidden = false;
+      dlg.querySelectorAll('button').forEach((b) => (b.disabled = false));
+    }
+  });
+}

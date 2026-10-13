@@ -239,6 +239,11 @@ export class ProjectRegistry {
       s.workingMode = input.workingMode;
     }
     if (input.defaultRef !== undefined) s.defaultRef = validateRef(input.defaultRef);
+    if (input.allowInstall !== undefined) {
+      if (input.allowInstall === null) delete s.allowInstall; // back to the server default
+      else if (typeof input.allowInstall !== 'boolean') throw new ProjectError(400, 'allowInstall must be true, false or null');
+      else s.allowInstall = input.allowInstall;
+    }
     return s;
   }
 

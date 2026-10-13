@@ -50,6 +50,8 @@ export function loadConfig(overrides = {}) {
       maxAgentTurns: int('FACTORY_MAX_AGENT_TURNS', 40),
       tokenBudget: int('FACTORY_TOKEN_BUDGET', 2_000_000),
       commandTimeoutMs: int('FACTORY_COMMAND_TIMEOUT_MS', 180_000),
+      // Existing-project runs: install dependencies (in the isolated workspace) and let agents install what they need.
+      allowInstall: /^(1|true|on|yes)$/i.test(process.env.FACTORY_ALLOW_INSTALL || ''),
     },
     maxPreviews: int('FACTORY_MAX_PREVIEWS', 5),
     password: process.env.FACTORY_PASSWORD || '',

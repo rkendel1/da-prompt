@@ -165,6 +165,7 @@ export async function renderProjectsPage(main, api, { toast, id }) {
           <dt>Location</dt><dd class="mono" id="proj-location">${esc(where(p))}</dd>
           ${p.location.readOnly ? '<dt>Access</dt><dd>read-only folder: tasks can read it; results are never applied back</dd>' : ''}
           <dt>Working mode</dt><dd>${esc(p.settings.workingMode || '—')}${p.settings.defaultRef ? ` · ref ${esc(p.settings.defaultRef)}` : ''}</dd>
+          <dt>Dependencies</dt><dd><select id="proj-install" aria-label="Install dependencies for runs on this project"><option value="" ${p.settings.allowInstall === undefined ? 'selected' : ''}>Server default</option><option value="true" ${p.settings.allowInstall === true ? 'selected' : ''}>Install before the baseline</option><option value="false" ${p.settings.allowInstall === false ? 'selected' : ''}>Never install</option></select></dd>
           <dt>Created</dt><dd>${esc(ago(p.createdAt))}${p.migratedFrom ? ' · created from earlier runs' : ''}</dd><dt>Last used</dt><dd>${esc(ago(p.lastUsedAt))}</dd></dl></div>
         <div class="card"><h3>Repository</h3>${g.isGit || p.kind === 'remote' || p.repo.isGit ? `<dl class="kv" id="proj-git">${!g.isGit && p.kind === 'local' ? '<dt>Live state</dt><dd class="muted">unavailable — showing what was recorded</dd>' : ''}
           ${g.isGit ? `<dt>Branch</dt><dd>${esc(g.branch || 'detached')}</dd><dt>Working tree</dt><dd>${g.dirty ? `${g.counts.staged} staged · ${g.counts.unstaged} modified · ${g.counts.untracked} untracked` : 'clean'}</dd>` : ''}
@@ -193,6 +194,7 @@ export async function renderProjectsPage(main, api, { toast, id }) {
       $('#rename-form').addEventListener('submit', (e) => { e.preventDefault(); act(() => call(`/${encodeURIComponent(pid)}`, { method: 'PATCH', body: { name: $('#rename-input').value } }), 'Renamed'); });
     });
     $('#product-form').addEventListener('submit', (e) => { e.preventDefault(); act(() => call(`/${encodeURIComponent(pid)}`, { method: 'PATCH', body: { product: e.target.product.value } }), 'Product saved'); });
+    $('#proj-install').addEventListener('change', (e) => act(() => call(`/${encodeURIComponent(pid)}`, { method: 'PATCH', body: { allowInstall: e.target.value === '' ? null : e.target.value === 'true' } }), 'Saved: new runs on this project start with that choice'));
     $('#proj-validate').addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/validate`, { method: 'POST', body: {} }), 'Checked'));
     $('#proj-archive')?.addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/archive`, { method: 'POST', body: {} }), 'Archived: history is kept; no new work starts until you restore it'));
     $('#proj-restore')?.addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/restore`, { method: 'POST', body: {} }), 'Restored'));

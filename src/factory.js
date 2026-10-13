@@ -11,7 +11,7 @@ import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
 import { scanWorkspace, redact, existingProjectPolicy } from './security.js';
 import { runGit, scrubPaths } from './gitutil.js';
 import {
-  ProjectError, isExisting, normalizeSource, inspectRemote, prepareWorkspace, inspectProject, describeInspection, runChecks, classifyCheck,
+  ProjectError, isExisting, normalizeSource, inspectRemote, prepareWorkspace, inspectProject, describeInspection, runChecks, installCommands, installDependencies, classifyCheck,
   verificationSummary, changeSummary, changePatch, verifyIntegrity, resolveDirectory, applyToSource, exportBranch, addExcludes,
 } from './project.js';
 import { publishRun, buildPrBody } from './publish.js';
@@ -88,8 +88,8 @@ export class Factory {
         project = located.project;
         const st = project.settings || {};
         raw = project.kind === 'local'
-          ? { mode: 'local', directoryId: located.dir.id, workingMode: raw.workingMode || st.workingMode || '', allowInstall: raw.allowInstall, publish: raw.publish, autoApply: raw.autoApply }
-          : { mode: 'github', repoUrl: project.remote.url, ref: raw.ref || st.defaultRef || '', publish: raw.publish, allowInstall: raw.allowInstall };
+          ? { mode: 'local', directoryId: located.dir.id, workingMode: raw.workingMode || st.workingMode || '', allowInstall: raw.allowInstall ?? st.allowInstall ?? this.cfg.defaults.allowInstall, publish: raw.publish, autoApply: raw.autoApply }
+          : { mode: 'github', repoUrl: project.remote.url, ref: raw.ref || st.defaultRef || '', publish: raw.publish, allowInstall: raw.allowInstall ?? st.allowInstall ?? this.cfg.defaults.allowInstall };
       }
       source = normalizeSource(this.cfg, raw);
       if (project) Object.assign(source, { projectId: project.id });
@@ -248,6 +248,119 @@ export class Factory {
     this.makeProvider({ ...choice, providerOptions: choice.options });
     this.makePlannerProvider({ ...choice, providerOptions: choice.options });
     return choice;
+  }
+
+  /**
+   * Start a NEW run from an existing one with the same request, model, engine, settings and source, changing only what
+   * is given (today: whether dependency installs are allowed). The earlier run and its results are left exactly as they are.
+   */
+  async rerun(id, { allowInstall } = {}) {
+    const old = await this.store.load(id);
+    if (!isExisting(old)) throw new ProjectError(409, 'only runs against an existing project can be re-run this way');
+    const o = old.source;
+    const source = o.projectId
+      ? { projectId: o.projectId, workingMode: o.workingMode, publish: o.publish, autoApply: o.autoApply, allowInstall: allowInstall ?? o.allowInstall }
+      : { mode: o.mode, directoryId: o.directoryId, repoUrl: o.repoUrl, ref: o.ref, workingMode: o.workingMode, publish: o.publish, autoApply: o.autoApply, allowInstall: allowInstall ?? o.allowInstall };
+    const s = old.settings || {};
+    return this.createRun({
+      ...old.inputs,
+      provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
+      planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps },
+      source,
+    });
+  }
+
+  /**
+   * Change a stopped run and (optionally) carry on: a different provider, model, planner or engine, other limits, the
+   * request text, or a note to the agents. Work already done is kept; the next attempt uses the new choices. A run that is
+   * still executing can be interrupted first (`interrupt: true`). `resume: true` continues it right after saving.
+   */
+  async updateRun(id, body = {}) {
+    if (this.active.has(id)) {
+      if (body.interrupt !== true) throw new ProjectError(409, 'the run is still executing; interrupt it first (or send interrupt: true)');
+      const running = this.active.get(id)?.promise;
+      await this.cancel(id);
+      await running?.catch(() => {});
+    }
+    const run = await this.store.load(id);
+    if (!RESUMABLE.has(run.status) && run.status !== 'queued') throw new ProjectError(409, `a ${run.status.replace(/_/g, ' ')} run cannot be edited; only stopped, failed, cancelled or needs-attention runs can`);
+    const changed = [];
+    const set = (key, value) => {
+      if (JSON.stringify(run[key]) !== JSON.stringify(value)) changed.push(key);
+      run[key] = value;
+    };
+
+    // Model: provider, model, planner and engine are validated exactly as when a run starts (ready provider, key, model).
+    const wantsModel = ['provider', 'model', 'providerOptions', 'planner', 'plannerProvider', 'plannerModel'].some((k) => body[k] !== undefined);
+    let choice = null;
+    if (wantsModel) {
+      const providerChanged = body.provider !== undefined && body.provider !== run.provider;
+      const follows = run.plannerProvider === run.provider; // the planner used the same provider as the agents
+      const planner = body.planner !== undefined || body.plannerProvider !== undefined || body.plannerModel !== undefined
+        ? body.planner
+        : providerChanged && follows ? {} : { provider: run.plannerProvider, model: run.plannerModel, providerOptions: run.plannerOptions || undefined };
+      choice = await this.resolveModelChoice({
+        provider: body.provider ?? run.provider,
+        model: body.model ?? (providerChanged ? '' : run.model),
+        providerOptions: body.providerOptions ?? run.providerOptions,
+        planner,
+        plannerProvider: body.plannerProvider,
+        plannerModel: body.plannerModel,
+      });
+      set('provider', choice.provider);
+      set('providerLabel', choice.label);
+      set('model', choice.model);
+      set('providerOptions', choice.options);
+      set('plannerProvider', choice.plannerProvider);
+      set('plannerProviderLabel', choice.plannerLabel);
+      set('plannerModel', choice.plannerModel);
+      set('plannerOptions', choice.plannerProvider === choice.provider ? null : choice.plannerOptions);
+    }
+    if (body.engine !== undefined) {
+      const engine = await this.resolveEngine(body.engine, choice || { provider: run.provider, model: run.model, label: run.providerLabel, options: run.providerOptions, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, plannerOptions: run.plannerOptions });
+      set('engine', engine);
+    }
+
+    // Limits.
+    if (body.settings && typeof body.settings === 'object') {
+      const s = body.settings;
+      const cur = run.settings;
+      const clamp = (v, lo, hi, def) => (v === undefined || v === '' || !Number.isFinite(Number(v)) ? def : Math.min(hi, Math.max(lo, Math.round(Number(v)))));
+      const next = {
+        ...cur,
+        maxParallel: clamp(s.maxParallel, 1, 8, cur.maxParallel),
+        maxAttempts: clamp(s.maxAttempts, 1, 5, cur.maxAttempts),
+        maxAgentTurns: clamp(s.maxAgentTurns, 2, 200, cur.maxAgentTurns),
+        tokenBudget: clamp(s.tokenBudget, 10_000, 50_000_000, cur.tokenBudget),
+        timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, cur.timeoutMinutes),
+        ...(typeof s.deploy === 'boolean' ? { deploy: s.deploy } : {}),
+      };
+      set('settings', next);
+    }
+    if (typeof body.allowInstall === 'boolean' && run.source) {
+      if (run.source.allowInstall !== body.allowInstall) changed.push('allowInstall');
+      run.source.allowInstall = body.allowInstall;
+    }
+
+    // The request itself, and notes to the agents.
+    if (body.inputs && typeof body.inputs === 'object') {
+      const inputs = Object.fromEntries(Object.entries(normalizeInputs({ ...run.inputs, ...body.inputs }, { existing: isExisting(run) })).map(([k, v]) => [k, redact(v)]));
+      set('inputs', inputs);
+      if (!run.plan) run.title = inputs.idea.split('\n')[0].slice(0, 90);
+    }
+    const note = typeof body.note === 'string' ? redact(body.note.trim()).slice(0, 2000) : '';
+    if (note) {
+      run.guidance = [...(run.guidance || []), { at: new Date().toISOString(), text: note }].slice(-20);
+      changed.push('note');
+    }
+
+    if (!changed.length && body.resume !== true) throw new ProjectError(400, 'nothing to change');
+    delete run.error;
+    await this.store.save(run);
+    if (changed.length) this.store.event(id, 'run.updated', { fields: changed, provider: run.provider, model: run.model, engine: run.engine || 'builtin', plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, note: note || undefined });
+    if (body.resume === true) return this.resume(id);
+    return run;
   }
 
   /** Which engine runs the tasks of this run. A non-default engine is checked now, so a missing install fails fast. */
@@ -685,9 +798,23 @@ export class Factory {
       await stage('baseline', 'skipped', 'No test, lint or build command was detected, so there is no baseline');
       return;
     }
+    // When installs are authorized, install what the project needs in the isolated workspace first; otherwise the checks
+    // cannot run on a fresh clone and the baseline says nothing. Your own directory is never touched by this.
+    const installs = src.allowInstall ? installCommands(insp, ws) : [];
+    run.project.install = [];
+    if (installs.length) {
+      await stage('baseline', 'active', `Installing dependencies (${installs.map((i) => i.command).join(', ')}), then running ${insp.baselineCommands.length} check(s)`);
+      run.project.install = await installDependencies(ws, installs, {
+        timeoutMs: Math.max(run.settings.commandTimeoutMs, 600_000),
+        signal,
+        onResult: (r) => emit('install', { command: r.command, ecosystem: r.ecosystem, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs, output: r.output.slice(-1000) }),
+      });
+      if (signal.aborted) throw new Error('cancelled');
+    }
     await stage('baseline', 'active', `Running ${insp.baselineCommands.length} check(s) before any change`);
     run.project.baseline = await runChecks(ws, insp.baselineCommands, {
       timeoutMs: run.settings.commandTimeoutMs,
+      installsAllowed: Boolean(src.allowInstall),
       signal,
       onResult: (r) => emit('baseline', { command: r.command, kind: r.kind, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs, limitation: r.limitation, output: r.output.slice(-1500) }),
     });

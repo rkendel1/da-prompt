@@ -1,4 +1,4 @@
-// run, runs list|show|tasks|logs|follow|cancel|resume|retry|skip|files|diff|tests|verify|report|evidence|artifacts|review|apply|publish|delete
+// run, runs list|show|tasks|logs|follow|cancel|resume|update|rerun|retry|skip|files|diff|tests|verify|report|evidence|artifacts|review|apply|publish|delete
 import fs from 'node:fs';
 import readline from 'node:readline/promises';
 import { CliError, EXIT, TERMINAL, RESUMABLE, ago, bytes, exitForRun, table, usageError } from '../core.js';
@@ -325,6 +325,48 @@ async function control(ctx, path, body, verb) {
   return followRun(ctx, client, id, { from: 0, tail: 5, verbose: ctx.opts.verbose, waitTimeout: num(ctx.opts['wait-timeout'], 'wait-timeout'), cancelOnInterrupt: ctx.opts['cancel-on-interrupt'] });
 }
 
+/** Change a stopped run (or interrupt a running one) and optionally carry on. */
+async function update(ctx) {
+  const { opts } = ctx;
+  const client = await ctx.api();
+  const id = ctx.args[0];
+  const n = (k) => (opts[k] === undefined ? undefined : num(opts[k], k));
+  const settings = Object.fromEntries(Object.entries({ maxParallel: n('parallel'), maxAttempts: n('attempts'), maxAgentTurns: n('turns'), tokenBudget: n('budget') }).filter(([, v]) => v !== undefined));
+  const body = {
+    ...(opts.provider ? { provider: opts.provider } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
+    ...(opts['planner-provider'] || opts['planner-model'] ? { planner: { provider: opts['planner-provider'], model: opts['planner-model'] } } : {}),
+    ...(opts.engine ? { engine: opts.engine } : {}),
+    ...(Object.keys(settings).length ? { settings } : {}),
+    ...(opts['allow-install'] ? { allowInstall: true } : {}),
+    ...(opts.note ? { note: opts.note } : {}),
+    ...(opts.interrupt ? { interrupt: true } : {}),
+    ...(opts.resume ? { resume: true } : {}),
+  };
+  if (!Object.keys(body).filter((k) => !['interrupt', 'resume'].includes(k)).length) throw new CliError('Nothing to change.', { code: EXIT.USAGE, hint: 'Give at least one of --provider, --model, --planner-provider, --planner-model, --engine, --budget, --attempts, --parallel, --turns, --allow-install, --note.' });
+  await client.patch(`/api/runs/${encodeURIComponent(id)}`, body);
+  ctx.out.info(`Updated run ${id}${opts.resume ? ' and resumed it' : '. Resume it with: da-prompt runs resume ' + id}.`);
+  if (!opts.resume || opts.detach) {
+    ctx.out.data({ id, updated: true, resumed: Boolean(opts.resume) });
+    return EXIT.OK;
+  }
+  return followRun(ctx, client, id, { from: 0, tail: 5, verbose: opts.verbose, waitTimeout: num(opts['wait-timeout'], 'wait-timeout'), cancelOnInterrupt: opts['cancel-on-interrupt'] });
+}
+
+/** A new run from an earlier one (same request, model and source), optionally with dependency installs allowed. */
+async function rerun(ctx) {
+  const client = await ctx.api();
+  const id = ctx.args[0];
+  const r = await client.post(`/api/runs/${encodeURIComponent(id)}/rerun`, ctx.opts['allow-install'] ? { allowInstall: true } : {});
+  const fresh = r.run.id;
+  ctx.out.info(`Started run ${fresh} from ${id}${ctx.opts['allow-install'] ? ' with dependency installs allowed' : ''}.`);
+  if (ctx.opts.detach) {
+    ctx.out.data({ id: fresh, from: id, accepted: true });
+    return EXIT.OK;
+  }
+  return followRun(ctx, client, fresh, { from: 0, tail: 5, verbose: ctx.opts.verbose, waitTimeout: num(ctx.opts['wait-timeout'], 'wait-timeout'), cancelOnInterrupt: ctx.opts['cancel-on-interrupt'] });
+}
+
 async function files(ctx) {
   const { out } = ctx;
   const client = await ctx.api();
@@ -583,6 +625,8 @@ export default [
   { path: ['runs', 'logs'], summary: 'The run\'s event history.', args: '<run-id>', minArgs: 1, options: { tail: { type: 'string', valueName: 'N', description: 'Last N events.' }, since: { type: 'string', valueName: 'SEQ', description: 'Events after this sequence number.' }, task: { type: 'string', valueName: 'ID', description: 'Only this task.' }, type: { type: 'string', valueName: 'TYPE', description: 'Only this event type (verify, feedback, escalation, pax…).' }, follow: { type: 'boolean', short: 'f', description: 'Keep following live events.' }, verbose: RUN_OPTIONS.verbose }, run: logs },
   { path: ['runs', 'follow'], summary: 'Watch a run live; reconnect after a disconnect.', args: '<run-id>', minArgs: 1, options: { ...follow, tail: { type: 'string', valueName: 'N', description: 'History lines shown first (default 15).' } }, run: followCmd },
   { path: ['runs', 'cancel'], summary: 'Cancel an executing run.', args: '<run-id>', minArgs: 1, options: { wait: { type: 'string', valueName: 'SECONDS', description: 'How long to wait for it to stop (default 30).' } }, run: cancel },
+  { path: ['runs', 'update'], summary: 'Change a stopped run (provider, model, engine, limits, a note to the agents) and optionally resume it.', args: '<run-id>', minArgs: 1, options: { ...follow, provider: RUN_OPTIONS.provider, model: RUN_OPTIONS.model, 'planner-provider': RUN_OPTIONS['planner-provider'], 'planner-model': RUN_OPTIONS['planner-model'], engine: RUN_OPTIONS.engine, budget: RUN_OPTIONS.budget, attempts: RUN_OPTIONS.attempts, parallel: RUN_OPTIONS.parallel, turns: RUN_OPTIONS.turns, 'allow-install': RUN_OPTIONS['allow-install'], note: { type: 'string', valueName: 'TEXT', description: 'A note added to the agents\' prompt as the newest instruction.' }, interrupt: { type: 'boolean', description: 'Stop the run first if it is still executing.' }, resume: { type: 'boolean', description: 'Continue the run right after saving.' } }, run: update },
+  { path: ['runs', 'rerun'], summary: 'Start a new run from an earlier one (same request, model and project).', args: '<run-id>', minArgs: 1, options: { ...follow, 'allow-install': RUN_OPTIONS['allow-install'] }, run: rerun },
   { path: ['runs', 'resume'], summary: 'Continue a stopped, interrupted or cancelled run.', args: '<run-id>', minArgs: 1, options: follow, run: (c) => control(c, 'resume', {}, 'resumed') },
   { path: ['runs', 'retry'], summary: 'Retry an escalated task with a fresh set of attempts.', args: '<run-id> <task-id>', minArgs: 2, options: { description: { type: 'string', valueName: 'TEXT', description: 'Replace the task spec first.' }, verify: { type: 'string', multiple: true, valueName: 'CMD', description: 'Replace the verify commands (repeatable).' }, ...follow }, run: (c) => control({ ...c, args: [c.args[0]] }, `tasks/${encodeURIComponent(c.args[1])}/retry`, { description: c.opts.description, verify: c.opts.verify }, 'retried') },
   { path: ['runs', 'skip'], summary: 'Skip an escalated task and continue.', args: '<run-id> <task-id>', minArgs: 2, options: follow, run: (c) => control({ ...c, args: [c.args[0]] }, `tasks/${encodeURIComponent(c.args[1])}/skip`, {}, 'continued') },

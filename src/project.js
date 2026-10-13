@@ -735,10 +735,51 @@ export function failureSignature(output = '') {
   return [...sig];
 }
 
+/**
+ * What to run to install a project's dependencies, from what inspection found. Only used when the run is authorized to
+ * install; it runs in the isolated workspace, never in your directory. `fallback` is tried if the first command fails
+ * (a stale lockfile makes `npm ci` fail where `npm install` works). Python, Java and .NET are left to the agents.
+ */
+export function installCommands(insp, ws) {
+  const out = [];
+  const has = (p) => (insp.manifests || []).some((m) => m.path === p);
+  const nodeDeps = (insp.ecosystems || []).includes('node') && insp.commands?.hasDependencies && !ws.exists('node_modules');
+  if (nodeDeps) {
+    const pm = insp.commands.packageManager || 'npm';
+    if (pm === 'pnpm') out.push({ ecosystem: 'node', command: 'pnpm install --frozen-lockfile', fallback: 'pnpm install' });
+    else if (pm === 'yarn') out.push({ ecosystem: 'node', command: 'yarn install --frozen-lockfile', fallback: 'yarn install' });
+    else if (pm === 'bun') out.push({ ecosystem: 'node', command: 'bun install' });
+    else out.push({ ecosystem: 'node', command: ws.exists('package-lock.json') || ws.exists('npm-shrinkwrap.json') ? 'npm ci' : 'npm install', fallback: ws.exists('package-lock.json') ? 'npm install' : undefined });
+  }
+  if (has('Cargo.toml')) out.push({ ecosystem: 'rust', command: 'cargo fetch' });
+  if (has('go.mod')) out.push({ ecosystem: 'go', command: 'go mod download' });
+  if (has('Gemfile')) out.push({ ecosystem: 'ruby', command: 'bundle install' });
+  if (has('composer.json')) out.push({ ecosystem: 'php', command: 'composer install --no-interaction' });
+  return out;
+}
+
+/** Run the install commands in the workspace and record exactly what happened for each. */
+export async function installDependencies(ws, commands, { timeoutMs, signal, onResult } = {}) {
+  const out = [];
+  for (const c of commands) {
+    if (signal?.aborted) break;
+    let r = await ws.runCommand(c.command, { timeoutMs, signal });
+    let used = c.command;
+    if (r.exitCode !== 0 && c.fallback && !signal?.aborted) {
+      used = c.fallback;
+      r = await ws.runCommand(c.fallback, { timeoutMs, signal });
+    }
+    const entry = { ecosystem: c.ecosystem, command: used, exitCode: r.exitCode, durationMs: r.durationMs, status: r.exitCode === 0 ? 'passed' : r.exitCode === 127 ? 'unavailable' : r.timedOut ? 'timeout' : 'failed', output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-2000) };
+    out.push(entry);
+    onResult?.(entry);
+  }
+  return out;
+}
+
 const MISSING_DEPS = /Cannot find module|MODULE_NOT_FOUND|ModuleNotFoundError|No module named|ImportError|command not found|not found in PATH|cannot find package|could not find or load main class/i;
 
 /** Run baseline commands in the (unedited) workspace; record exactly what happened for each. */
-export async function runChecks(ws, commands, { timeoutMs, signal, onResult } = {}) {
+export async function runChecks(ws, commands, { timeoutMs, signal, onResult, installsAllowed = false } = {}) {
   const out = [];
   for (const c of commands) {
     if (signal?.aborted) break;
@@ -753,7 +794,7 @@ export async function runChecks(ws, commands, { timeoutMs, signal, onResult } = 
       status: r.exitCode === 0 ? 'passed' : r.exitCode === 126 && /^blocked:/m.test(r.stderr) ? 'blocked' : r.exitCode === 127 ? 'unavailable' : r.timedOut ? 'timeout' : 'failed',
       output: text.slice(-4000),
       signature: r.exitCode === 0 ? [] : failureSignature(text),
-      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) ? 'dependencies or tools are missing in the workspace (installs are not run unless authorized)' : null,
+      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) ? (installsAllowed ? 'dependencies or tools are still missing after the automatic install (see the install results above)' : 'dependencies or tools are missing in the workspace, and installing them is off for this run — re-run with dependency installs allowed') : null,
     };
     out.push(entry);
     onResult?.(entry);

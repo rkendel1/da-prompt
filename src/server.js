@@ -187,6 +187,13 @@ export async function createServer(overrides = {}) {
 
     if (!sub) {
       if (method === 'GET') return json(res, 200, { run: publicRun(run, factory, previews) });
+      if (method === 'PATCH') {
+        try {
+          return json(res, 200, { run: publicRun(await factory.updateRun(id, await readBody(req, 64 * 1024)), factory, previews) });
+        } catch (err) {
+          throw asHttp(err);
+        }
+      }
       if (method === 'DELETE') {
         await factory.cancel(id);
         await factory.active.get(id)?.promise.catch(() => {});
@@ -201,6 +208,16 @@ export async function createServer(overrides = {}) {
         return json(res, 202, { run: publicRun(await factory.resume(id), factory, previews) });
       } catch (err) {
         throw new HttpError(409, err.message);
+      }
+    }
+    if (sub === 'rerun' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const fresh = await factory.rerun(id, { allowInstall: typeof body.allowInstall === 'boolean' ? body.allowInstall : undefined });
+        factory.start(fresh.id);
+        return json(res, 201, { run: publicRun(fresh, factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
       }
     }
     if (sub === 'cancel' && method === 'POST') return json(res, 202, { cancelled: await factory.cancel(id) });

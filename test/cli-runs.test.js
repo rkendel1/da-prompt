@@ -129,6 +129,40 @@ test('run → follow → evidence → diff → approve → apply: the whole loca
   assert.ok(be.requests.every((u) => u.startsWith('/api/')), `the CLI used only /api routes: ${[...new Set(be.requests.filter((u) => !u.startsWith('/api/')))].join(', ')}`);
 });
 
+test('runs update changes a stopped run (note, limits) and can resume it', async () => {
+  const be = await backend({ gated: true });
+  const id = await startDetached(be);
+  const none = await cli(['runs', 'update', id], { backend: be });
+  assert.equal(none.code, EXIT.USAGE);
+  const busy = await cli(['runs', 'update', id, '--note', 'x'], { backend: be });
+  assert.notEqual(busy.code, 0, 'a running run is refused unless interrupted');
+  const r = await cli(['runs', 'update', id, '--interrupt', '--note', 'Prefer small files', '--attempts', '4', '--budget', '500000', '--json'], { backend: be });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json.resumed, false);
+  const after = await be.store.load(id);
+  assert.equal(after.settings.maxAttempts, 4);
+  assert.equal(after.settings.tokenBudget, 500000);
+  assert.equal(after.guidance[0].text, 'Prefer small files');
+  assert.equal(after.status, 'cancelled');
+  be.gate?.open?.();
+});
+
+test('runs rerun --allow-install starts a new run from an earlier one with installs on', async () => {
+  const be = await backend();
+  const id = await startDetached(be);
+  await idle(be, id);
+  const r = await cli(['runs', 'rerun', id, '--allow-install', '--detach', '--json'], { backend: be });
+  assert.equal(r.code, 0, r.err);
+  assert.notEqual(r.json.id, id);
+  assert.equal(r.json.from, id);
+  const shown = await be.store.load(r.json.id);
+  const orig = await be.store.load(id);
+  assert.equal(shown.source.allowInstall, true);
+  assert.equal(shown.inputs.idea, orig.inputs.idea);
+  assert.equal(orig.source.allowInstall, false);
+  await idle(be, r.json.id);
+});
+
 test('apply --approve reviews and applies in one step', async () => {
   const be = await backend();
   const id = await startDetached(be);

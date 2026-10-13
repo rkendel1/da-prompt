@@ -53,9 +53,10 @@ function modelLabel(m) {
 /**
  * Render the provider/model picker into `root`. Returns { getChoice() } for the form submit.
  */
-export async function mountModelPicker(root, api) {
+export async function mountModelPicker(root, api, { initial = null } = {}) {
   root.innerHTML = '<p class="muted mono">Checking which providers and models are available…</p>';
-  const state = { data: null, provider: null, pref: readPref(), engines: null };
+  // `initial` presets the picker from an existing run (Edit run) instead of the remembered choice, and is not remembered.
+  const state = { data: null, provider: null, pref: initial || readPref(), engines: null };
   const usable = (id) => Boolean(state.data?.providers.some((x) => x.id === id && x.status === 'ready' && x.enabled));
 
   // Who runs each task. "Built-in" is always available and is the default; others are optional experiments.
@@ -230,7 +231,7 @@ export async function mountModelPicker(root, api) {
         toolMode: $('#pk-toolmode', root)?.value || undefined,
       },
     };
-    writePref({ provider: choice.provider, model: choice.model, engine: choice.engine, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
+    if (!initial) writePref({ provider: choice.provider, model: choice.model, engine: choice.engine, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
     return choice;
   }
 
