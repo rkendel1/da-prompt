@@ -10,7 +10,7 @@ import { buildEvidence } from '../src/evidence.js';
 import { createServer } from '../src/server.js';
 import { fakePax, withPath } from './pax-helpers.js';
 import { tmpDir, waitFor } from './helpers.js';
-import { makeRepo, makeRoot, dirId, setup, Scripted, task, plan, toolUse, done, NODE_FILES } from './project-helpers.js';
+import { makeRepo, makeRoot, dirId, setup, Scripted, task, plan, toolUse, done } from './project-helpers.js';
 import { OfflineProvider } from '../src/providers/offline.js';
 
 delete process.env.FACTORY_PAX_PATH;

@@ -831,6 +831,38 @@ export class Factory {
     return run;
   }
 
+  /**
+   * Re-run the run's end-of-run checks in its workspace and classify each against the baseline. The result is
+   * recorded as `run.reverify`, separate from the verdict recorded when the run finished, so a recheck never
+   * rewrites history; it shows what the workspace looks like now.
+   */
+  async reverify(id) {
+    if (this.active.has(id)) throw new ProjectError(409, 'the run is still executing; wait for it to finish');
+    const run = await this.store.load(id);
+    if (!run.plan || !fs.existsSync(this.store.workspaceDir(id))) throw new ProjectError(409, 'the run has no workspace to check');
+    const existing = isExisting(run);
+    const ws = new Workspace(this.store.workspaceDir(id), existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {});
+    const base = run.project?.baseline || [];
+    const commands = [...new Set([...(run.plan.finalVerify || []), ...base.map((b) => b.command)])].filter(Boolean);
+    if (!commands.length) throw new ProjectError(409, 'this run has no checks to run (no baseline or final verification commands)');
+    const controller = new AbortController();
+    this.active.set(id, { controller, promise: Promise.resolve() });
+    try {
+      const results = [];
+      for (const command of commands) {
+        const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal: controller.signal });
+        const cls = classifyCheck(base.find((b) => b.command === command), r);
+        results.push({ command, exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-4000) });
+      }
+      run.reverify = { at: new Date().toISOString(), results };
+      await this.store.save(run);
+      this.store.event(id, 'reverify', { results: results.map(({ command, state, ok, exitCode }) => ({ command, state, ok, exitCode })) });
+    } finally {
+      this.active.delete(id);
+    }
+    return run;
+  }
+
   /** Hash of the exact change set, so an approval cannot silently carry over to different changes. */
   async changesHash(run) {
     const patch = await changePatch(this.cfg, run, this.store.workspaceDir(run.id));
