@@ -20,3 +20,6 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 
 ## Lessons
 - `node --test <dir>/` does not accept a directory on Node 22; use a glob (`test/*.test.js`) or no argument.
+- `safeEnv()` drops `NODE_TEST_CONTEXT`: inherited, it makes a nested `node --test` skip itself and exit 0. Do not delete it in test files instead; that collapses the runner's per-test reporting.
+- `safeEnv()` must drop the whole `GIT_CONFIG_*` family, not just the `*KEY*` entries, or `git` breaks in agent shells.
+- Existing-project work lives in `src/project.js` (sources, inspection, baseline, changes) and `src/publish.js` (push + PR); factory behaviour is branched on `isExisting(run)`, not duplicated.

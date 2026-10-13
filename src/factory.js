@@ -2,14 +2,21 @@
 // Layer 1 plan → 2 agents → 3 execution (parallel, per-task subgraphs) → 4 artifacts →
 // 5 verification → 6 feedback (retry ×3, escalate, record lessons) → 7 completion → deliver.
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { Workspace } from './sandbox.js';
 import { normalizeInputs } from './prompt.js';
 import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from './graph.js';
 import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
-import { scanWorkspace, redact } from './security.js';
+import { scanWorkspace, redact, existingProjectPolicy } from './security.js';
+import { runGit, scrubPaths } from './gitutil.js';
+import {
+  ProjectError, isExisting, normalizeSource, inspectRemote, prepareWorkspace, inspectProject, describeInspection, runChecks, classifyCheck,
+  verificationSummary, changeSummary, changePatch, verifyIntegrity, resolveDirectory, applyToSource, exportBranch, addExcludes,
+} from './project.js';
+import { publishRun, buildPrBody } from './publish.js';
 import { ProviderRegistry } from './providers/registry.js';
-import { packageDelivery, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
+import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
 export const LAYERS = ['plan', 'agents', 'execution', 'artifacts', 'verification', 'feedback', 'completion'];
 const ACTIVE = new Set(['queued', 'planning', 'running', 'completing']);
@@ -47,8 +54,30 @@ export class Factory {
     }
   }
 
+  /** Validate the source descriptor and (for GitHub) check that the repository and ref are reachable. */
+  async resolveSource(raw) {
+    let source;
+    try {
+      source = normalizeSource(this.cfg, raw);
+      if (source.mode !== 'new') {
+        const g = await runGit(['--version'], {});
+        if (g.code !== 0) throw new ProjectError(500, 'git is not working on the server');
+      }
+      if (source.mode === 'github') {
+        const info = await inspectRemote(this.cfg, { repoUrl: source.repoUrl, ref: source.ref });
+        source.defaultBranch = info.defaultBranch;
+      }
+    } catch (err) {
+      if (err instanceof ProjectError) throw err;
+      throw new ProjectError(err.code === 'no-git' ? 500 : 400, err.message);
+    }
+    return source;
+  }
+
   async createRun(body = {}) {
-    const inputs = normalizeInputs(body);
+    const source = await this.resolveSource(body.source);
+    const existing = source.mode !== 'new';
+    const inputs = normalizeInputs(body, { existing });
     const choice = await this.resolveModelChoice(body);
     const d = this.cfg.defaults;
     const s = body.settings || {};
@@ -60,13 +89,19 @@ export class Factory {
       tokenBudget: clamp(s.tokenBudget, 10_000, 50_000_000, d.tokenBudget),
       timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, 120),
       commandTimeoutMs: d.commandTimeoutMs,
-      deploy: s.deploy !== false,
+      // Existing projects are never deployed unless the request explicitly authorizes a local preview.
+      deploy: existing ? s.deploy === true : s.deploy !== false,
     };
-    const repoUrl = typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
+    const repoUrl = !existing && typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
     const id = this.store.newId();
     const outputDir = resolveOutputDir(this.cfg, body.outputDir);
     if (outputDir) await checkOutputDir(outputDir, id);
+    if (outputDir && source.mode === 'local') {
+      const dir = resolveDirectory(this.cfg, source.directoryId);
+      const real = fs.existsSync(outputDir) ? fs.realpathSync(outputDir) : outputDir;
+      if (real === dir.real || real.startsWith(dir.real + path.sep) || dir.real.startsWith(real + path.sep)) throw new Error('outputDir must be outside the source project; use a new folder elsewhere');
+    }
     const run = {
       id,
       title: inputs.idea.split('\n')[0].slice(0, 90),
@@ -84,6 +119,7 @@ export class Factory {
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
       repoUrl,
+      ...(existing ? { source, project: { stages: {} } } : {}),
       layers: Object.fromEntries(LAYERS.map((l) => [l, 'pending'])),
       plan: null,
       usage: { input: 0, output: 0, calls: 0 },
@@ -91,7 +127,10 @@ export class Factory {
       checklist: [],
     };
     await this.store.create(run);
-    this.store.event(id, 'run.created', { title: run.title, provider: run.provider, model: run.model, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings });
+    this.store.event(id, 'run.created', {
+      title: run.title, provider: run.provider, model: run.model, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings,
+      ...(existing ? { source: { mode: source.mode, label: source.label, ref: source.ref || null, workingMode: source.workingMode || null, publish: Boolean(source.publish) } } : {}),
+    });
     if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
     return run;
   }
@@ -247,7 +286,11 @@ export class Factory {
   async execute(id, controller) {
     const { signal } = controller;
     let run = await this.store.load(id);
-    const ws = new Workspace(this.store.workspaceDir(id));
+    const existing = isExisting(run);
+    // Existing projects: commands pass through the project command policy and .git is write-protected.
+    const ws = new Workspace(this.store.workspaceDir(id), existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {});
+    // Factory notes (plan, lessons) live beside the workspace for existing projects, never inside the project.
+    const notes = existing ? new Workspace(this.store.notesDir(id)) : ws;
     const save = () => this.store.save(run);
     const emit = (type, data) => this.store.event(id, type, data);
     const setStatus = async (status, extra = {}) => {
@@ -279,9 +322,14 @@ export class Factory {
     delete run.error;
 
     try {
-      // ── Layer 1: plan ────────────────────────────────────────────────────────────────────
-      if (!run.plan) {
+      // ── Layer 1: plan (existing projects first connect, inspect and baseline) ──────────────
+      if (existing && !['done', 'skipped'].includes(run.project?.stages?.baseline?.state)) {
         await setStatus('planning');
+        await layer('plan', 'active');
+        await this.prepareExisting(run, { ws, signal, emit, save });
+      }
+      if (!run.plan) {
+        if (run.status !== 'planning') await setStatus('planning');
         await layer('plan', 'active');
         const desc = plannerProvider.describe();
         emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
@@ -291,7 +339,7 @@ export class Factory {
         run.plan = plan;
         run.title = plan.product.name || run.title;
         await save();
-        await this.writePlanArtifacts(run, ws);
+        await this.writePlanArtifacts(run, existing ? notes : ws);
         emit('plan', { tasks: plan.tasks.length, levels: Math.max(...Object.values(depth)) + 1 });
         await layer('plan', 'done');
       }
@@ -304,7 +352,7 @@ export class Factory {
       // ── Execution loop (layers 3–6) ───────────────────────────────────────────────────────
       await setStatus('running');
       await layer('execution', 'active');
-      await this.executionLoop(run, { ws, provider, signal, track, emit, save, layer });
+      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer });
       if (signal.aborted) throw signal.reason || new Error('cancelled');
       const tasks = run.plan.tasks;
       const allDone = tasks.every((t) => DONE_STATES.has(t.status));
@@ -316,19 +364,25 @@ export class Factory {
       // ── Layer 7: completion ───────────────────────────────────────────────────────────────
       await setStatus('completing');
       await layer('completion', 'active');
-      await this.complete(run, { ws, provider, signal, track, emit, save, allDone });
+      await this.complete(run, { ws, notes, provider, signal, track, emit, save, allDone });
       const ok = run.checklist.every((c) => c.ok);
       await layer('completion', ok ? 'done' : 'failed');
 
       // ── Deliver ───────────────────────────────────────────────────────────────────────────
       run.finishedAt = new Date().toISOString();
       run.status = ok ? 'completed' : 'needs_attention';
-      run.delivery = await packageDelivery(run, ws, this.store.deliveryDir(id));
+      if (existing) {
+        run.delivery = await this.deliverExisting(run, { ws, emit, save, signal });
+        if (!run.delivery.integrity.ok) run.status = 'needs_attention';
+      } else {
+        run.delivery = await packageDelivery(run, ws, this.store.deliveryDir(id));
+      }
       if (run.outputDir) {
         run.delivery.output = await exportProject(ws, run.outputDir, run.id);
         emit('output', run.delivery.output);
         if (!run.delivery.output.ok) run.status = 'needs_attention';
       }
+      if (existing) await writeReport(run, this.store.deliveryDir(id));
       if (run.repoUrl && this.cfg.githubToken) {
         run.git = await pushToGit(ws, { repoUrl: run.repoUrl, token: this.cfg.githubToken, message: `${run.plan.product.name}: built by da-prompt factory run ${run.id}` });
         emit('git', run.git);
@@ -340,7 +394,7 @@ export class Factory {
       const cancelled = signal.aborted;
       const reason = cancelled ? String(signal.reason?.message || 'cancelled') : err.message;
       for (const t of run.plan?.tasks || []) if (t.status === 'running') t.status = cancelled ? 'cancelled' : 'pending';
-      run.error = redact(reason);
+      run.error = existing ? this.scrub(run, reason) : redact(reason);
       run.finishedAt = new Date().toISOString();
       run.status = cancelled ? 'cancelled' : err instanceof BudgetError ? 'needs_attention' : 'failed';
       await save();
@@ -389,7 +443,7 @@ export class Factory {
     await Promise.allSettled(running.values());
   }
 
-  async runTask(run, task, { ws, provider, signal, track, emit, save, layer }) {
+  async runTask(run, task, { ws, notes = ws, provider, signal, track, emit, save, layer }) {
     const maxAttempts = run.settings.maxAttempts;
     const base = task.attemptBase || 0;
     let feedback = task.attempts.length > base ? task.attempts.at(-1).feedback : null;
@@ -406,7 +460,7 @@ export class Factory {
       await save();
       emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title });
 
-      const lessons = await readLessons(ws);
+      const lessons = await readLessons(notes);
       const out = await runAgent({
         provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
         settings: run.settings, signal, track,
@@ -424,19 +478,19 @@ export class Factory {
         await layer('verification', 'active');
         const checks = await this.verifyTask(task, ws, run, signal);
         attempt.verification = checks;
-        emit('verify', { taskId: task.id, attempt: n, results: checks.map(({ command, exitCode, ok, durationMs, output }) => ({ command, exitCode, ok, durationMs, output: redact(output).slice(-3000) })) });
+        emit('verify', { taskId: task.id, attempt: n, results: checks.map(({ command, exitCode, ok, durationMs, output, state }) => ({ command, exitCode, ok, durationMs, output: redact(output).slice(-3000), ...(state ? { state } : {}) })) });
         const failed = checks.filter((c) => !c.ok);
         attempt.ok = failed.length === 0;
         if (attempt.ok) {
           attempt.finishedAt = new Date().toISOString();
           task.status = 'completed';
           task.result = out.result;
-          if (task.attempts.length > 1) await this.recordLesson(run, ws, task, attempt, emit);
+          if (task.attempts.length > 1) await this.recordLesson(run, notes, task, attempt, emit);
           await save();
           emit('task', { taskId: task.id, status: 'completed', attempt: n, summary: out.result.summary });
           return;
         }
-        feedback = failed.map((c) => `$ ${c.command}\nexit code ${c.exitCode}\n${c.output.slice(-3500)}`).join('\n\n');
+        feedback = failed.map((c) => `$ ${c.command}\nexit code ${c.exitCode}${c.state === 'regression' ? '\n(REGRESSION: this command passed or had different failures before your change)' : ''}${c.newFailures?.length ? `\nnew failures:\n${c.newFailures.map((x) => `  - ${x}`).join('\n')}` : ''}\n${c.output.slice(-3500)}`).join('\n\n');
       }
 
       // ── Layer 6: feedback ──
@@ -451,7 +505,7 @@ export class Factory {
     task.status = 'escalated';
     task.error = headline(feedback);
     task.escalation = escalationFor(task, feedback);
-    await this.recordLesson(run, ws, task, task.attempts.at(-1), emit, { unresolved: true });
+    await this.recordLesson(run, notes, task, task.attempts.at(-1), emit, { unresolved: true });
     await save();
     emit('escalation', { taskId: task.id, reason: task.error, options: task.escalation.options });
   }
@@ -463,9 +517,17 @@ export class Factory {
       const ok = ws.exists(f.replace(/\/$/, ''));
       results.push({ command: `exists ${f}`, exitCode: ok ? 0 : 1, ok, durationMs: 0, output: ok ? '' : `expected output ${f} was not produced` });
     }
+    const existing = isExisting(run);
     for (const command of task.verify || []) {
       const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
-      results.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output: `${r.stdout}\n${r.stderr}`.trim() });
+      const output = `${r.stdout}\n${r.stderr}`.trim();
+      if (existing) {
+        // A command that already failed at baseline passes the task if it fails in no new way.
+        const cls = classifyCheck(run.project.baseline?.find((b) => b.command === command), r);
+        results.push({ command, exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output });
+      } else {
+        results.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output });
+      }
     }
     return results;
   }
@@ -489,6 +551,8 @@ export class Factory {
     const p = run.plan;
     const lines = [`# Plan — ${p.product.name}`, '', p.product.summary, '', '## Users', ...p.product.users.map((u) => `- ${u}`), '', '## Success criteria', ...p.product.successCriteria.map((c) => `- ${c}`), '', '## Task graph', '| Task | Role | Depends on | Level |', '| --- | --- | --- | --- |'];
     for (const t of p.tasks) lines.push(`| ${t.id} — ${t.title} | ${t.role} | ${t.dependsOn.join(', ') || '—'} | ${t.level} |`);
+    if (p.architecture) lines.push('', '## Existing architecture', p.architecture);
+    if (p.affectedFiles?.length) lines.push('', '## Files likely to change', ...p.affectedFiles.map((f) => `- ${f}`));
     lines.push('', '## Risks', ...(p.risks.length ? p.risks.map((r) => `- ${r}`) : ['- none identified']), '', '## Open questions', ...(p.openQuestions.length ? p.openQuestions.map((r) => `- ${r}`) : ['- none']), '');
     await ws.writeFile('PLAN.md', lines.join('\n'));
     if (!ws.exists('CLAUDE.md')) {
@@ -499,7 +563,243 @@ export class Factory {
     }
   }
 
-  async complete(run, { ws, provider, signal, track, emit, save, allDone }) {
+  // ── Existing projects ───────────────────────────────────────────────────────────────────────────
+
+  /** Remove server-side paths and credentials from text that is stored or shown. */
+  scrub(run, text) {
+    const paths = [this.store.workspaceDir(run.id), this.store.runDir(run.id), this.cfg.dataDir];
+    try {
+      if (run.source?.directoryId) paths.push(resolveDirectory(this.cfg, run.source.directoryId).real);
+    } catch {
+      /* no longer authorized */
+    }
+    return scrubPaths(text, paths);
+  }
+
+  /** Connect → Inspect → Baseline, all inside the plan layer, before any edit is made. */
+  async prepareExisting(run, { ws, signal, emit, save }) {
+    const stage = async (name, state, detail) => {
+      run.project.stages[name] = { state, detail: detail ? this.scrub(run, detail) : undefined, at: new Date().toISOString() };
+      await save();
+      emit('stage', { stage: name, state, detail: run.project.stages[name].detail });
+    };
+    run.project ||= { stages: {} };
+    const src = run.source;
+
+    // Connect: authorize the source and build the isolated workspace.
+    const intact = src.prepared && fs.existsSync(path.join(ws.root, '.git'));
+    if (!intact) {
+      if (src.prepared && run.plan) throw new Error('the isolated workspace is missing; start a new run');
+      src.prepared = false;
+      await stage('connect', 'active', 'Authorizing the source and creating an isolated workspace');
+      try {
+        const facts = await prepareWorkspace(this.cfg, run, ws.root, { signal, log: (text) => emit('log', { text }) });
+        Object.assign(src, facts, { prepared: true });
+      } catch (err) {
+        await stage('connect', 'failed', err.message);
+        throw new Error(signal.aborted ? 'cancelled' : err.message);
+      }
+      await stage('connect', 'done', `${src.mode === 'github' ? src.label : src.label} · ${src.workingMode} · base ${src.baseSha.slice(0, 10)} · branch ${src.branch}`);
+      emit('source', { mode: src.mode, label: src.label, ref: src.ref || null, workingMode: src.workingMode, baseSha: src.baseSha, baseBranch: src.baseBranch || null, branch: src.branch, git: src.sourceGit || null, note: src.snapshotNote || null, publish: Boolean(src.publish) });
+    } else {
+      await stage('connect', 'done', 'Reusing the existing isolated workspace');
+    }
+    if (signal.aborted) throw new Error('cancelled');
+
+    // Inspect: structure, manifests, instructions, scripts, deploy configuration.
+    await stage('inspect', 'active', 'Reading the project');
+    run.project.inspection = await inspectProject(ws);
+    const insp = run.project.inspection;
+    await stage('inspect', 'done', describeInspection(insp));
+    emit('inspect', { summary: describeInspection(insp), ecosystems: insp.ecosystems, commands: insp.baselineCommands, instructions: insp.instructions.map((i) => i.path), deploy: insp.deploy });
+
+    // Baseline: run the project's own checks before editing, and keep what already failed.
+    if (!insp.baselineCommands.length) {
+      run.project.baseline = [];
+      await stage('baseline', 'skipped', 'No test, lint or build command was detected, so there is no baseline');
+      return;
+    }
+    await stage('baseline', 'active', `Running ${insp.baselineCommands.length} check(s) before any change`);
+    run.project.baseline = await runChecks(ws, insp.baselineCommands, {
+      timeoutMs: run.settings.commandTimeoutMs,
+      signal,
+      onResult: (r) => emit('baseline', { command: r.command, kind: r.kind, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs, limitation: r.limitation, output: r.output.slice(-1500) }),
+    });
+    if (signal.aborted) throw new Error('cancelled');
+    // Whatever the baseline run left behind (caches, build output) is not part of the change.
+    const st = await runGit(['status', '--porcelain=v1', '-z', '--untracked-files=normal'], { cwd: ws.root, cfg: this.cfg });
+    const leftovers = st.stdout.split('\0').filter((l) => l.startsWith('?? ')).map((l) => l.slice(3).replace(/\/$/, ''));
+    await addExcludes(ws.root, leftovers);
+    run.project.baselineArtifacts = leftovers.slice(0, 50);
+    const bad = run.project.baseline.filter((b) => b.status !== 'passed');
+    await stage('baseline', 'done', `${run.project.baseline.length - bad.length} passed, ${bad.length} already failing or not runnable`);
+  }
+
+  /** Layer 7 for an existing project: re-run the project's checks and classify every result against the baseline. */
+  async completeExisting(run, { ws, notes, provider, signal, track, emit, save, allDone }) {
+    const items = [];
+    const tasks = run.plan.tasks;
+    const completed = tasks.filter((t) => t.status === 'completed' || t.status === 'skipped').length;
+    const skipped = tasks.filter((t) => t.status === 'skipped').length;
+    items.push({ id: 'tasks', label: 'Requested change implemented; every planned task verified', ok: completed === tasks.length && !skipped, state: completed === tasks.length && !skipped ? 'pass' : 'fail', detail: `${completed - skipped}/${tasks.length} tasks completed and verified${skipped ? `, ${skipped} skipped` : ''}` });
+
+    // Final verification: the plan's finalVerify plus every baseline check, each compared with its baseline.
+    const base = run.project.baseline || [];
+    const required = new Set([...run.plan.finalVerify, ...(run.project.inspection.commands.test || []).map((c) => c.command)]);
+    const commands = [...new Set([...run.plan.finalVerify, ...base.map((b) => b.command)])].filter(Boolean);
+    run.finalVerification = [];
+    for (const command of commands) {
+      if (signal.aborted) break;
+      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+      const cls = classifyCheck(base.find((b) => b.command === command), r);
+      run.finalVerification.push({ command, required: required.has(command), exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-6000) });
+    }
+    emit('verify', { taskId: '_final', results: run.finalVerification.map(({ command, exitCode, ok, state, durationMs, output, newFailures }) => ({ command, exitCode, ok, state, durationMs, newFailures, output: output.slice(-2000) })) });
+
+    const fv = run.finalVerification;
+    const v = verificationSummary(run);
+    const badReq = fv.filter((c) => !c.ok && (c.required || c.state === 'regression' || c.state === 'new-failure'));
+    const notRunOptional = fv.filter((c) => !c.ok && !badReq.includes(c));
+    const proven = v.passed + v.fixed > 0;
+    let testsState = 'pass';
+    if (!fv.length) testsState = 'skipped';
+    else if (badReq.length) testsState = badReq.some((c) => c.state === 'regression' || c.state === 'new-failure') ? 'fail' : 'skipped';
+    else if (!proven) testsState = 'skipped';
+    else if (notRunOptional.length) testsState = 'partial';
+    const testsOk = (testsState === 'pass' || testsState === 'partial') && completed === tasks.length;
+    const parts = fv.map((c) => `${c.command} → ${c.state}`);
+    items.push({
+      id: 'tests',
+      label: 'Project checks pass with no regressions',
+      ok: testsOk,
+      state: testsOk ? testsState : testsState === 'pass' || testsState === 'partial' ? 'fail' : testsState,
+      detail: (fv.length ? parts.join(', ') : 'no project checks could be run — nothing is claimed as verified') + (testsOk || completed === tasks.length ? '' : ` (not counted: ${tasks.length - completed} task(s) incomplete)`),
+    });
+    const pre = fv.filter((c) => c.state === 'preexisting');
+    if (pre.length || base.some((b) => b.status === 'unavailable' || b.status === 'blocked')) {
+      items.push({ id: 'baseline', label: 'Pre-existing failures (present before this run)', ok: true, state: 'warn', detail: `${pre.length} still failing exactly as at baseline${v.baselineNotRun ? `, ${v.baselineNotRun} baseline check(s) could not run` : ''}; not caused by this change` });
+    }
+
+    // Security review of what this run changed (the project's pre-existing code is not re-litigated).
+    const changed = await changeSummary(this.cfg, run, ws.root);
+    run.security = await scanWorkspace(ws, { only: new Set(changed.files.filter((f) => f.status !== 'D').map((f) => f.path)) });
+    const crit = run.security.findings.filter((f) => f.severity === 'critical' || f.severity === 'high');
+    items.push({ id: 'security', label: 'No critical errors or security issues in the changed files', ok: run.security.ok, state: run.security.ok ? 'pass' : 'fail', detail: crit.length ? crit.map((f) => `${f.rule} at ${f.file}:${f.line}`).slice(0, 5).join('; ') : `${changed.files.length} changed file(s) scanned, ${run.security.findings.length} low/medium findings, 0 blocking` });
+
+    // Deployment applies only when it was explicitly authorized.
+    if (run.settings.deploy && run.plan.deploy && allDone && !signal.aborted) {
+      emit('log', { text: `Starting the authorized local preview: ${run.plan.deploy.start}` });
+      const d = await this.previews.start(run.id, ws.root, run.plan.deploy);
+      run.deployment = { ...d, start: run.plan.deploy.start, healthPath: run.plan.deploy.healthPath, url: d.ok ? `/preview/${run.id}/` : null, at: new Date().toISOString() };
+      emit('deploy', { ok: d.ok, url: run.deployment.url, error: d.error, logs: d.logs });
+      items.push({ id: 'deploy', label: 'Local preview starts and passes its health check', ok: Boolean(d.ok), state: d.ok ? 'pass' : 'fail', detail: d.ok ? `live at ${run.deployment.url}` : d.error || 'preview did not start' });
+    } else if (run.settings.deploy) {
+      run.deployment = { ok: false, start: run.plan.deploy?.start, error: run.plan.deploy ? 'skipped: not all tasks completed' : 'no start command in the plan' };
+      items.push({ id: 'deploy', label: 'Local preview starts and passes its health check', ok: false, state: 'skipped', detail: run.deployment.error });
+    } else {
+      items.push({ id: 'deploy', label: 'Deployment', ok: true, state: 'na', detail: 'not requested for this run — nothing was deployed' });
+    }
+    items.push({ id: 'docs', label: 'Documentation', ok: true, state: 'na', detail: 'only changed when the request or a plan task calls for it' });
+
+    run.checklist = items;
+    run.summary = redact(await writeSummary({ provider, run, signal, track }));
+    items.push({ id: 'summary', label: 'Final summary and next steps provided', ok: Boolean(run.summary) && !run.summary.startsWith('Summary unavailable'), state: run.summary && !run.summary.startsWith('Summary unavailable') ? 'pass' : 'fail', detail: 'FACTORY_REPORT.md' });
+    run.checklist = items;
+    await save();
+    emit('checklist', { items });
+  }
+
+  /** Commit to the run branch, package patch/archive/report, check source protection, and publish if it was asked for. */
+  async deliverExisting(run, { ws, emit, save, signal }) {
+    const src = run.source;
+    const integrity = await verifyIntegrity(this.cfg, run, ws.root);
+    const pkg = await packageExistingDelivery(this.cfg, run, ws, this.store.deliveryDir(run.id), { commit: integrity.ok });
+    const reasons = [];
+    if (!integrity.ok) reasons.push(...integrity.problems);
+    if (!run.changes.files.length) reasons.push('the run changed no files');
+    for (const c of run.checklist || []) if (!c.ok) reasons.push(`${c.label}${c.detail ? ` (${c.detail})` : ''}`);
+    const delivery = { ...pkg, integrity, readiness: { ready: reasons.length === 0, reasons, verdict: verdictOf(run) }, publication: run.delivery?.publication, local: run.delivery?.local };
+    run.delivery = delivery;
+    if (src.mode === 'github' && src.publish && integrity.ok && !signal.aborted) {
+      delivery.publication = await this.publishNow(run, { ws, emit, pullRequest: true });
+    }
+    await save();
+    return delivery;
+  }
+
+  async publishNow(run, { ws, emit, pullRequest = true }) {
+    const verdict = verdictOf(run);
+    const pub = await publishRun(this.cfg, run, {
+      wsDir: ws.root,
+      pullRequest,
+      draft: !run.delivery?.readiness?.ready,
+      prTitle: `${run.title}`.slice(0, 120),
+      prBody: buildPrBody(run, { changes: run.changes, verification: verdict.replace(/-/g, ' ') }),
+    });
+    emit('publish', { state: pub.state, branch: pub.branch, sha: pub.sha, pr: pub.pr || null, error: pub.error || null, prError: pub.prError || null, step: pub.step || null });
+    return pub;
+  }
+
+  /** Explicit publish action (GitHub runs): push the run branch and optionally open the pull request. Safe to repeat. */
+  async publish(id, { pullRequest = true } = {}) {
+    if (this.active.has(id)) throw new ProjectError(409, 'run is still executing');
+    const run = await this.store.load(id);
+    if (!isExisting(run) || run.source.mode !== 'github') throw new ProjectError(409, 'only GitHub-backed runs can be published');
+    if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
+    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true });
+    run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
+    await writeReport(run, this.store.deliveryDir(id));
+    await this.store.save(run);
+    return run;
+  }
+
+  /** Explicit apply action (local runs): write the result into the source directory, or export a branch. */
+  async applyLocal(id, { mode = 'working-tree' } = {}) {
+    if (this.active.has(id)) throw new ProjectError(409, 'run is still executing');
+    const run = await this.store.load(id);
+    if (!isExisting(run) || run.source.mode !== 'local') throw new ProjectError(409, 'only local-directory runs can be applied');
+    if (!run.delivery?.integrity?.ok) throw new ProjectError(409, 'the run has not been delivered with a clean source-protection check');
+    const dir = resolveDirectory(this.cfg, run.source.directoryId); // re-authorized on every use
+    if (dir.readOnly) throw new ProjectError(403, 'this directory is in a read-only root; download the patch instead');
+    const wsDir = this.store.workspaceDir(id);
+    const emit = (t, d) => this.store.event(id, t, d);
+    run.delivery.local ||= {};
+    if (mode === 'branch') {
+      const b = await exportBranch(this.cfg, run, { sourceDir: dir.real, wsDir }).catch((e) => {
+        throw new ProjectError(e instanceof ProjectError ? e.status : 409, this.scrub(run, e.message));
+      });
+      run.delivery.local.branch = { ...b, at: new Date().toISOString() };
+      emit('apply', { mode, branch: b.branch });
+    } else if (mode === 'working-tree') {
+      const r = await applyToSource(this.cfg, run, { sourceDir: dir.real, wsDir });
+      if (!r.ok) {
+        const err = new ProjectError(409, r.conflicts ? `nothing was written: ${r.conflicts.length} file(s) changed in the source since the run started` : this.scrub(run, r.error));
+        err.conflicts = r.conflicts || [];
+        emit('apply', { mode, ok: false, conflicts: err.conflicts });
+        throw err;
+      }
+      run.delivery.local.applied = { files: r.files, at: new Date().toISOString() };
+      emit('apply', { mode, ok: true, files: r.files.length });
+    } else throw new ProjectError(400, 'mode must be working-tree or branch');
+    await writeReport(run, this.store.deliveryDir(id));
+    await this.store.save(run);
+    return run;
+  }
+
+  /** Live changed-file list, or the diff of one file, from the run's workspace. */
+  async changes(id, filePath) {
+    const run = await this.store.load(id);
+    if (!isExisting(run) || !run.source.baseSha) throw new ProjectError(404, 'this run has no tracked changes');
+    const wsDir = this.store.workspaceDir(id);
+    if (!filePath) return changeSummary(this.cfg, run, wsDir);
+    if (filePath.startsWith('-') || filePath.includes('\0')) throw new ProjectError(400, 'invalid path');
+    const patch = (await changePatch(this.cfg, run, wsDir, filePath)).toString('utf8');
+    return { path: filePath, diff: redact(patch.length > 300_000 ? `${patch.slice(0, 300_000)}\n…[diff truncated]` : patch) };
+  }
+
+  async complete(run, ctx) {
+    if (isExisting(run)) return this.completeExisting(run, ctx);
+    const { ws, provider, signal, track, emit, save, allDone } = ctx;
     const items = [];
     const tasks = run.plan.tasks;
     const completed = tasks.filter((t) => t.status === 'completed').length;

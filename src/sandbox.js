@@ -17,10 +17,21 @@ const DENY = [
   [/\bgit\s+push\b/, 'agents cannot push; the factory delivers code'],
 ];
 
+// Existing-project workspaces are git repositories; agents may commit locally, so give them an identity.
+const GIT_IDENTITY = { GIT_AUTHOR_NAME: 'da-prompt agent', GIT_AUTHOR_EMAIL: 'agent@da-prompt.local', GIT_COMMITTER_NAME: 'da-prompt agent', GIT_COMMITTER_EMAIL: 'agent@da-prompt.local' };
+
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)/i;
 
 export class Workspace {
-  constructor(root) {
+  /**
+   * opts.policy(command) → reason string to refuse a command (existing-project runs use this for
+   * installs, publishing, migrations and git operations that could rewrite the source history).
+   * opts.protectGit refuses file writes into any .git directory (hooks and config are code-execution
+   * vectors for the git commands the factory runs itself).
+   */
+  constructor(root, { policy = null, protectGit = false } = {}) {
+    this.policy = policy;
+    this.protectGit = protectGit;
     this.root = path.resolve(root);
     fs.mkdirSync(this.root, { recursive: true });
     this.realRoot = fs.realpathSync(this.root);
@@ -43,6 +54,7 @@ export class Workspace {
 
   async writeFile(rel, content) {
     const abs = this.resolve(rel);
+    if (this.protectGit && this.rel(abs).split('/').some((seg) => seg.toLowerCase() === '.git')) throw new Error(`writing inside .git is not allowed: ${rel}`);
     const data = String(content ?? '');
     if (Buffer.byteLength(data) > MAX_FILE_BYTES) throw new Error(`file too large (max ${MAX_FILE_BYTES} bytes)`);
     await fsp.mkdir(path.dirname(abs), { recursive: true });
@@ -107,12 +119,17 @@ export class Workspace {
         resolve({ command, exitCode: 126, stdout: '', stderr: `blocked: ${denied[1]}`, durationMs: 0, timedOut: false });
         return;
       }
+      const policyReason = this.policy?.(command);
+      if (policyReason) {
+        resolve({ command, exitCode: 126, stdout: '', stderr: `blocked: ${policyReason}`, durationMs: 0, timedOut: false });
+        return;
+      }
       const started = Date.now();
       const home = path.join(this.root, '.home');
       fs.mkdirSync(home, { recursive: true });
       const child = spawn('sh', ['-c', command], {
         cwd: this.root,
-        env: { ...safeEnv(), HOME: home, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...env },
+        env: { ...safeEnv(), HOME: home, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...(this.protectGit ? GIT_IDENTITY : {}), ...env },
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -165,7 +182,8 @@ function tail(s) {
 export function safeEnv() {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (SECRET_ENV.test(k)) continue;
+    // GIT_CONFIG_COUNT/KEY_n/VALUE_n travel together (and may carry credentials); dropping only some breaks git.
+    if (SECRET_ENV.test(k) || /^GIT_CONFIG_/.test(k) || k === 'NODE_TEST_CONTEXT') continue; // the last: a nested `node --test` would silently skip itself
     env[k] = v;
   }
   return env;

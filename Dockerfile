@@ -1,5 +1,6 @@
 # da-prompt software factory.
 # Agents run shell commands inside generated workspaces, so the container is the sandbox.
+# Existing projects: mount them (read-only unless you want "apply") and set FACTORY_PROJECT_ROOTS[_READONLY]; see README.
 FROM node:22-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates tar wget python3 \

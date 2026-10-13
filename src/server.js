@@ -11,6 +11,7 @@ import { PreviewManager } from './deploy.js';
 import { Workspace } from './sandbox.js';
 import { renderPrompt, PROMPT_TEMPLATE, INPUT_FIELDS } from './prompt.js';
 import { buildReport } from './deliver.js';
+import { ProjectError, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -25,11 +26,15 @@ const TYPES = {
 const SECURITY_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin' };
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
+
+/** ProjectError carries its own HTTP status (403 unauthorized directory, 404 missing ref, ...). */
+const asHttp = (err) => (err instanceof HttpError ? err : new HttpError(err.status || 400, err.message, err.conflicts ? { conflicts: err.conflicts } : undefined));
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...SECURITY_HEADERS });
@@ -99,8 +104,14 @@ export async function createServer(overrides = {}) {
     // /api/...
     if (parts[1] === 'health') return json(res, 200, { ok: true, active: factory.active.size });
     if (parts[1] === 'config' && method === 'GET') {
-      return json(res, 200, { defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null });
+      const roots = authorizedRoots(cfg);
+      return json(res, 200, {
+        defaults: cfg.defaults, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null,
+        // Existing projects: capabilities only. Server paths are never sent to the browser.
+        projects: { local: roots.length > 0, roots: roots.map((r) => ({ label: r.label, readOnly: r.readOnly })), github: true, githubHosts: cfg.gitHosts, canPublish: Boolean(cfg.githubToken) },
+      });
     }
+    if (parts[1] === 'projects') return projectsApi(req, res, parts);
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
@@ -116,7 +127,7 @@ export async function createServer(overrides = {}) {
         try {
           run = await factory.createRun(body);
         } catch (err) {
-          throw new HttpError(400, err.message);
+          throw asHttp(err);
         }
         if (body.start !== false) factory.start(run.id);
         return json(res, 201, { run: publicRun(run, factory, previews) });
@@ -157,8 +168,35 @@ export async function createServer(overrides = {}) {
       }
       return json(res, 202, { run: publicRun(await store.load(id), factory, previews) });
     }
+    if (sub === 'changes' && method === 'GET') {
+      try {
+        return json(res, 200, await factory.changes(id, url.searchParams.get('path') || ''));
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
+    if (sub === 'publish' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 200, { run: publicRun(await factory.publish(id, { pullRequest: body.pullRequest !== false }), factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
+    if (sub === 'apply' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 200, { run: publicRun(await factory.applyLocal(id, { mode: body.mode }), factory, previews) });
+      } catch (err) {
+        throw asHttp(err);
+      }
+    }
     if (sub === 'deploy' && method === 'POST') {
       if (!run.plan?.deploy) throw new HttpError(409, 'this run has no deploy command');
+      if (isExisting(run) && !run.settings.deploy) {
+        const body = await readBody(req);
+        if (body.authorize !== true) throw new HttpError(403, 'starting a preview of an existing project needs explicit authorization ({"authorize": true})');
+      }
       const d = await previews.start(id, store.workspaceDir(id), run.plan.deploy);
       run.deployment = { ...(run.deployment || {}), ...d, start: run.plan.deploy.start, healthPath: run.plan.deploy.healthPath, url: d.ok ? `/preview/${id}/` : null, at: new Date().toISOString() };
       await store.save(run);
@@ -182,13 +220,78 @@ export async function createServer(overrides = {}) {
     }
     if (sub === 'download' && method === 'GET') {
       const name = parts[4] || 'project.tar.gz';
-      if (!['project.tar.gz', 'FACTORY_REPORT.md', 'test-results.json'].includes(name)) throw new HttpError(404, 'unknown file');
+      if (!['project.tar.gz', 'FACTORY_REPORT.md', 'test-results.json', 'changes.patch', 'DELETED_FILES.txt'].includes(name)) throw new HttpError(404, 'unknown file');
       const file = path.join(store.deliveryDir(id), name);
       if (!fs.existsSync(file)) throw new HttpError(404, 'not delivered yet');
       const slug = (run.plan?.product?.name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      const downloadName = name === 'project.tar.gz' ? `${slug}-${id}.tar.gz` : name;
-      res.writeHead(200, { 'content-type': TYPES[path.extname(name)] || 'application/gzip', 'content-disposition': `attachment; filename="${downloadName}"`, ...SECURITY_HEADERS });
+      const downloadName = name === 'project.tar.gz' ? `${slug}-${id}${isExisting(run) ? '-changes' : ''}.tar.gz` : name === 'changes.patch' ? `${slug}-${id}.patch` : name;
+      res.writeHead(200, { 'content-type': name === 'changes.patch' || name === 'DELETED_FILES.txt' ? 'text/plain; charset=utf-8' : TYPES[path.extname(name)] || 'application/gzip', 'content-disposition': `attachment; filename="${downloadName}"`, ...SECURITY_HEADERS });
       return fs.createReadStream(file).pipe(res);
+    }
+    throw new HttpError(404, 'not found');
+  }
+
+  /**
+   * Existing-project discovery. Everything here is read-only and constrained to the configured roots:
+   * the browser picks from server-authorized ids, it can never name a path.
+   */
+  async function projectsApi(req, res, parts) {
+    const method = req.method;
+    try {
+      if (parts[2] === 'directories' && method === 'GET') return json(res, 200, await listDirectories(cfg));
+      if (parts[2] === 'inspect' && method === 'POST') {
+        const body = await readBody(req);
+        const src = body.source && typeof body.source === 'object' ? body.source : body;
+        if (src.mode === 'github') {
+          const info = await inspectRemote(cfg, { repoUrl: src.repoUrl, ref: src.ref });
+          return json(res, 200, {
+            mode: 'github',
+            repo: `${info.owner}/${info.repo}`,
+            host: info.host,
+            webUrl: info.webUrl,
+            defaultBranch: info.defaultBranch,
+            branches: info.branches,
+            branchCount: info.branchCount,
+            ref: info.selected,
+            workingBranch: 'da-prompt/<run id>',
+            canPublish: Boolean(cfg.githubToken),
+            isolation: 'clone',
+            summary: `Reads ${info.owner}/${info.repo} @ ${info.selected.name}. Edits happen in an isolated clone on a new branch; ${info.selected.kind === 'default' || info.selected.kind === 'branch' ? info.selected.name : 'the source ref'} is never modified.`,
+            warnings: [
+              ...(cfg.githubToken ? [] : ['GITHUB_TOKEN is not set: public repositories only, and nothing can be pushed or opened as a pull request.']),
+              ...(info.selected.kind === 'tag' || info.selected.kind === 'commit' ? [`The ref is a ${info.selected.kind}; the branch can be pushed but a pull request needs a branch to target.`] : []),
+            ],
+          });
+        }
+        if (src.mode === 'local') {
+          const dir = resolveDirectory(cfg, src.directoryId);
+          const g = await gitState(cfg, dir.real);
+          const insp = await inspectProject(new Workspace(dir.real));
+          const usable = g.isGit && !g.empty;
+          const warnings = [];
+          if (g.isGit && g.dirty) warnings.push(`${g.counts.staged + g.counts.unstaged + g.counts.untracked} uncommitted change(s) in this working tree. "clone" starts from the last commit and ignores them; "snapshot" includes them as the baseline. Neither touches your files.`);
+          if (!g.isGit) warnings.push('Not a git repository: results are delivered as a patch or archive, and git delivery is disabled.');
+          if (g.isGit && g.detached) warnings.push('HEAD is detached.');
+          if (dir.readOnly) warnings.push('This directory is in a read-only root: runs can read it, but results can only be downloaded, never applied back.');
+          return json(res, 200, {
+            mode: 'local',
+            id: dir.id,
+            name: dir.name,
+            readOnly: dir.readOnly,
+            git: publicGit(g),
+            workingModes: usable ? ['clone', 'snapshot'] : ['snapshot'],
+            defaultWorkingMode: usable ? 'clone' : 'snapshot',
+            isolation: usable ? 'clone' : 'snapshot',
+            workingBranch: usable ? 'da-prompt/<run id>' : null,
+            detected: { summary: describeInspection(insp), ecosystems: insp.ecosystems, checks: insp.baselineCommands, instructions: insp.instructions.map((i) => i.path), deploy: { detected: insp.deploy.detected, proposed: insp.deploy.proposed?.command || null } },
+            summary: `Reads ${dir.name}${g.branch ? ` (${g.branch})` : ''}. Edits happen in an isolated ${usable ? 'clone' : 'copy'} under the factory's data directory; your directory is only written if you apply the result afterwards.`,
+            warnings,
+          });
+        }
+        throw new ProjectError(400, 'source.mode must be local or github');
+      }
+    } catch (err) {
+      throw asHttp(err);
     }
     throw new HttpError(404, 'not found');
   }
@@ -316,7 +419,7 @@ export async function createServer(overrides = {}) {
     } catch (err) {
       const status = err.status || 500;
       if (status === 500) console.error(err);
-      if (!res.headersSent) json(res, status, { error: err.message || 'internal error' });
+      if (!res.headersSent) json(res, status, { error: err.message || 'internal error', ...(err.extra || {}) });
       else res.end();
     }
   });

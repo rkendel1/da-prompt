@@ -69,7 +69,7 @@ export class OfflineProvider {
     if (this.delayMs) await sleep(this.delayMs, signal);
     if (signal?.aborted) throw new Error('cancelled');
     let content;
-    if (meta.kind === 'plan') content = [toolUse('submit_plan', buildPlan(meta.inputs))];
+    if (meta.kind === 'plan') content = [toolUse('submit_plan', meta.project?.inspection ? buildExistingPlan(meta.inputs, meta.project.inspection) : buildPlan(meta.inputs))];
     else if (meta.kind === 'task') content = this.taskTurn(messages, meta);
     else if (meta.kind === 'summary') content = [{ type: 'text', text: summaryText(meta) }];
     else content = [{ type: 'text', text: 'OK' }];
@@ -77,8 +77,9 @@ export class OfflineProvider {
     return { content, stop_reason: content.some((c) => c.type === 'tool_use') ? 'tool_use' : 'end_turn', usage: { input_tokens: Math.ceil(chars / 4), output_tokens: Math.ceil(JSON.stringify(content).length / 4) } };
   }
 
-  taskTurn(messages, { task, attempt = 1, totalAttempts = attempt, inputs }) {
+  taskTurn(messages, { task, attempt = 1, totalAttempts = attempt, inputs, existing }) {
     const turn = messages.filter((m) => m.role === 'assistant').length;
+    if (existing) return existingTaskTurn(turn, task, inputs);
     const files = TASK_FILES[task.id];
     if (!files) {
       // Unknown task (e.g. a plan edited by a human): do nothing harmful, just report.
@@ -135,8 +136,67 @@ export function buildPlan(inputs = {}) {
   };
 }
 
+// ── Existing projects ──────────────────────────────────────────────────────────────────────────
+// The offline agents cannot write real application code for an arbitrary codebase. For an existing
+// project they plan from the inspected stack, record the change request in the workspace, and run the
+// project's own checks — enough to exercise connect/inspect/baseline/verify/deliver end to end.
+
+export const OFFLINE_CHANGE_FILE = 'docs/da-prompt-change-request.md';
+
+export function buildExistingPlan(inputs = {}, inspection = {}) {
+  const tests = (inspection.commands?.test || []).map((c) => c.command);
+  const checks = tests.length ? tests : (inspection.baselineCommands || []).map((c) => c.command);
+  const stack = (inspection.ecosystems || []).join(', ') || 'unknown stack';
+  return {
+    product: {
+      name: appTitle(inputs.idea || 'Change'),
+      summary: `Apply the requested change to the existing ${stack} project: ${inputs.idea}`,
+      users: ['Maintainers of this project'],
+      successCriteria: ['The requested change is recorded and reviewable as a diff', `The project's own checks still pass${checks.length ? ` (${checks.join(', ')})` : ''}`],
+    },
+    architecture: `Detected ${stack} with ${inspection.files ?? '?'} files; manifests: ${(inspection.manifests || []).map((m) => m.path).join(', ') || 'none'}.`,
+    affectedFiles: [OFFLINE_CHANGE_FILE],
+    tasks: [
+      { id: 'change', role: 'engineer', title: 'Record and scope the requested change', description: `Write ${OFFLINE_CHANGE_FILE} describing the request, the detected stack and the checks to run.`, dependsOn: [], acceptance: [`${OFFLINE_CHANGE_FILE} exists`], outputs: [OFFLINE_CHANGE_FILE], files: [], verify: [`test -s ${OFFLINE_CHANGE_FILE}`] },
+      { id: 'check', role: 'qa', title: "Run the project's own checks", description: `Run ${checks.map((c) => `\`${c}\``).join(', ') || 'the available checks'} and confirm nothing regressed.`, dependsOn: ['change'], acceptance: ['No new failures compared with the baseline'], outputs: [], files: [], verify: checks.slice(0, 2) },
+    ],
+    risks: ['The offline provider does not write application code; use a model provider for real changes.', ...(checks.length ? [] : ['No test, lint or build command was detected, so the change cannot be verified automatically.'])],
+    openQuestions: [],
+    finalVerify: checks,
+    deploy: null,
+  };
+}
+
+function existingTaskTurn(turn, task, inputs = {}) {
+  if (turn === 0) {
+    if (task.id === 'change') {
+      return [
+        { type: 'text', text: 'Recording the change request in the isolated workspace.' },
+        toolUse('write_file', { path: OFFLINE_CHANGE_FILE, content: `# Change request\n\n${inputs.idea || ''}\n\n_Recorded by the da-prompt offline provider. Use a model provider to implement the change itself._\n` }),
+      ];
+    }
+    const calls = [{ type: 'text', text: 'Running the project checks.' }];
+    if (task.verify?.[0]) calls.push(toolUse('run_command', { command: task.verify[0] }));
+    return calls;
+  }
+  return [toolUse('complete_task', { summary: task.id === 'change' ? `Recorded the change request in ${OFFLINE_CHANGE_FILE}.` : 'Ran the existing project checks.', files: task.id === 'change' ? [OFFLINE_CHANGE_FILE] : [], commands: task.verify || [], nextSteps: [] })];
+}
+
 function summaryText({ run }) {
   const tasks = run.plan.tasks;
+  if (run.source && run.source.mode !== 'new') {
+    const done = tasks.filter((t) => t.status === 'completed').length;
+    const failing = (run.checklist || []).filter((c) => !c.ok);
+    return [
+      `${done} of ${tasks.length} planned tasks completed against the existing project.`,
+      '',
+      failing.length ? `Not done: ${failing.map((c) => `${c.label.toLowerCase()} (${c.detail})`).join('; ')}.` : 'The project checks showed no regressions. Review the diff before merging.',
+      '',
+      '**Recommendations:**',
+      '- Review the changed files and diff in the Files tab',
+      '- Use a model provider for real implementation work (the offline provider only records the request)',
+    ].join('\n');
+  }
   const done = tasks.filter((t) => t.status === 'completed').length;
   const failing = (run.checklist || []).filter((c) => !c.ok);
   const roles = [...new Set(tasks.map((t) => t.role))].join(', ');

@@ -266,3 +266,50 @@ optgroup { font-style: normal; color: var(--muted); }
 .pv-setup summary { cursor: pointer; font: 12px var(--mono); color: var(--accent); }
 .pv-setup[open] summary { margin-bottom: 10px; }
 .pv-actions:empty { display: none; }
+
+/* Existing projects: source picker, stages, changes, delivery */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.project { border: 0; margin: 0; padding: 0; display: grid; gap: 12px; min-width: 0; }
+.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.seg label { position: relative; text-align: center; cursor: pointer; }
+.seg input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
+.seg span { display: block; padding: 9px 6px; font: 600 12px var(--mono); color: var(--ink-2); border-right: 1px solid var(--line-2); }
+.seg label:last-child span { border-right: 0; }
+.seg input:checked + span { background: var(--accent-soft); color: var(--accent); }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+.src { display: grid; gap: 12px; }
+.srcsummary { border: 1px solid var(--line); border-left: 3px solid var(--run); border-radius: 8px; padding: 10px 12px; background: var(--paper); font: 12.5px/1.55 var(--mono); }
+.srcsummary.bad { border-left-color: var(--bad); }
+.srcsummary ul { margin: 6px 0 0; padding-left: 18px; color: var(--warn); }
+.srcsummary b { color: var(--ink); }
+.stages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: -8px 0 18px; }
+.stage { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--card); font: 12px var(--mono); display: flex; justify-content: space-between; gap: 8px; }
+.stage b { font-weight: 600; }
+.stage.active { border-color: var(--run); } .stage.active .st { color: var(--run); }
+.stage.done .st { color: var(--ok); } .stage.failed .st { color: var(--bad); } .stage.skipped .st { color: var(--muted); }
+.checklist .na, .checklist .skipped { color: var(--muted); }
+.checklist .warn, .checklist .partial { color: var(--warn); }
+.pill.verified { background: var(--ok-soft); color: var(--ok); }
+.pill.verified-with-preexisting-failures, .pill.partially-verified, .pill.unverified { background: var(--warn-soft); color: var(--warn); }
+.pill.regression, .pill.new-failure, .pill.blocked { background: var(--bad-soft); color: var(--bad); }
+.pill.preexisting, .pill.unavailable { background: var(--warn-soft); color: var(--warn); }
+.pill.passed, .pill.fixed, .pill.ready { background: var(--ok-soft); color: var(--ok); }
+.pill.notready { background: var(--warn-soft); color: var(--warn); }
+.tree .st { font-weight: 600; width: 1.2em; flex: none; }
+.tree .st.A { color: var(--ok); } .tree .st.M { color: var(--warn); } .tree .st.D { color: var(--bad); }
+.tree .left { display: flex; gap: 6px; min-width: 0; } .tree .left span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.tree .plus { color: var(--ok); } .tree .minus { color: var(--bad); }
+.toggle { display: inline-flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
+.toggle button { all: unset; cursor: pointer; padding: 5px 12px; font: 12px var(--mono); }
+.toggle button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.diff { margin: 0; max-height: 70vh; overflow: auto; font: 12.5px/1.55 var(--mono); white-space: pre; }
+.diff .add { background: var(--ok-soft); color: var(--ok); display: block; }
+.diff .del { background: var(--bad-soft); color: var(--bad); display: block; }
+.diff .hunk { color: var(--run); display: block; }
+.diff .meta { color: var(--muted); display: block; }
+table.plain { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+table.plain td, table.plain th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.conflicts { color: var(--bad); font: 12px var(--mono); margin: 6px 0 0; padding-left: 18px; }
+@media (max-width: 720px) { .stages { grid-template-columns: 1fr; } .seg span { font-size: 11px; padding: 9px 2px; } }
+[hidden] { display: none !important; }
+.diff .ctx { display: block; }

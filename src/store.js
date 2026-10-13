@@ -27,6 +27,10 @@ export class RunStore {
   workspaceDir(id) {
     return path.join(this.runDir(id), 'workspace');
   }
+  /** Factory notes (plan, lessons) for runs against existing projects: never written into the project. */
+  notesDir(id) {
+    return path.join(this.runDir(id), 'notes');
+  }
   deliveryDir(id) {
     return path.join(this.runDir(id), 'delivery');
   }
@@ -42,6 +46,7 @@ export class RunStore {
   async create(run) {
     await fsp.mkdir(this.workspaceDir(run.id), { recursive: true });
     await fsp.mkdir(this.deliveryDir(run.id), { recursive: true });
+    await fsp.mkdir(this.notesDir(run.id), { recursive: true });
     await this.save(run);
     return run;
   }
@@ -82,6 +87,7 @@ export class RunStore {
           provider: r.provider,
           createdAt: r.createdAt,
           updatedAt: r.updatedAt,
+          source: r.source?.mode && r.source.mode !== 'new' ? { mode: r.source.mode, label: r.source.label } : undefined,
           tasks: r.plan?.tasks?.length || 0,
           completedTasks: r.plan?.tasks?.filter((t) => t.status === 'completed').length || 0,
         });

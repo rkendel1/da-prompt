@@ -15,9 +15,37 @@ const PATTERNS = [
 
 const SCAN_EXT = /\.(m?[jt]sx?|cjs|json|py|rb|go|rs|java|kt|php|sh|ya?ml|toml|env|ini|cfg|html?|vue|svelte|md)$/i;
 
-/** Scan workspace files. Returns findings with file/line; critical/high count as blocking. */
-export async function scanWorkspace(ws) {
-  const files = await ws.listFiles('.');
+/**
+ * Command policy for runs against an existing project. It refuses the consequential things a
+ * repository's docs or an agent might ask for: dependency installs (they execute project scripts),
+ * publishing/deploying, database migrations, privileged commands, and git operations that could
+ * move the source branch. This is a speed bump on well-meaning mistakes, NOT a security boundary:
+ * `sh -c` can always indirect around a pattern. Real isolation is the container (see README) and the
+ * post-run integrity checks on the source branch.
+ */
+const POLICY = [
+  [/\b(npm|pnpm|yarn|bun)\s+(i|install|ci|add|update|upgrade)\b|\bpip3?\s+install\b|\bpython3?\s+-m\s+pip\s+install\b|\bpoetry\s+(install|add|update)\b|\bpipenv\s+install\b|\buv\s+(pip|sync|add)\b|\bbundle\s+(install|update)\b|\bgem\s+install\b|\bgo\s+(get|install)\b|\bcargo\s+(install|add)\b|\bcomposer\s+(install|require|update)\b|\b(apt|apt-get|apk|yum|dnf|brew)\s+(install|add)\b/, 'installing dependencies runs project scripts and needs explicit authorization (enable "Allow dependency installs" for this run)', 'install'],
+  [/\bnpm\s+publish\b|\b(yarn|pnpm)\s+publish\b|\btwine\s+upload\b|\bcargo\s+publish\b|\bdocker\s+(push|login|run|exec|compose|build)\b|\bkubectl\b|\bhelm\s+(install|upgrade)\b|\bterraform\s+(apply|destroy)\b|\bpulumi\s+(up|destroy)\b|\b(vercel|netlify|flyctl|heroku|firebase|wrangler|serverless|sls)\b|\b(gcloud|aws|az)\s/, 'publishing, deploying and infrastructure commands are never run by agents'],
+  [/\bprisma\s+(migrate|db\s+push)\b|\balembic\s+(upgrade|downgrade)\b|\brails\s+db:|\brake\s+db:|manage\.py\s+(migrate|flush|loaddata)\b|\bdjango-admin\s+migrate\b|\bflyway\b|\bliquibase\b|\bknex\s+migrate\b|\bsequelize(-cli)?\s+db:|\btypeorm\s+migration:run\b|\bgoose\s+(up|down)\b|\bdbmate\s+(up|down)\b|\bsqlx\s+migrate\b/, 'database migrations are consequential and need explicit authorization'],
+  [/\b(su|doas|chown|mount|umount|systemctl|service|crontab|iptables)\b|\bchmod\s+(-[a-zA-Z]*R|-R)\b/, 'privileged and system commands are not allowed'],
+  [/\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/, 'piping downloads into a shell is not allowed'],
+  [/\bgit\s+(?:-[Cc]\s+\S+\s+|--?[\w-]+(?:=\S+)?\s+)*(push|pull|fetch|clone|remote|config|switch|rebase|update-ref|filter-branch|worktree|reflog|branch|tag|reset|submodule|gc|prune)\b/, 'this git operation could move or rewrite the source branch; the factory manages branches, commits and publishing itself'],
+  [/\bgit\s+(?:-[Cc]\s+\S+\s+|--?[\w-]+(?:=\S+)?\s+)*checkout\b(?!\s+(HEAD\s+)?--\s)/, 'git checkout is only allowed for restoring files (git checkout -- <path>)'],
+];
+
+export function existingProjectPolicy({ allowInstall = false } = {}) {
+  return (command) => {
+    for (const [re, reason, kind] of POLICY) {
+      if (kind === 'install' && allowInstall) continue;
+      if (re.test(command)) return reason;
+    }
+    return null;
+  };
+}
+
+/** Scan workspace files. Returns findings with file/line; critical/high count as blocking. `only` limits the scan to those paths. */
+export async function scanWorkspace(ws, { only } = {}) {
+  const files = (await ws.listFiles('.')).filter((f) => !only || only.has(f.path));
   const findings = [];
   for (const f of files) {
     if (!SCAN_EXT.test(f.path) && !/(^|\/)\.env/.test(f.path)) continue;
