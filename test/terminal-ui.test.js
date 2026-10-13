@@ -55,7 +55,13 @@ const buffer = (page) => page.evaluate(() => {
   for (let i = 0; i < b.length; i++) out.push(b.getLine(i).translateToString(true));
   return out.join('\n');
 });
-const waitBuf = (page, re, timeout = 20000) => waitFor(async () => (re instanceof RegExp ? re.test(await buffer(page)) : (await buffer(page)).includes(re)), { timeoutMs: timeout, intervalMs: 50 });
+const waitBuf = async (page, re, timeout = 20000) => {
+  try {
+    await waitFor(async () => (re instanceof RegExp ? re.test(await buffer(page)) : (await buffer(page)).includes(re)), { timeoutMs: timeout, intervalMs: 50 });
+  } catch (e) {
+    throw new Error(`${e.message}: ${re} — screen tail:\n${(await buffer(page)).trim().split('\n').slice(-12).join('\n')}`);
+  }
+};
 const connState = (page) => page.evaluate(() => document.querySelector('#term-meta [data-state]')?.dataset.state || '');
 const open = async (page) => {
   await page.waitForSelector('#term-new:not([disabled])');
@@ -158,6 +164,8 @@ T('interrupt button and resize: Interrupt stops the foreground process; resizing
   await run(page, 'sleep 500');
   await waitFor(() => { try { return execFileSync('pgrep', ['-f', '^sleep 500$'], { encoding: 'utf8' }).trim().length > 0; } catch { return false; } }, { timeoutMs: 15000, intervalMs: 50 }); // interrupt only once it really runs
   await page.click('#term-int');
+  // The interrupt flushes pending tty input (real behaviour): type the next command only once the prompt is back.
+  await waitFor(async () => { const lines = (await buffer(page)).trim().split('\n'); const last = lines.at(-1) || ''; return /[#$] $/.test(`${last} `) && !/sleep 500/.test(last) && lines.some((l) => /sleep 500/.test(l)); }, { timeoutMs: 15000, intervalMs: 50 });
   await run(page, 'echo INT=$?');
   await waitBuf(page, /\nINT=130\n/);
   const size = () => page.evaluate(() => { const t = window.__daTerminal().active.term; return [t.cols, t.rows]; });
