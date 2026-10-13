@@ -356,3 +356,72 @@ test('the source-protection check catches a run that moved branches even when th
   const direct = await verifyIntegrity(cfg, run, store.workspaceDir(run.id));
   assert.equal(direct.ok, false);
 });
+
+test('apply can approve in the same step: one action reviews these exact changes and writes them', async () => {
+  const { dirs, cfg: rootCfg } = widgets();
+  const dir = dirs.widgets;
+  const { cfg, factory } = setup({ provider: writer({ 'src/new.js': 'export const x = 1;\n' }), cfg: rootCfg });
+  const run = await factory.start((await factory.createRun({ idea: 'add x', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets') } })).id);
+  assert.equal(run.status, 'completed', run.error);
+  await assert.rejects(factory.applyLocal(run.id), /review the changes and approve them/, 'without approve it still needs a review');
+  const applied = await factory.applyLocal(run.id, { approve: true });
+  assert.equal(applied.review.decision, 'approved');
+  assert.equal(applied.review.note, 'Approved when applying.');
+  assert.equal(fs.readFileSync(path.join(dir, 'src/new.js'), 'utf8'), 'export const x = 1;\n');
+  assert.equal(git(dir, 'status', '--porcelain').includes('src/new.js'), true);
+  assert.equal(git(dir, 'diff', '--cached', '--name-only'), '', 'nothing is staged');
+});
+
+test('apply automatically: a verified, ready run is approved and written without further clicks; it is opt-in', async () => {
+  const { dirs, cfg: rootCfg } = widgets();
+  const dir = dirs.widgets;
+  const { cfg, factory } = setup({ provider: writer({ 'src/new.js': 'export const x = 1;\n' }), cfg: rootCfg });
+  const off = await factory.start((await factory.createRun({ idea: 'add x', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets') } })).id);
+  assert.ok(!fs.existsSync(path.join(dir, 'src/new.js')), 'by default nothing is written');
+  assert.equal(off.delivery.local?.autoApply, undefined);
+
+  const created = await factory.createRun({ idea: 'add x again', provider: 'offline', source: { mode: 'local', directoryId: dirId(cfg, 'widgets'), autoApply: true } });
+  assert.equal(created.source.autoApply, true);
+  const run = await factory.start(created.id);
+  assert.equal(run.status, 'completed', run.error);
+  assert.equal(run.delivery.readiness.ready, true, JSON.stringify(run.delivery.readiness));
+  assert.equal(run.delivery.local.autoApply.state, 'applied');
+  assert.equal(run.review.decision, 'approved');
+  assert.equal(run.review.auto, true);
+  assert.deepEqual(run.delivery.local.applied.files.map((f) => f.path), ['src/new.js']);
+  assert.equal(fs.readFileSync(path.join(dir, 'src/new.js'), 'utf8'), 'export const x = 1;\n');
+  assert.equal(git(dir, 'diff', '--cached', '--name-only'), '', 'never staged or committed');
+});
+
+test('apply automatically never forces: a run that is not ready, or whose files changed meanwhile, is left for review', async () => {
+  // Not ready: the change breaks the project's own tests.
+  const a = widgets();
+  const broken = setup({ provider: writer({ 'src/greet.js': 'throw new Error("boom");\n' }), cfg: a.cfg });
+  const r1 = await broken.factory.start((await broken.factory.createRun({ idea: 'break it', provider: 'offline', source: { mode: 'local', directoryId: dirId(broken.cfg, 'widgets'), autoApply: true } })).id);
+  assert.equal(r1.delivery.local.autoApply.state, 'skipped', JSON.stringify(r1.delivery.local));
+  assert.match(r1.delivery.local.autoApply.reason, /not ready/);
+  assert.equal(r1.review, undefined);
+  assert.doesNotMatch(fs.readFileSync(path.join(a.dirs.widgets, 'src/greet.js'), 'utf8'), /boom/);
+
+  // Conflict: the same file changes in the user's directory while the run is working.
+  const b = widgets();
+  const racing = new Scripted({
+    plan: () => plan([task('t')], { finalVerify: [] }),
+    task: ({ turn }) => {
+      if (turn === 0) { fs.appendFileSync(path.join(b.dirs.widgets, 'README.md'), 'edited by me while it ran\n'); return [toolUse('write_file', { path: 'README.md', content: '# from the run\n' })]; }
+      return [done('ok', ['README.md'])];
+    },
+  });
+  const c = setup({ provider: racing, cfg: b.cfg });
+  const r2 = await c.factory.start((await c.factory.createRun({ idea: 'docs', provider: 'offline', source: { mode: 'local', directoryId: dirId(c.cfg, 'widgets'), workingMode: 'snapshot', autoApply: true } })).id);
+  assert.equal(r2.status, 'completed', r2.error);
+  assert.equal(r2.delivery.local.autoApply.state, 'failed', JSON.stringify(r2.delivery.local));
+  assert.match(r2.delivery.local.autoApply.reason, /changed in your directory/);
+  assert.match(fs.readFileSync(path.join(b.dirs.widgets, 'README.md'), 'utf8'), /edited by me while it ran/);
+  assert.doesNotMatch(fs.readFileSync(path.join(b.dirs.widgets, 'README.md'), 'utf8'), /from the run/);
+
+  // Read-only roots cannot ask for it.
+  const ro = makeRoot({ widgets: (d) => fs.cpSync(makeRepo(), d, { recursive: true }) }, { readOnly: true });
+  const r3 = setup({ provider: writer({ 'a.txt': 'x' }), cfg: ro.cfg });
+  await assert.rejects(r3.factory.createRun({ idea: 'x', provider: 'offline', source: { mode: 'local', directoryId: dirId(r3.cfg, 'widgets'), autoApply: true } }), /read-only/);
+});

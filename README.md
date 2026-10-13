@@ -170,11 +170,13 @@ PAX output is *evidence*, shown apart from agent claims and from the factory's o
 run's verdict. Missing, incompatible (a different program called `pax`, e.g. the POSIX archiver), timing-out and failing
 PAX are each reported as such; drift is a finding (exit 6 with `--fail-on-findings`), a tool failure is exit 1.
 
-### Apply and publish (explicit, never automatic)
+### Apply and publish (explicit by default; local apply can be made automatic)
 
 ```bash
 da-prompt runs review <id> approve --note "read the diff"     # approval is bound to the exact patch (sha256)
 da-prompt runs apply <id> --yes          # write the approved files into your directory — nothing staged or committed
+da-prompt runs apply <id> --approve --yes # review + apply in one step (approves exactly these changes)
+da-prompt run "…" --project <dir> --auto-apply  # opt in: apply automatically if the run finishes verified and ready
 da-prompt runs apply <id> --branch --yes # or add the work to your repo as a branch instead
 da-prompt runs publish <id> --yes        # GitHub runs: push da-prompt/<id> and open a PR (needs githubToken; --no-pr to push only)
 ```
@@ -529,6 +531,36 @@ Keys can come from environment variables or be pasted on the Providers page (sav
 `data/providers.json` with owner-only permissions and never sent back to the browser).
 The Providers page also lets you change base URLs, set a default model, set Ollama's
 context window, and **Test** a model with a real tool call.
+
+### Agent engines (experimental): built-in or FX
+
+Planning, verification, feedback, review and delivery are always da-prompt's own. The *engine* only decides who runs one
+task attempt, so you can try another agent loop and switch back without losing anything.
+
+| Engine | What it is | Providers |
+| --- | --- | --- |
+| `builtin` (default) | da-prompt's own tool loop. | all |
+| `fx` | [`@appport/fx`](https://www.npmjs.com/package/@appport/fx) runs the loop and the model connection; every tool is still da-prompt's sandboxed one (same file, command and secret rules, same events and token budget). | OpenAI-compatible APIs and Ollama (not Anthropic) |
+
+```bash
+npm run engine:install -- fx          # installs @appport/fx under <data dir>/engines (da-prompt itself stays dependency-free)
+npm run engine:install -- fx --remove # and removes it again
+da-prompt run "…" --engine fx         # one run; omit it (or --engine builtin) to use the built-in loop
+FACTORY_AGENT_ENGINE=fx               # or set the default (Settings → Models → Agent engine); a run's own choice wins
+```
+
+In the browser it is the **Agent engine** selector under the model picker; engines that are not installed or cannot use the
+chosen provider are greyed out with the reason (`GET /api/engines`). The run page and report show a non-default engine.
+
+Things to know: fx executes only structured tool calls. Local models that write a call as plain text (qwen3-coder does this
+often) are retried by the adapter up to four times, but the built-in engine's text-call fallback is more forgiving, so compare
+on your model. `http://` endpoints are accepted by fx only on localhost. The model credential reaches fx as an environment
+variable *name* (never the key) that agent shells cannot see, and is removed when the task attempt ends.
+
+**`@appport/chip` is not an engine yet.** It is the eve framework (a durable agent *service* you author as a directory, build
+and serve, on Node ≥ 24 with its own sandbox backends: Docker, microsandbox or a JS shell at `/workspace`). Its tools would not
+touch da-prompt's sandboxed workspace without a bridge, so it needs its own design rather than a flag; see the note in the
+development log if you want to take that on. `chip` already uses `fx` as its model provider (`eve/models/fx`).
 
 ### Running with Ollama
 

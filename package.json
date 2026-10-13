@@ -16,7 +16,8 @@
     "lint": "node scripts/check.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --require ./test/setup-env.cjs --test --test-concurrency=1 test/*.test.js",
-    "validate": "node scripts/check.mjs && node scripts/build.mjs && npm test"
+    "validate": "node scripts/check.mjs && node scripts/build.mjs && npm test",
+    "engine:install": "node scripts/install-engine.mjs"
   },
   "engines": {
     "node": ">=20"

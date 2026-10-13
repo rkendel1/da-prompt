@@ -77,6 +77,7 @@
               <div class="actions"><button class="btn" type="button" id="check-repo">Check repository</button></div>
               <label class="field check"><input name="publish" id="publish" type="checkbox"> <span>Push the run branch and open a pull request when finished</span></label>
             </div>
+            <label class="field check" id="auto-apply-field" hidden><input name="autoApply" type="checkbox"> <span>Apply to my directory automatically when the run is verified and ready <em>conflict-checked; nothing is staged or committed</em></span></label>
             <label class="field check" id="install-field" hidden><input name="allowInstall" type="checkbox"> <span>Allow dependency installs (they run the project's own scripts)</span></label>
             <div class="srcsummary" id="src-summary" aria-live="polite" hidden></div>
           </fieldset>

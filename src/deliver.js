@@ -143,6 +143,7 @@ export function buildReport(run) {
   const L = [];
   L.push(`# ${p?.product?.name || run.title} — Factory Report`, '');
   L.push(`- Run: \`${run.id}\``, `- Status: **${run.status}**`, `- Provider: ${run.provider}${run.model ? ` (${run.model})` : ''}`);
+  if (run.engine && run.engine !== 'builtin') L.push(`- Agent engine: ${run.engine}`);
   if (run.plannerProvider && (run.plannerProvider !== run.provider || run.plannerModel !== run.model)) L.push(`- Planner: ${run.plannerProvider} (${run.plannerModel})`);
   if (run.outputDir) L.push(`- Delivered to: \`${run.outputDir}\``);
   L.push(`- Tokens: ${(run.usage?.input || 0) + (run.usage?.output || 0)} (${run.usage?.input || 0} in / ${run.usage?.output || 0} out), ${run.usage?.calls || 0} model calls`);

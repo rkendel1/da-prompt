@@ -170,18 +170,42 @@ test('an existing-project run: stages, changed files with diff, delivery, apply'
   assert.match(delivery, /Pre-existing|Passing/);
   assert.ok(await page.$('a[href$="download/changes.patch"]'));
   assert.equal(await page.$('[data-pub]'), null, 'no GitHub controls on a local run');
-  // Applying is separate from reviewing: it stays disabled until the exact changes are approved.
-  assert.equal(await page.isDisabled('[data-apply=working-tree]'), true);
-  await page.click('[data-review=approve]');
-  await page.waitForSelector('#review-card .pill.completed');
+  // One step: Apply approves these exact changes and writes them (no separate review click needed).
   assert.equal(await page.isDisabled('[data-apply=working-tree]'), false);
+  assert.match(await page.textContent('[data-apply=working-tree]'), /Approve & apply to my directory/);
   page.once('dialog', (dlg) => {
-    assert.match(dlg.message(), /Write 1 file into your directory “widgets”\? Nothing is staged or committed/);
+    assert.match(dlg.message(), /^Approve these exact changes and write 1 file into your directory “widgets”\? Nothing is staged or committed/);
     dlg.accept();
   });
   await page.click('[data-apply=working-tree]');
   await page.waitForFunction(() => /applied 1 file/.test(document.querySelector('#local-card')?.textContent || ''));
   assert.ok(fs.existsSync(path.join(roots.dirs.widgets, 'docs/da-prompt-change-request.md')));
+  assert.match(await page.textContent('#review-card'), /approved/i);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('"apply automatically" is offered for a local directory and writes the verified result with no further clicks', async (t) => {
+  if (skip) return t.skip(skip);
+  fs.rmSync(path.join(roots.dirs.widgets, 'docs'), { recursive: true, force: true }); // an earlier test applied its own change here
+  const { page, errors } = await open();
+  assert.equal(await page.isVisible('#auto-apply-field'), false, 'not for a new project');
+  await page.check('input[value=local]');
+  await page.waitForFunction(() => document.querySelector('#directory-id option'));
+  assert.equal(await page.isVisible('#auto-apply-field'), true);
+  const label = (await page.$$eval('#directory-id option', (os) => os.map((o) => o.textContent))).find((o) => o.startsWith('widgets'));
+  await page.selectOption('#directory-id', { label });
+  await page.waitForFunction(() => /branch main/.test(document.querySelector('#src-summary').textContent));
+  await page.check('[name=autoApply]');
+  assert.match(await page.textContent('#scope-list'), /Applying is automatic/);
+  await page.fill('textarea[name=idea]', 'Add logout to this application');
+  await page.click('button[type=submit]');
+  await page.waitForURL(/#\/runs\//);
+  await page.waitForFunction(() => /completed/.test(document.querySelector('.run-head .pill')?.textContent || ''), null, { timeout: 60_000 });
+  await page.click('[data-tab=delivery]');
+  await page.waitForFunction(() => /applied 1 file\(s\) to the source directory automatically/.test(document.querySelector('#local-card')?.textContent || ''));
+  assert.ok(fs.existsSync(path.join(roots.dirs.widgets, 'docs/da-prompt-change-request.md')));
+  fs.rmSync(path.join(roots.dirs.widgets, 'docs'), { recursive: true, force: true });
   assert.deepEqual(errors, []);
   await page.close();
 });

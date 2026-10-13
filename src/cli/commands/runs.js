@@ -35,6 +35,7 @@ export const RUN_OPTIONS = {
   'working-mode': { type: 'string', valueName: 'MODE', description: 'Local projects: clone (committed state) or snapshot (working tree).' },
   provider: { type: 'string', valueName: 'ID', description: 'Provider for this run (default: configured default).' },
   model: { type: 'string', valueName: 'NAME', description: 'Model for this run.' },
+  engine: { type: 'string', valueName: 'ENGINE', description: 'Agent engine: builtin (default) or fx (experimental, @appport/fx).' },
   'planner-provider': { type: 'string', valueName: 'ID', description: 'Planner provider for this run.' },
   'planner-model': { type: 'string', valueName: 'NAME', description: 'Planner model for this run.' },
   parallel: { type: 'string', valueName: 'N', description: 'Parallel agents (1-8).' },
@@ -46,6 +47,7 @@ export const RUN_OPTIONS = {
   'pax-steps': { type: 'string', valueName: 'LIST', description: 'Comma-separated PAX steps (info,doctor,reality,drift,graph,test-plan,test).' },
   deploy: { type: 'boolean', description: 'Authorize a local preview of the result.' },
   'allow-install': { type: 'boolean', description: 'Allow dependency installs (they run project scripts).' },
+  'auto-apply': { type: 'boolean', description: 'Local directory runs: apply the result to your directory automatically when it is verified and ready.' },
   publish: { type: 'boolean', description: 'GitHub: push the run branch and open a PR when done (explicit authorization).' },
   output: { type: 'string', valueName: 'DIR', description: 'Also export the resulting project to a new folder.' },
   requirements: { type: 'string', valueName: 'TEXT', description: 'Extra requirements.' },
@@ -83,10 +85,11 @@ export async function startRun(ctx, { forceNew = false } = {}) {
     stack: opts.stack,
     provider: opts.provider,
     model: opts.model,
+    ...(opts.engine ? { engine: opts.engine } : {}),
     ...(opts['planner-provider'] || opts['planner-model'] ? { planner: { provider: opts['planner-provider'], model: opts['planner-model'] } } : {}),
     outputDir: opts.output,
     settings,
-    ...(source ? { source: { ...(source.projectId ? { projectId: source.projectId } : { mode: source.mode }), directoryId: source.directoryId, repoUrl: source.repoUrl, ref: source.ref, workingMode: source.workingMode, publish: opts.publish || undefined, allowInstall: opts['allow-install'] || undefined } } : {}),
+    ...(source ? { source: { ...(source.projectId ? { projectId: source.projectId } : { mode: source.mode }), directoryId: source.directoryId, repoUrl: source.repoUrl, ref: source.ref, workingMode: source.workingMode, publish: opts.publish || undefined, allowInstall: opts['allow-install'] || undefined, autoApply: opts['auto-apply'] || undefined } } : {}),
   };
   const { run } = await client.post('/api/runs', body, { timeoutMs: 120_000 });
   out.info(`Run ${run.id} started${source ? ` on ${source.label || source.directoryId || source.repoUrl}` : ' (new application)'} · ${run.provider}${run.model ? ` / ${run.model}` : ''}`);
@@ -507,16 +510,17 @@ async function apply(ctx) {
   const run = await getRun(client, id);
   if (!run.source) throw new CliError('This run built a new application; there is nothing to apply. Download it with: da-prompt runs artifacts ' + id, { code: EXIT.USAGE });
   if (run.source.mode !== 'local') throw new CliError('Only local-directory runs can be applied. For GitHub runs use: da-prompt runs publish ' + id, { code: EXIT.USAGE });
-  if (run.review?.decision !== 'approved') throw new CliError(`Run ${id} has not been approved${run.review ? ` (it was ${run.review.decision})` : ''}.`, { code: EXIT.DENIED, hint: `Review it first: da-prompt runs diff ${id} && da-prompt runs review ${id} approve` });
+  if (!opts.approve && run.review?.decision !== 'approved') throw new CliError(`Run ${id} has not been approved${run.review ? ` (it was ${run.review.decision})` : ''}.`, { code: EXIT.DENIED, hint: `Review it first: da-prompt runs diff ${id} && da-prompt runs review ${id} approve — or approve and apply in one step: da-prompt runs apply ${id} --approve --yes` });
   const n = run.changes?.files.length || 0;
   const mode = opts.branch ? 'branch' : 'working-tree';
-  const msg = mode === 'branch' ? `Add the run's work to your repository as the branch da-prompt/${id} (nothing is checked out)?` : `Write ${n} file(s) into your directory "${run.source.label}"? Nothing is staged or committed, and nothing is written if any of them changed since the run started.`;
+  const lead = opts.approve && run.review?.decision !== 'approved' ? 'Approve these exact changes and ' : '';
+  const msg = mode === 'branch' ? `${lead}${lead ? 'a' : 'A'}dd the run's work to your repository as the branch da-prompt/${id} (nothing is checked out)?` : `${lead}${lead ? 'w' : 'W'}rite ${n} file(s) into your directory "${run.source.label}"? Nothing is staged or committed, and nothing is written if any of them changed since the run started.`;
   if (!(await confirm(ctx, msg))) {
     out.print('Not applied.');
     return EXIT.OK;
   }
   try {
-    const r = await client.post(`/api/runs/${encodeURIComponent(id)}/apply`, { mode });
+    const r = await client.post(`/api/runs/${encodeURIComponent(id)}/apply`, { mode, approve: opts.approve === true });
     out.data({ id, applied: true, mode, files: r.run.delivery.local?.applied?.files, branch: r.run.delivery.local?.branch });
     out.print(mode === 'branch' ? `${out.green('✓')} Branch ${r.run.delivery.local.branch.branch} added to your repository (${r.run.delivery.local.branch.sha.slice(0, 10)}).` : `${out.green('✓')} Applied ${r.run.delivery.local.applied.files.length} file(s). Review with git status / git diff; nothing was staged or committed.`);
   } catch (e) {
@@ -590,7 +594,7 @@ export default [
   { path: ['runs', 'evidence'], summary: 'Agent claims, factory verification and PAX observations — shown separately.', args: '<run-id>', minArgs: 1, options: { strict: { type: 'boolean', description: 'Exit 1 unless the factory verified the run with nothing missing.' } }, run: evidence },
   { path: ['runs', 'artifacts'], summary: 'List or download a run\'s artifacts (report, patch, archive, PAX evidence).', args: '<run-id>', minArgs: 1, options: { get: { type: 'string', valueName: 'NAME', description: 'Download this artifact.' }, out: { type: 'string', valueName: 'FILE', description: 'Where to save it.' } }, run: artifacts },
   { path: ['runs', 'review'], summary: 'Approve, reject or clear your decision about the run\'s exact changes.', args: '<run-id> approve|reject|clear', minArgs: 2, options: { note: { type: 'string', valueName: 'TEXT', description: 'Why.' } }, run: review },
-  { path: ['runs', 'apply'], summary: 'Write approved changes into your local directory (or add them as a branch).', args: '<run-id>', minArgs: 1, options: { branch: { type: 'boolean', description: 'Add the work as a branch in your repository instead.' }, yes: { type: 'boolean', description: 'Confirm without prompting.' } }, run: apply },
+  { path: ['runs', 'apply'], summary: 'Write approved changes into your local directory (or add them as a branch).', args: '<run-id>', minArgs: 1, options: { branch: { type: 'boolean', description: 'Add the work as a branch in your repository instead.' }, approve: { type: 'boolean', description: 'Approve these exact changes and apply them in one step (skips the separate review).' }, yes: { type: 'boolean', description: 'Confirm without prompting.' } }, run: apply },
   { path: ['runs', 'publish'], summary: 'Push the approved run branch and open a pull request (GitHub runs).', args: '<run-id>', minArgs: 1, options: { 'no-pr': { type: 'boolean', description: 'Push the branch only.' }, yes: { type: 'boolean', description: 'Confirm without prompting.' } }, run: publish },
   { path: ['runs', 'delete'], summary: 'Delete a run, its workspace and delivery files.', args: '<run-id>', minArgs: 1, options: { yes: { type: 'boolean', description: 'Confirm without prompting.' } }, run: del },
 ];

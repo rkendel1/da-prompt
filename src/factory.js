@@ -19,6 +19,8 @@ import { collectPaxEvidence } from './pax.js';
 import { PAX_STEP_IDS } from './settings.js';
 import crypto from 'node:crypto';
 import { ProviderRegistry } from './providers/registry.js';
+import { ENGINE_IDS, checkProvider, loadEngineModule } from './engines/index.js';
+import { makeFxRunner } from './engines/fx.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
@@ -38,6 +40,7 @@ export class Factory {
     this.makeProvider = (run) =>
       cfg.providerFactory?.(run.provider, cfg, run) ||
       this.providers.create(run.provider, { model: run.model, plannerModel: run.plannerModel, options: run.providerOptions });
+    this.agentRunners = { builtin: runAgent };
     // The planner may use a different provider (e.g. a frontier API) than the agents (e.g. a local model).
     this.makePlannerProvider = (run) => {
       const own = run.plannerProvider && (run.plannerProvider !== run.provider || run.plannerOptions);
@@ -85,7 +88,7 @@ export class Factory {
         project = located.project;
         const st = project.settings || {};
         raw = project.kind === 'local'
-          ? { mode: 'local', directoryId: located.dir.id, workingMode: raw.workingMode || st.workingMode || '', allowInstall: raw.allowInstall, publish: raw.publish }
+          ? { mode: 'local', directoryId: located.dir.id, workingMode: raw.workingMode || st.workingMode || '', allowInstall: raw.allowInstall, publish: raw.publish, autoApply: raw.autoApply }
           : { mode: 'github', repoUrl: project.remote.url, ref: raw.ref || st.defaultRef || '', publish: raw.publish, allowInstall: raw.allowInstall };
       }
       source = normalizeSource(this.cfg, raw);
@@ -110,6 +113,7 @@ export class Factory {
     const existing = source.mode !== 'new';
     const inputs = normalizeInputs(body, { existing });
     const choice = await this.resolveModelChoice(body);
+    const engine = await this.resolveEngine(body.engine, choice);
     const d = this.cfg.defaults;
     const s = body.settings || {};
     const clamp = (v, lo, hi, def) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.round(Number(v)))) : def);
@@ -145,6 +149,7 @@ export class Factory {
       provider: choice.provider,
       providerLabel: choice.label,
       model: choice.model,
+      engine,
       plannerProvider: choice.plannerProvider,
       plannerProviderLabel: choice.plannerLabel,
       plannerModel: choice.plannerModel,
@@ -166,8 +171,8 @@ export class Factory {
     await this.store.create(run);
     if (run.projectId) this.registry.touch(run.projectId);
     this.store.event(id, 'run.created', {
-      title: run.title, provider: run.provider, model: run.model, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings,
-      ...(existing ? { source: { mode: source.mode, label: source.label, ref: source.ref || null, workingMode: source.workingMode || null, publish: Boolean(source.publish) } } : {}),
+      title: run.title, provider: run.provider, model: run.model, engine, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings,
+      ...(existing ? { source: { mode: source.mode, label: source.label, ref: source.ref || null, workingMode: source.workingMode || null, publish: Boolean(source.publish), autoApply: Boolean(source.autoApply) } } : {}),
     });
     if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
     return run;
@@ -243,6 +248,27 @@ export class Factory {
     this.makeProvider({ ...choice, providerOptions: choice.options });
     this.makePlannerProvider({ ...choice, providerOptions: choice.options });
     return choice;
+  }
+
+  /** Which engine runs the tasks of this run. A non-default engine is checked now, so a missing install fails fast. */
+  async resolveEngine(requested, choice) {
+    const id = (typeof requested === 'string' && requested.trim()) || this.cfg.defaultEngine || 'builtin';
+    if (!ENGINE_IDS.includes(id)) throw new Error(`unknown agent engine "${id}" (use ${ENGINE_IDS.join(' or ')})`);
+    if (id === 'builtin') return id;
+    if (choice.provider === 'offline') throw new Error('The offline demo agents have no model, so they cannot use the FX engine. Use the built-in engine, or pick a real provider.');
+    try {
+      await loadEngineModule(this.cfg, id);
+      checkProvider(id, this.makeProvider({ ...choice, providerOptions: choice.options }));
+    } catch (e) {
+      throw new Error(e.message);
+    }
+    return id;
+  }
+
+  /** The function that runs one task attempt for this run. Runs created before engines existed use the built-in loop. */
+  agentRunner(run) {
+    if (run.engine === 'fx') return (this.agentRunners.fx ||= makeFxRunner(this.cfg));
+    return this.agentRunners.builtin;
   }
 
   isActive(id) {
@@ -501,7 +527,7 @@ export class Factory {
       emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title });
 
       const lessons = await readLessons(notes);
-      const out = await runAgent({
+      const out = await this.agentRunner(run)({
         provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
         settings: run.settings, signal, track,
         emit: (type, data) => emit(type, { ...data, attempt: n }),
@@ -763,6 +789,7 @@ export class Factory {
     if (src.mode === 'github' && src.publish && integrity.ok && !signal.aborted) {
       delivery.publication = await this.publishNow(run, { ws, emit, pullRequest: true });
     }
+    if (src.mode === 'local' && src.autoApply && !signal.aborted) await this.autoApplyLocal(run, { emit });
     await save();
     return delivery;
   }
@@ -795,16 +822,35 @@ export class Factory {
     return run;
   }
 
-  /** Explicit apply action (local runs): write the result into the source directory, or export a branch. */
-  async applyLocal(id, { mode = 'working-tree' } = {}) {
-    if (this.active.has(id)) throw new ProjectError(409, 'run is still executing');
-    const run = await this.store.load(id);
-    if (!isExisting(run) || run.source.mode !== 'local') throw new ProjectError(409, 'only local-directory runs can be applied');
-    if (!run.delivery?.integrity?.ok) throw new ProjectError(409, 'the run has not been delivered with a clean source-protection check');
-    const dir = await this.sourceDir(run, { purpose: 'apply changes', writable: true });
-    await this.assertApproved(run, mode === 'branch' ? 'add them to your repository' : 'apply them to your directory');
-    const wsDir = this.store.workspaceDir(id);
-    const emit = (t, d) => this.store.event(id, t, d);
+  /**
+   * "Apply automatically" (chosen when the run was started): once the run is delivered AND ready — source protection
+   * clean, every checklist item passed, no new failures — approve exactly these changes and write them into the source
+   * directory with the usual conflict check. Anything less leaves the result for a person to review; nothing is forced.
+   */
+  async autoApplyLocal(run, { emit }) {
+    const d = run.delivery;
+    d.local ||= {};
+    const skip = (reason) => { d.local.autoApply = { state: 'skipped', reason, at: new Date().toISOString() }; emit('apply', { mode: 'working-tree', ok: false, auto: true, skipped: reason }); };
+    if (!d.integrity?.ok) return skip('source protection did not pass');
+    if (!run.changes?.files?.length) return skip('the run changed no files');
+    if (!d.readiness?.ready) return skip(`the run is not ready for review (${(d.readiness?.reasons || [])[0] || 'checks did not all pass'})`);
+    try {
+      const dir = await this.sourceDir(run, { purpose: 'apply changes', writable: true });
+      run.review = { decision: 'approved', at: new Date().toISOString(), note: 'Approved automatically: "apply automatically" was chosen when the run was started, and the run was verified and ready.', changesHash: await this.changesHash(run), files: run.changes.files.length, auto: true };
+      this.store.event(run.id, 'review', { decision: 'approved', files: run.review.files, auto: true });
+      await this.applyNow(run, dir, 'working-tree');
+      d.local.autoApply = { state: 'applied', at: new Date().toISOString() };
+    } catch (e) {
+      const reason = e.conflicts?.length ? `${e.conflicts.length} file(s) changed in your directory since the run started, so nothing was written` : this.scrub(run, e.message);
+      d.local.autoApply = { state: 'failed', reason, at: new Date().toISOString() };
+      emit('apply', { mode: 'working-tree', ok: false, auto: true, error: reason });
+    }
+  }
+
+  /** Write the approved changes into the source directory (or export a branch). The caller has checked approval. */
+  async applyNow(run, dir, mode) {
+    const wsDir = this.store.workspaceDir(run.id);
+    const emit = (t, d) => this.store.event(run.id, t, d);
     run.delivery.local ||= {};
     if (mode === 'branch') {
       const b = await exportBranch(this.cfg, run, { sourceDir: dir.real, wsDir }).catch((e) => {
@@ -823,6 +869,24 @@ export class Factory {
       run.delivery.local.applied = { files: r.files, at: new Date().toISOString() };
       emit('apply', { mode, ok: true, files: r.files.length });
     } else throw new ProjectError(400, 'mode must be working-tree or branch');
+  }
+
+  /**
+   * Explicit apply action (local runs): write the result into the source directory, or export a branch.
+   * `approve: true` records an approval of these exact changes first, so reviewing and applying is one step.
+   */
+  async applyLocal(id, { mode = 'working-tree', approve = false } = {}) {
+    if (this.active.has(id)) throw new ProjectError(409, 'run is still executing');
+    let run = await this.store.load(id);
+    if (!isExisting(run) || run.source.mode !== 'local') throw new ProjectError(409, 'only local-directory runs can be applied');
+    if (!run.delivery?.integrity?.ok) throw new ProjectError(409, 'the run has not been delivered with a clean source-protection check');
+    const dir = await this.sourceDir(run, { purpose: 'apply changes', writable: true });
+    if (approve === true) {
+      const current = run.review?.decision === 'approved' && run.review.changesHash === (await this.changesHash(run));
+      if (!current) run = await this.review(id, { decision: 'approve', note: 'Approved when applying.' });
+    }
+    await this.assertApproved(run, mode === 'branch' ? 'add them to your repository' : 'apply them to your directory');
+    await this.applyNow(run, dir, mode);
     await writeReport(run, this.store.deliveryDir(id));
     await this.store.save(run);
     return run;

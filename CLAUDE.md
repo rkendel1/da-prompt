@@ -24,6 +24,7 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - Offline agent output lives in `templates/offline-app/*.tpl`; keep its tests passing.
 
 ## Lessons
+- Agent engines (`src/engines/`): `builtin` is the default and must keep working with no extra packages; optional engines (today `fx`) are installed under `<data dir>/engines`, never into this repo's dependencies, and take the SAME `runAgent` arguments/result. Their tools must go through `execTool`/`Workspace`, credentials may only reach them as env var names, and a run keeps the `engine` it started with. Test with an injected fake module (`cfg.engineModules`), as in `test/engines.test.js`.
 - `node --test <dir>/` does not accept a directory on Node 22; use a glob (`test/*.test.js`) or no argument.
 - `safeEnv()` drops `NODE_TEST_CONTEXT`: inherited, it makes a nested `node --test` skip itself and exit 0. Do not delete it in test files instead; that collapses the runner's per-test reporting.
 - `safeEnv()` must drop the whole `GIT_CONFIG_*` family, not just the `*KEY*` entries, or `git` breaks in agent shells.

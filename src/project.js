@@ -376,7 +376,9 @@ export function normalizeSource(cfg, input) {
     const workingMode = input.workingMode || '';
     if (workingMode && !WORKING_MODES.includes(workingMode)) throw new ProjectError(400, `source.workingMode must be one of ${WORKING_MODES.join(', ')}`);
     if (publish) throw new ProjectError(400, 'local runs never push or open pull requests; download the patch or apply it after review');
-    return { mode, directoryId: dir.id, label: dir.name, readOnly: dir.readOnly, workingMode, allowInstall };
+    const autoApply = input.autoApply === true;
+    if (autoApply && dir.readOnly) throw new ProjectError(400, 'this directory is in a read-only root, so results can only be downloaded, never applied automatically');
+    return { mode, directoryId: dir.id, label: dir.name, readOnly: dir.readOnly, workingMode, allowInstall, ...(autoApply ? { autoApply } : {}) };
   }
   const repo = parseRepoUrl(cfg, input.repoUrl);
   const ref = validateRef(input.ref);

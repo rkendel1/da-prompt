@@ -129,6 +129,17 @@ test('run → follow → evidence → diff → approve → apply: the whole loca
   assert.ok(be.requests.every((u) => u.startsWith('/api/')), `the CLI used only /api routes: ${[...new Set(be.requests.filter((u) => !u.startsWith('/api/')))].join(', ')}`);
 });
 
+test('apply --approve reviews and applies in one step', async () => {
+  const be = await backend();
+  const id = await startDetached(be);
+  await idle(be, id);
+  const r = await cli(['runs', 'apply', id, '--approve', '--yes', '--json'], { backend: be });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json.applied, true);
+  const shown = await cli(['runs', 'show', id, '--json'], { backend: be });
+  assert.equal(shown.json.run?.review?.decision ?? shown.json.review?.decision, 'approved');
+});
+
 test('a rejected review blocks apply; changes after approval invalidate it', async () => {
   const be = await backend();
   const id = await startDetached(be);

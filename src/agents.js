@@ -220,7 +220,21 @@ export function normalizePlan(p = {}) {
   };
 }
 
-function agentSystem(run, task, lessons) {
+/** A list of strings from whatever the model sent: an array, a single string, or nothing. Models are loose with these. */
+const strings = (v) => (Array.isArray(v) ? v : typeof v === 'string' && v.trim() ? [v] : []).filter((x) => typeof x === 'string' && x.trim());
+
+/** The result recorded when an agent calls complete_task; shared by every engine so they cannot drift apart. */
+export function completionFields(completion, filesTouched = []) {
+  const c = completion && typeof completion === 'object' ? completion : {};
+  return {
+    summary: redact(String(c.summary || '').slice(0, 4000)),
+    files: [...new Set([...strings(c.files), ...filesTouched])].filter((f) => typeof f === 'string'),
+    commands: strings(c.commands),
+    nextSteps: strings(c.nextSteps),
+  };
+}
+
+export function agentSystem(run, task, lessons) {
   const project = isExisting(run) ? agentContext(run, task) : '';
   return `${renderRunPrompt(run)}
 
@@ -230,7 +244,7 @@ ${rulesFor(run)}${project ? `\n\n${project}` : ''}
 ${lessons ? `\nLessons recorded in CLAUDE.md from earlier failures — follow them:\n${lessons}\n` : ''}`;
 }
 
-function taskBrief(run, task, { attempt, maxAttempts, feedback, upstream }) {
+export function taskBrief(run, task, { attempt, maxAttempts, feedback, upstream }) {
   const lines = [
     `# Task ${task.id}: ${task.title}  (role: ${task.role}, attempt ${attempt} of ${maxAttempts})`,
     '',
@@ -307,24 +321,13 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
     }
     messages.push({ role: 'user', content: results });
     if (completion) {
-      const files = [...new Set([...(completion.files || []), ...filesTouched])].filter((f) => typeof f === 'string');
-      return {
-        ok: true,
-        result: {
-          summary: redact(String(completion.summary || '').slice(0, 4000)),
-          files,
-          commands: (completion.commands || []).filter((c) => typeof c === 'string'),
-          nextSteps: (completion.nextSteps || []).filter((c) => typeof c === 'string'),
-          commandsRun,
-          turns: turn,
-        },
-      };
+      return { ok: true, result: { ...completionFields(completion, filesTouched), commandsRun, turns: turn } };
     }
   }
   return { ok: false, error: `agent did not finish within ${settings.maxAgentTurns} turns` };
 }
 
-async function execTool(ws, use, { settings, signal }) {
+export async function execTool(ws, use, { settings, signal }) {
   const input = use.input || {};
   try {
     switch (use.name) {
@@ -355,7 +358,7 @@ async function execTool(ws, use, { settings, signal }) {
   }
 }
 
-function summarizeInput(use) {
+export function summarizeInput(use) {
   const i = use.input || {};
   if (use.name === 'write_file') return { path: i.path, bytes: Buffer.byteLength(String(i.content ?? '')) };
   if (use.name === 'run_command') return { command: redact(String(i.command || '')).slice(0, 500) };

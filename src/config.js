@@ -34,6 +34,8 @@ export function loadConfig(overrides = {}) {
     defaultPlannerModel: process.env.FACTORY_PLANNER_MODEL || '',
     // Optional: plan with a different provider than the one that executes (e.g. frontier planner, local agents).
     defaultPlannerProvider: process.env.FACTORY_PLANNER_PROVIDER || '',
+    // Who runs each task: "builtin" (default) or an optional engine such as "fx" (see src/engines/).
+    defaultEngine: ['builtin', 'fx'].includes(process.env.FACTORY_AGENT_ENGINE) ? process.env.FACTORY_AGENT_ENGINE : 'builtin',
     // Where finished projects are copied. When set, every run's output directory must be inside it
     // (relative paths resolve against it). Unset: any path is allowed, relative ones against the cwd.
     outputRoot: process.env.FACTORY_OUTPUT_ROOT ? path.resolve(process.env.FACTORY_OUTPUT_ROOT) : '',

@@ -403,7 +403,7 @@ test('lifecycle: refresh during a run keeps access and reconnects, cancel stops 
     await page.click('[data-act=resume]');
     await waitStatus(page, /completed/);
     assert.equal(await page.$('.failure'), null);
-    assert.match(await textOf(page, '.nexts'), /Review the changes/);
+    assert.match(await textOf(page, '.nexts'), /Apply to your directory/);
     assert.equal(await page.$('[data-act=resume]'), null);
   } finally {
     delayMs = 0;

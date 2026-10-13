@@ -262,7 +262,9 @@ function mountNewRunExtras(form, picker, project) {
       const snap = (isReg ? fd.get('regWorkingMode') : fd.get('workingMode')) === 'snapshot';
       L.push(`<b>Reads</b> ${esc(dirLabel)} to build ${snap ? 'a copy of the working tree (including uncommitted files)' : 'a clone of the last commit'}.`);
       L.push('<b>May modify</b> only that isolated workspace on the server. Your directory is not written during the run.');
-      L.push('<b>Applying</b> the result to your directory is a separate action after you review the diff and approve it; nothing is staged or committed.');
+      L.push(fd.get('autoApply') === 'on'
+        ? '<b>Applying is automatic</b>: if the run finishes verified and ready, its changes are written into your directory with a conflict check (nothing staged or committed). Otherwise you review it first.'
+        : '<b>Applying</b> the result to your directory is one click after you review the diff (it approves and applies together); nothing is staged or committed.');
       L.push('<b>Publishing</b> is not available for local runs.');
     } else {
       const repo = (isReg ? $('#project-id').selectedOptions?.[0]?.textContent?.split(' — ')[0] : String(fd.get('sourceRepo') || '').trim()) || 'the repository';
@@ -439,6 +441,7 @@ function mountProjectPicker(form, { preselect = '' } = {}) {
     $('#src-local').hidden = r !== 'local';
     $('#src-github').hidden = r !== 'github';
     $('#install-field').hidden = m === 'new';
+    $('#auto-apply-field').hidden = m !== 'local';
     $('#idea-label').innerHTML = m === 'new' ? 'Idea <em>required</em>' : 'What do you want to change? <em>required</em>';
     form.idea.placeholder = m === 'new' ? 'A shared reading list for book clubs…' : 'Add password reset to this application…';
     $('#examples').hidden = m !== 'new';
@@ -480,9 +483,9 @@ function mountProjectPicker(form, { preselect = '' } = {}) {
       const m = mode();
       if (radio() === 'registered') {
         const p = regSelected();
-        return { projectId: p.id, workingMode: p.kind === 'local' ? fd.get('regWorkingMode') || undefined : undefined, publish: p.kind === 'remote' && fd.get('regPublish') === 'on', allowInstall: fd.get('allowInstall') === 'on' };
+        return { projectId: p.id, workingMode: p.kind === 'local' ? fd.get('regWorkingMode') || undefined : undefined, publish: p.kind === 'remote' && fd.get('regPublish') === 'on', allowInstall: fd.get('allowInstall') === 'on', autoApply: p.kind === 'local' && fd.get('autoApply') === 'on' || undefined };
       }
-      if (m === 'local') return { mode: m, directoryId: fd.get('directoryId'), workingMode: fd.get('workingMode') || undefined, allowInstall: fd.get('allowInstall') === 'on' };
+      if (m === 'local') return { mode: m, directoryId: fd.get('directoryId'), workingMode: fd.get('workingMode') || undefined, allowInstall: fd.get('allowInstall') === 'on', autoApply: fd.get('autoApply') === 'on' || undefined };
       if (m === 'github') return { mode: m, repoUrl: fd.get('sourceRepo'), ref: fd.get('ref') || undefined, publish: fd.get('publish') === 'on', allowInstall: fd.get('allowInstall') === 'on' };
       return undefined;
     },
@@ -584,7 +587,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}${run.projectId ? ` · project <a href="#/projects/${esc(run.projectId)}">${esc(run.projectName || 'project')}</a>` : ''}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.engine && run.engine !== 'builtin' ? ` · engine ${esc(run.engine)}` : ''}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}${run.projectId ? ` · project <a href="#/projects/${esc(run.projectId)}">${esc(run.projectName || 'project')}</a>` : ''}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
@@ -667,8 +670,8 @@ function nextActions(run, canResume) {
   if (run.executing || !['completed', 'needs_attention'].includes(run.status) || !run.source || !run.delivery) return '';
   const review = run.review?.decision;
   const items = [];
-  if (!review) items.push(['Review the changes', 'Look at the diff and the evidence, then approve or reject.', 'delivery']);
-  if (review === 'approved' && run.source.mode === 'local' && !run.delivery.local?.applied) items.push(['Apply to your directory', 'Approved. Applying is its own step, with a conflict check.', 'delivery']);
+  if (!review && run.source.mode !== 'local') items.push(['Review the changes', 'Look at the diff and the evidence, then approve or reject.', 'delivery']);
+  if (run.source.mode === 'local' && !run.delivery.local?.applied && review !== 'rejected') items.push(['Apply to your directory', review === 'approved' ? 'Approved. Apply writes the files, with a conflict check.' : 'Look at the diff, then Apply: it approves exactly these changes and writes them in one step.', 'delivery']);
   if (review === 'approved' && run.source.mode === 'github' && !run.delivery.publication?.pr) items.push(['Push and open a pull request', 'Approved. Publishing is its own step.', 'delivery']);
   if (review === 'rejected') items.push(['Changes rejected', 'Nothing will be applied or published. Retry tasks or start a new run.', 'overview']);
   if (run.delivery.publication?.pr) items.push(['Pull request ready', run.delivery.publication.pr.url, 'delivery']);
@@ -1135,7 +1138,7 @@ async function renderDeliveryExisting(el, run) {
   const approved = rv?.decision === 'approved';
   const canDecide = !busy && d.integrity?.ok && run.changes?.files.length;
   const reviewCard = `<div class="card" id="review-card"><h2>Review <span class="pill ${approved ? 'completed' : rv ? 'failed' : 'skipped'}">${esc(rv ? rv.decision : 'not reviewed')}</span></h2>
-    <p>Check the diff (Files tab) and the evidence, then decide. Applying and publishing stay disabled until you approve <b>these exact changes</b>; if they change afterwards you must approve again.</p>
+    <p>Check the diff (Files tab) and the evidence, then decide. ${s.mode === 'local' ? 'You can approve here, or just press <b>Approve &amp; apply</b> under “Your directory” to do both at once.' : 'Publishing stays disabled until you approve <b>these exact changes</b>; if they change afterwards you must approve again.'}</p>
     ${rv ? `<p class="mono muted">${esc(rv.decision)} ${esc(new Date(rv.at).toLocaleString())} · ${rv.files} file(s)${rv.note ? ` · “${esc(rv.note)}”` : ''}</p>` : ''}
     ${!d.readiness?.ready && d.readiness?.reasons?.length ? `<p class="muted">The factory still reports: ${esc(d.readiness.reasons.join('; '))}. Approval is your decision; it does not change those results.</p>` : ''}
     ${!canDecide ? `<p class="muted">${d.integrity?.ok ? (run.changes?.files.length ? 'The run is still executing.' : 'There are no changes to review.') : 'Source protection failed, so these changes cannot be approved.'}</p>` : ''}
@@ -1172,12 +1175,13 @@ async function renderDeliveryExisting(el, run) {
         <button class="btn" data-pub="push" ${busy || !approved || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>Push branch only</button></div>
         ${!config.projects?.canPublish ? '<p class="muted">No GitHub token is configured on the server. <a href="#/settings?group=github">Add one in Settings</a>.</p>' : !approved ? '<p class="muted">Approve the changes in the Review card to enable publishing.</p>' : '<p class="muted">Pushes only the run branch (never forced, never the base branch). Opens a draft PR unless everything is verified.</p>'}
       </div>` : `<div class="card" id="local-card"><h2>Your directory</h2>
-        ${d.local?.applied ? `<p class="mono">✓ applied ${d.local.applied.files.length} file(s) to the source directory (nothing staged or committed)</p>` : ''}
+        ${d.local?.applied ? `<p class="mono">✓ applied ${d.local.applied.files.length} file(s) to the source directory${rv?.auto ? ' automatically' : ''} (nothing staged or committed)</p>` : ''}
+        ${d.local?.autoApply && d.local.autoApply.state !== 'applied' ? `<p class="callout warn">Automatic apply did not write anything: ${esc(d.local.autoApply.reason)}. Review the changes and apply them yourself.</p>` : ''}
         ${d.local?.branch ? `<p class="mono">✓ branch <b>${esc(d.local.branch.branch)}</b> added to your repository (nothing checked out)</p>` : ''}
         <ul class="conflicts" id="conflicts" hidden></ul>
-        <p class="muted">Nothing was written to your directory during the run. Apply only if no file the run changed has changed in your directory since it started; otherwise nothing is written.${s.readOnly ? ' This directory is in a read-only root, so use the patch.' : ''}</p>
-        <div class="actions"><button class="btn accent" data-apply="working-tree" ${busy || !approved || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Apply to my directory</button>
-        ${s.workingMode === 'clone' ? `<button class="btn" data-apply="branch" ${busy || !approved || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Add as a branch in my repository</button>` : ''}</div>
+        <p class="muted">${d.local?.applied ? '' : 'Nothing was written to your directory during the run. '}Apply approves exactly these changes and writes them, unless a file the run changed has changed in your directory since it started (then nothing is written).${s.readOnly ? ' This directory is in a read-only root, so use the patch.' : ''}</p>
+        <div class="actions"><button class="btn accent" data-apply="working-tree" data-approve="${approved ? '' : '1'}" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>${d.local?.applied ? 'Apply again' : approved ? 'Apply to my directory' : 'Approve &amp; apply to my directory'}</button>
+        ${s.workingMode === 'clone' ? `<button class="btn" data-apply="branch" data-approve="${approved ? '' : '1'}" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>${approved ? 'Add as a branch in my repository' : 'Approve &amp; add as a branch'}</button>` : ''}</div>
       </div>`}
       ${run.outputDir ? `<div class="card"><h2>Project folder</h2>${d.output?.ok ? `<p>Full resulting project exported to <code>${esc(run.outputDir)}</code> (a new folder; your source was not touched).</p>` : `<p class="form-error">Could not export to <code>${esc(run.outputDir)}</code>: ${esc(d.output?.error || 'not delivered')}.</p>`}</div>` : ''}
       ${run.security ? `<div class="card"><h2>Security review <span class="muted mono">changed files</span></h2><p>${run.security.blocking} blocking · ${run.security.findings.length} total findings</p>${run.security.findings.length ? `<ul class="plain mono">${run.security.findings.slice(0, 20).map((f) => `<li>[${esc(f.severity)}] ${esc(f.rule)} — ${esc(f.file)}:${f.line}</li>`).join('')}</ul>` : ''}</div>` : ''}
@@ -1216,11 +1220,13 @@ async function renderDeliveryExisting(el, run) {
   }));
   el.querySelectorAll('[data-apply]').forEach((b) => (b.onclick = async () => {
     const n = run.changes?.files.length || 0;
-    const msg = b.dataset.apply === 'branch' ? `Add the run's work to your repository as the branch da-prompt/${run.id}? Nothing is checked out.` : `Write ${n} file${n === 1 ? '' : 's'} into your directory “${s.label}”? Nothing is staged or committed, and nothing is written if any of those files changed since the run started.`;
+    const approving = b.dataset.approve === '1';
+    const lead = approving ? 'Approve these exact changes and ' : '';
+    const msg = b.dataset.apply === 'branch' ? `${lead}${lead ? 'a' : 'A'}dd the run's work to your repository as the branch da-prompt/${run.id}? Nothing is checked out.` : `${lead}${lead ? 'w' : 'W'}rite ${n} file${n === 1 ? '' : 's'} into your directory “${s.label}”? Nothing is staged or committed, and nothing is written if any of those files changed since the run started.`;
     if (!confirm(msg)) return;
     b.disabled = true;
     try {
-      current.run = (await api(`api/runs/${run.id}/apply`, { method: 'POST', body: JSON.stringify({ mode: b.dataset.apply }) })).run;
+      current.run = (await api(`api/runs/${run.id}/apply`, { method: 'POST', body: JSON.stringify({ mode: b.dataset.apply, approve: approving }) })).run;
       toast(b.dataset.apply === 'branch' ? 'Branch added to your repository' : 'Applied to your directory');
       renderRun();
     } catch (e) {

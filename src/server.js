@@ -21,6 +21,7 @@ import { ProjectRegistry } from './registry.js';
 import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
 import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
 import { SOURCES } from './chat-context.js';
+import { engineStatus } from './engines/index.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -156,6 +157,7 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'chat') return chatApi(req, res, parts, url);
     if (parts[1] === 'tasks') return tasksApi(req, res, parts, url);
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
+    if (parts[1] === 'engines' && method === 'GET') return json(res, 200, { engines: await engineStatus(cfg), default: cfg.defaultEngine || 'builtin' });
     if (parts[1] === 'providers') return providersApi(req, res, parts, url);
     if (parts[1] === 'prompt' && method === 'GET') {
       const inputs = Object.fromEntries(INPUT_FIELDS.map(({ field }) => [field, url.searchParams.get(field) || '']));
@@ -271,7 +273,7 @@ export async function createServer(overrides = {}) {
     if (sub === 'apply' && method === 'POST') {
       const body = await readBody(req);
       try {
-        return json(res, 200, { run: publicRun(await factory.applyLocal(id, { mode: body.mode }), factory, previews) });
+        return json(res, 200, { run: publicRun(await factory.applyLocal(id, { mode: body.mode, approve: body.approve === true }), factory, previews) });
       } catch (err) {
         throw asHttp(err);
       }

@@ -55,8 +55,27 @@ function modelLabel(m) {
  */
 export async function mountModelPicker(root, api) {
   root.innerHTML = '<p class="muted mono">Checking which providers and models are available…</p>';
-  const state = { data: null, provider: null, pref: readPref() };
+  const state = { data: null, provider: null, pref: readPref(), engines: null };
   const usable = (id) => Boolean(state.data?.providers.some((x) => x.id === id && x.status === 'ready' && x.enabled));
+
+  // Who runs each task. "Built-in" is always available and is the default; others are optional experiments.
+  const engineChoice = (p) => {
+    const list = state.engines?.engines || [];
+    const want = state.engine ?? (state.pref.engine || state.engines?.default || 'builtin');
+    const row = list.find((e) => e.id === want);
+    return row && usableEngine(row, p).ok ? want : 'builtin';
+  };
+  const usableEngine = (e, p) => (!e.available ? { ok: false, why: e.reason } : e.id === 'fx' && p?.type === 'anthropic' ? { ok: false, why: 'FX talks to OpenAI-compatible endpoints and Ollama, not the Anthropic API.' } : { ok: true });
+  const engineBlock = (p) => {
+    const list = state.engines?.engines || [];
+    if (list.length < 2) return '';
+    const cur = engineChoice(p);
+    const row = list.find((e) => e.id === cur);
+    const bad = list.filter((e) => e.id !== 'builtin' && !usableEngine(e, p).ok);
+    return `<div class="picker-grid" style="align-items:start"><label class="field"><span>Agent engine <em>who runs each task</em></span>
+        <select id="pk-engine">${list.map((e) => { const u = usableEngine(e, p); return `<option value="${esc(e.id)}" ${e.id === cur ? 'selected' : ''} ${u.ok ? '' : 'disabled'}>${esc(e.label)}${e.experimental ? ' · experimental' : ''}${u.ok ? '' : ' — unavailable'}</option>`; }).join('')}</select></label>
+        <p class="hint" id="pk-engine-note">${esc(row?.description || '')}${row?.id !== 'builtin' ? ' Switch back to Built-in any time; nothing else changes.' : ''}${bad.map((e) => ` ${esc(e.label)}: ${esc(usableEngine(e, p).why)}`).join('')}</p></div>`;
+  };
 
   const render = () => {
     const { providers } = state.data;
@@ -125,6 +144,7 @@ export async function mountModelPicker(root, api) {
           ${plannerCustom ? `<input id="pk-planner-custom" placeholder="model id" value="${esc(planner)}" style="margin-top:6px">` : ''}
         </label>
       </div>
+      ${engineBlock(p)}
       <div class="picker-status">
         <span id="pk-note" class="hint">${selected?.tools === false ? `${esc(selected.id)} doesn't advertise tool support; the factory will use JSON tool calls. Larger coding models work best.` : p?.local ? `Runs locally at ${esc(p.baseUrl)} — no API key needed.` : `Using ${esc(p?.label)}${p?.keySource ? ` · key from ${esc(p.keySource === 'saved' ? 'Providers page' : p.keySource)}` : ''}.`}</span>
         <button type="button" class="btn" id="pk-test">Test model</button>
@@ -155,6 +175,8 @@ export async function mountModelPicker(root, api) {
     };
     const customInput = $('#pk-model-custom', root);
     if (customInput) customInput.oninput = () => (state.model = customInput.value.trim());
+    const engineSel = $('#pk-engine', root);
+    if (engineSel) engineSel.onchange = () => { state.engine = engineSel.value; render(); };
     const plannerProvSel = $('#pk-planner-provider', root);
     if (plannerProvSel) plannerProvSel.onchange = () => {
       state.plannerProvider = plannerProvSel.value;
@@ -202,12 +224,13 @@ export async function mountModelPicker(root, api) {
       provider: state.provider,
       model: p?.type === 'offline' ? undefined : model,
       planner: p?.type === 'offline' ? undefined : { provider: plannerProvider, model: plannerModel },
+      engine: p?.type === 'offline' ? undefined : $('#pk-engine', root)?.value || undefined,
       providerOptions: {
         numCtx: $('#pk-numctx', root)?.value || undefined,
         toolMode: $('#pk-toolmode', root)?.value || undefined,
       },
     };
-    writePref({ provider: choice.provider, model: choice.model, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
+    writePref({ provider: choice.provider, model: choice.model, engine: choice.engine, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
     return choice;
   }
 
@@ -217,6 +240,7 @@ export async function mountModelPicker(root, api) {
     root.innerHTML = `<p class="form-error">Could not load providers: ${esc(err.message)}</p>`;
     return { getChoice: () => ({}) };
   }
+  state.engines = await api('api/engines').catch(() => null);
   state.provider = usable(state.pref.provider) ? state.pref.provider : state.data.defaultProvider;
   render();
   return { getChoice };
