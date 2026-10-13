@@ -80,5 +80,7 @@ export function redact(text) {
     .replace(/\bsk-(proj-)?[A-Za-z0-9]{20,}/g, 'sk-***')
     .replace(/\b(ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g, '$1_***')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***')
-    .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, 'xox*-***');
+    .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, 'xox*-***')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
+    .replace(/(x-api-key["']?\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***');
 }
