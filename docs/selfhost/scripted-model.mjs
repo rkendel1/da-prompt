@@ -67,6 +67,8 @@ const textOf = (c) => (typeof c === 'string' ? c : (c || []).map((p) => p.text |
 
 function next(body) {
   const names = (body.tools || []).map((t) => t.function.name);
+  // The provider health probe asks the model to call report_status; a real model does, so the stand-in does too.
+  if (names.includes('report_status')) return { calls: [tc('report_status', { status: 'ok' }, 0)] };
   if (names.includes('submit_plan')) return { calls: [tc('submit_plan', PLAN, 0)] };
   if (names.includes('complete_task')) {
     const turn = body.messages.filter((m) => m.role === 'assistant').length;

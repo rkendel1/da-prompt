@@ -436,7 +436,7 @@ async function tests(ctx) {
   for (const c of cmds) {
     const b = f.baseline.find((x) => x.command === c);
     const v = f.final.find((x) => x.command === c);
-    out.print(`  ${v ? (v.ok ? out.green('✓') : out.red('✗')) : out.dim('–')} ${c}\n      baseline: ${b ? b.status : 'none'}   result: ${v ? `${v.state} (exit ${v.exitCode})` : 'not run'}${v?.newFailures?.length ? `\n      new failures: ${v.newFailures.slice(0, 3).join(' | ')}` : ''}`);
+    out.print(`  ${v ? (v.state === 'preexisting' ? out.yellow('!') : v.ok ? out.green('✓') : out.red('✗')) : out.dim('–')} ${c}\n      baseline: ${b ? b.status : 'none'}   result: ${v ? `${v.state} (exit ${v.exitCode})` : 'not run'}${v?.state === 'preexisting' ? '   (already failing or not runnable before the change; not caused by it)' : ''}${v?.newFailures?.length ? `\n      new failures: ${v.newFailures.slice(0, 3).join(' | ')}` : ''}`);
   }
   if (!cmds.length) out.print('  No checks were run for this run, so there is nothing to compare. This run is not verified.');
   if (run.reverify) {

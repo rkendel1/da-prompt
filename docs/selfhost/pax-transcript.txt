@@ -1,0 +1,96 @@
+# pax on PATH of the backend: /tmp/pax-target/release/pax
+
+$ dp config set projectRoots <work>/projects
+Started the local da-prompt backend (http://127.0.0.1:39556).
+✓ Saved projectRoots = <work>/projects  (applies immediately)
+[exit 0]
+
+$ dp pax status
+✓ PAX 0.5.0 at /tmp/pax-target/release/pax
+  location source  backend PATH
+  inspected        the backend's environment: host vm
+
+STEP       CLASS        AVAILABLE
+info       observation  yes
+doctor     observation  yes
+reality    observation  yes
+drift      observation  yes
+graph      observation  yes
+test-plan  plan         yes
+test       execution    yes
+PAX results are observations. They are shown apart from the factory's verification and never decide a run's verdict.
+[exit 0]
+Run 202610130230-1382bd started on app · offline / offline-template-agent
+Reconnect any time: da-prompt runs follow 202610130230-1382bd   ·   browser: http://127.0.0.1:39556/#/runs/202610130230-1382bd
+
+$ dp pax verify 202610130230-1382bd --steps info,doctor,reality,drift,graph,test-plan
+✓ PAX collected 0.5.0 (/tmp/pax-target/release/pax, from PATH)
+  ✓ Project info           observed (exit 0) — PAX reported its observations (see the evidence).
+  ✓ Project diagnostics    observed (exit 0) — PAX reported its observations (see the evidence).
+  ✓ Declared vs installed (presence) observed (exit 0) — PAX reported its observations (see the evidence).
+  • Drift between layers   drift-detected (exit 1) — PAX found contradictions between declared and observed state (see issues). This is a finding, not a tool failure.
+  ✓ Dependency graph       observed (exit 0) — PAX reported its observations (see the evidence).
+  ✗ Test plan (dry run)    error (exit 1) — PAX exited with code 1: project operation 'test' is not supported: no authoritative native tool was detected.
+Evidence: da-prompt runs artifacts 202610130230-1382bd   ·   independent of the factory verdict (completed).
+[exit 1]
+
+$ dp pax evidence 202610130230-1382bd
+AGENT CLAIMS  — what the agents said. Not evidence that anything works.
+  change (engineer, 1 attempt): “Recorded the change request in docs/da-prompt-change-request.md.”
+  check (qa, 1 attempt): “Ran the existing project checks.”
+
+FACTORY VERIFICATION  — commands the factory ran itself, with their real exit status.  verdict: verified
+  baseline (before any change):
+    ✓ npm test → passed
+  at the end of the run:
+    ✓ npm test → passed (exit 0)
+  task change [completed]: ✓ exists docs/da-prompt-change-request.md  ✓ test -s docs/da-prompt-change-request.md
+  task check [completed]: ✓ npm test
+  ✓ Requested change implemented; every planned task verified
+  ✓ Project checks pass with no regressions
+  ✓ No critical errors or security issues in the changed files
+  ✓ Deployment (na)
+  ✓ Documentation (na)
+  ✓ Final summary and next steps provided
+
+PAX OBSERVATION  — what PAX observed. Never part of the verdict.  state: collected
+  PAX 0.5.0 (from PATH) /tmp/pax-target/release/pax
+  • Project info: observed (exit 0) — PAX reported its observations (see the evidence).  [info.stdout.json]
+  • Project diagnostics: observed (exit 0) — PAX reported its observations (see the evidence).  [doctor.stdout.json]
+  • Declared vs installed (presence): observed (exit 0) — PAX reported its observations (see the evidence).  [reality.stdout.json]
+  • Drift between layers: drift-detected (exit 1) — PAX found contradictions between declared and observed state (see issues). This is a finding, not a tool failure.  [drift.stdout.json]
+  • Dependency graph: observed (exit 0) — PAX reported its observations (see the evidence).  [graph.stdout.json]
+  • Test plan (dry run): error (exit 1) — PAX exited with code 1: project operation 'test' is not supported: no authoritative native tool was detected.  [test-plan.stderr.txt]
+[exit 0]
+
+$ dp runs artifacts 202610130230-1382bd
+KIND          NAME                      SIZE    NOTE
+delivery      FACTORY_REPORT.md         3.9 KB  Factory report
+delivery      test-results.json         1.2 KB  Test results
+delivery      changes.patch             331 B   Patch
+delivery      project.tar.gz            230 B   Changed files archive
+pax evidence  pax/doctor.stdout.json    1.5 KB  sha256 aaf3f7d7ccc2…
+pax evidence  pax/drift.stdout.json     468 B   sha256 b96e79cea738…
+pax evidence  pax/graph.stdout.json     206 B   sha256 57d0bb9ca292…
+pax evidence  pax/info.stdout.json      1.5 KB  sha256 2e8973ddab29…
+pax evidence  pax/manifest.json         6.6 KB
+pax evidence  pax/reality.stdout.json   588 B   sha256 0291392b3dba…
+pax evidence  pax/test-plan.stderr.txt  85 B    sha256 0b30329d0902…
+Download one: da-prompt runs artifacts 202610130230-1382bd --get <name> [--out <file>]
+[exit 0]
+
+# explicit path, saved with config; then an executable that is not PAX
+
+$ dp pax probe /tmp/pax-target/release/pax
+✓ PAX 0.5.0 at /tmp/pax-target/release/pax
+Save it with: da-prompt config set paxPath /tmp/pax-target/release/pax
+[exit 0]
+
+$ dp pax probe /bin/ls
+✗ /bin/ls does not identify itself as PAX (expected "pax <version>" from --version, got "ls (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense", exit 0). It may be a different program named pax, such as the POSIX archive tool.
+  That executable is not PAX (or not a version this adapter understands). Point at the right one: da-prompt config set paxPath /path/to/pax
+[exit 1]
+
+$ dp server stop
+○ Stopped the backend (pid 28418).
+[exit 0]

@@ -8,6 +8,10 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - `npm start` — server on PORT (default 3000)
 - `npm run factory -- "idea"` — headless run
 
+## Dev path (works without da-prompt, a backend or an LLM)
+- `npm run check` (static checks) · `npm run build` (package/entry/import smoke) · `npm test` · `npm run validate` runs all three.
+- The CLI (`src/cli/`) is a client of the one backend: add a capability to `src/server.js`/`src/factory.js` first, then a command in `src/cli/commands/`. Never give it a second run store or orchestration loop.
+
 ## Conventions
 - No runtime dependencies. Use `node:` built-ins and global `fetch`.
 - All agent file access goes through `Workspace` in `src/sandbox.js`; never bypass it.
@@ -16,6 +20,7 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - The UI (`public/`) is plain HTML/CSS/JS; escape every dynamic string with `esc()`.
 - Provider calls go through `src/providers/http.js` (node:http, no fetch headers timeout — local models are slow).
 - New provider presets go in `PRESETS` in `src/providers/registry.js`; cover new adapters with `test/mock-llm.js`.
+- CLI output: human text through `out.print/info`, machine output through `out.data` (so `--json` stays one clean document); errors are `CliError(message,{code,hint})` with the documented exit codes. Every new command needs a test in `test/cli*.test.js` (in-process `cli()` against `startBackend()` from `test/cli-helpers.js`).
 - Offline agent output lives in `templates/offline-app/*.tpl`; keep its tests passing.
 
 ## Lessons
@@ -26,3 +31,6 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - Operating surface: `src/settings.js` (saved settings + precedence), `src/health.js` (real probes), `src/pax.js` (PAX adapter), `src/evidence.js`, UI in `public/ops.js`. Every setting must map to a field the runtime reads; PAX output is `run.pax` and must never feed the verdict, checklist or readiness.
 - Browser tests: open the page on the target hash instead of re-navigating to the same route (a hashchange re-renders New Run and swaps the form under your `fill`).
 - Tests that depend on provider/GitHub/PAX state must clear the machine's env first (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, ...) and give each server its own `env` (the registry reads it lazily).
+- `node --check` treats `.js` as CommonJS when no `package.json` with `"type":"module"` is above it; fixtures that test `scripts/check.mjs` need one.
+- The factory's per-command timeout (`commandTimeoutMs`, 3 min) is shorter than this repo's full `npm test`; when da-prompt works on itself raise it (`da-prompt config set commandTimeoutMs 900000`) or the baseline `npm test` reports a timeout.
+- In CLI tests, `main()` reads `io.env`/`io.cfg`; state helpers must be passed `ctx.env` (a `writeState()` without it wrote to the real HOME once).
