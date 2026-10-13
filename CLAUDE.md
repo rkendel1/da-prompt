@@ -5,7 +5,7 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 
 ## Commands
 - `npm test` — full suite (uses offline agents, no network or API key needed)
-- `npm start` — server on PORT (default 3000)
+- `npm start` — server on PORT (default 4747)
 - `npm run factory -- "idea"` — headless run
 
 ## Dev path (works without da-prompt, a backend or an LLM)

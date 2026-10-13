@@ -3,6 +3,7 @@ import { mountModelPicker, renderProvidersPage } from './providers.js';
 import { renderTerminalPage } from './terminal.js';
 import { renderProjectsPage } from './projects.js';
 import { renderChatPage } from './chat.js';
+import { chooseFolder } from './folderpicker.js';
 import { renderBacklogPage } from './backlog.js';
 import { renderSetupPage, renderSettingsPage, renderPaxPage, renderHistoryPage, renderEvidence, refreshHealthDot, loadHealth } from './ops.js';
 
@@ -296,10 +297,13 @@ function mountProjectPicker(form, { preselect = '' } = {}) {
   let regInfo = null;
 
   const local = radios.find((r) => r.value === 'local');
-  if (!cfg.local) {
-    local.disabled = true;
-    local.nextElementSibling.title = 'No project roots are configured on the server (FACTORY_PROJECT_ROOTS)';
-  }
+  // Selectable when folders are already authorized, or when this session may browse and authorize one.
+  const syncLocal = () => {
+    local.disabled = !cfg.local && !cfg.canBrowse;
+    local.nextElementSibling.title = local.disabled ? 'No project folders are configured (FACTORY_PROJECT_ROOTS) and folders can only be browsed from the server machine or with an access password' : '';
+    $('#browse-row').hidden = !cfg.canBrowse;
+  };
+  syncLocal();
   const showSummary = (html, bad = false) => {
     summary.hidden = !html;
     summary.className = `srcsummary${bad ? ' bad' : ''}`;
@@ -345,13 +349,25 @@ function mountProjectPicker(form, { preselect = '' } = {}) {
       dirs = await api('api/projects/directories');
       dirSel.innerHTML = dirs.directories.length
         ? dirs.directories.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} — ${d.git.isGit ? `${esc(d.git.branch || 'detached')}${d.git.dirty ? ' · uncommitted changes' : ' · clean'}` : 'not a git repository'}${d.readOnly ? ' · read-only' : ''}</option>`).join('')
-        : '<option value="">(no directories under the authorized roots)</option>';
+        : `<option value="">${cfg.canBrowse ? '(none yet — use “Browse for a folder…”)' : '(no directories under the authorized roots)'}</option>`;
     } catch (e) {
       dirSel.innerHTML = '<option value="">(could not list directories)</option>';
       showSummary(esc(e.message), true);
     }
     inspectLocal();
   };
+  $('#browse-dir').addEventListener('click', async () => {
+    const picked = await chooseFolder(api);
+    if (!picked) return;
+    cfg.local = true;
+    syncLocal();
+    dirs = null;
+    await loadDirs();
+    // The picked folder may be a plain (non-git) folder or sit deeper than the listing shows: make sure it is selectable.
+    if (![...dirSel.options].some((o) => o.value === picked.id)) dirSel.insertAdjacentHTML('beforeend', `<option value="${esc(picked.id)}">${esc(picked.name)}</option>`);
+    dirSel.value = picked.id;
+    inspectLocal();
+  });
   const inspectRepo = async () => {
     const repoUrl = form.sourceRepo.value.trim();
     if (!repoUrl) return showSummary('Enter a repository, e.g. owner/repo.', true);

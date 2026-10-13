@@ -10,10 +10,10 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 COPY templates ./templates
-ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 FACTORY_DATA_DIR=/data
+ENV NODE_ENV=production PORT=4747 HOST=0.0.0.0 FACTORY_DATA_DIR=/data
 RUN mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:3000/api/health || exit 1
+EXPOSE 4747
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:4747/api/health || exit 1
 CMD ["node", "src/server.js"]

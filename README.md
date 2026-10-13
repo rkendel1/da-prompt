@@ -26,7 +26,7 @@ da-prompt runs diff <id> && da-prompt runs review <id> approve && da-prompt runs
 ```
 
 That is the whole loop, from the terminal, without VS Code or a browser. The same backend also serves the web UI
-(`da-prompt server start` prints the URL, or `npm start`; http://localhost:3000): describe an idea, pick a provider and
+(`da-prompt server start` prints the URL, or `npm start`; http://localhost:4747): describe an idea, pick a provider and
 model, press **Start the factory**. Requires Node.js 20 or newer.
 
 
@@ -62,7 +62,7 @@ da-prompt status                     # running? what is it doing?  (exit 3 if no
 da-prompt server logs -f
 da-prompt server stop                # --yes if runs are executing (they can be resumed later)
 da-prompt server restart             # applies restart-only settings (host, port)
-da-prompt runs list --url http://host:3000    # or DA_PROMPT_URL=…; use DA_PROMPT_PASSWORD when the server has a password
+da-prompt runs list --url http://host:4747    # or DA_PROMPT_URL=…; use DA_PROMPT_PASSWORD when the server has a password
 da-prompt runs list --no-start       # never launch a backend; exit 3 if none is running
 ```
 
@@ -400,7 +400,7 @@ Everything routine is done in the web UI; no editor, terminal or CLI is needed a
 
 ### Launching it
 
-Start the server once (`npm start`, or the Docker image) and open `http://localhost:3000`. That one start is the only
+Start the server once (`npm start`, or the Docker image) and open `http://localhost:4747`. That one start is the only
 host-level step: a browser cannot start, install or restart the program on your machine. Everything below happens in the UI.
 
 ### First-run setup (in the browser)
@@ -585,11 +585,11 @@ container is the sandbox:
 
 ```bash
 docker build -t da-prompt .
-docker run -p 3000:3000 -v da-prompt-data:/data \
+docker run -p 4747:4747 -v da-prompt-data:/data \
   -e ANTHROPIC_API_KEY -e FACTORY_PASSWORD=change-me da-prompt
 
 # Ollama running on the host machine:
-docker run -p 3000:3000 -v da-prompt-data:/data --add-host=host.docker.internal:host-gateway \
+docker run -p 4747:4747 -v da-prompt-data:/data --add-host=host.docker.internal:host-gateway \
   -e OLLAMA_HOST=http://host.docker.internal:11434 -e FACTORY_PASSWORD=change-me da-prompt
 ```
 (Ollama must listen on more than localhost for this: `OLLAMA_HOST=0.0.0.0 ollama serve`.)
@@ -723,7 +723,7 @@ The container is the real boundary; the command policy is a speed bump, **not** 
 indirect around a pattern; the post-run integrity check is what proves the source was left alone). For real projects:
 
 ```bash
-docker run -p 3000:3000 -v da-prompt-data:/data \
+docker run -p 4747:4747 -v da-prompt-data:/data \
   -v /home/me/projects:/projects:ro -e FACTORY_PROJECT_ROOTS_READONLY=/projects \
   -e GITHUB_TOKEN -e FACTORY_PASSWORD=change-me da-prompt
 # mount read-write and use FACTORY_PROJECT_ROOTS=/projects only if you want "Apply to my directory"
@@ -787,7 +787,7 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 | `FACTORY_OUTPUT_ROOT` | — | Confine run output folders to this directory (relative names resolve inside it) |
 | `FACTORY_MAX_OUTPUT_TOKENS` | `8192` | Max tokens per model reply |
 | `FACTORY_HIDE_OFFLINE` | — | `1` hides the offline demo agents |
-| `PORT` / `HOST` | `3000` / `127.0.0.1` (`0.0.0.0` when `FACTORY_PASSWORD` is set; the Docker image sets `0.0.0.0`) | Server address |
+| `PORT` / `HOST` | `4747` / `127.0.0.1` (`0.0.0.0` when `FACTORY_PASSWORD` is set; the Docker image sets `0.0.0.0`) | Server address |
 | `FACTORY_DATA_DIR` | `./data` | Runs, workspaces, deliveries |
 | `FACTORY_PASSWORD` | — | HTTP basic auth for the whole server |
 | `FACTORY_MAX_PARALLEL` | `3` | Default parallel agents |

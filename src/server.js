@@ -22,7 +22,7 @@ import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
 import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
-import { ProjectError, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
+import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -53,7 +53,7 @@ class HttpError extends Error {
 }
 
 /** ProjectError carries its own HTTP status (403 unauthorized directory, 404 missing ref, ...). */
-const asHttp = (err) => (err instanceof HttpError ? err : new HttpError(err.status || 400, err.message, err.conflicts ? { conflicts: err.conflicts } : err.errors ? { errors: err.errors } : undefined));
+const asHttp = (err) => (err instanceof HttpError ? err : new HttpError(err.status || 400, err.message, err.extra ? err.extra : err.conflicts ? { conflicts: err.conflicts } : err.errors ? { errors: err.errors } : undefined));
 
 /**
  * Settings that grant host authority (folders, tokens, the PAX path, the password) may only be read or
@@ -145,7 +145,7 @@ export async function createServer(overrides = {}) {
       return json(res, 200, {
         defaults: cfg.defaults, pax: { autoRun: cfg.paxAutoRun, steps: cfg.paxSteps, catalog: Object.entries(PAX_STEPS).map(([id, s]) => ({ id, title: s.title, class: s.class })) }, layers: LAYERS, inputs: INPUT_FIELDS, gitPush: Boolean(cfg.githubToken), outputRoot: cfg.outputRoot || null,
         // Existing projects: capabilities only. Server paths are never sent to the browser.
-        projects: { local: roots.length > 0, roots: roots.map((r) => ({ label: r.label, readOnly: r.readOnly })), github: true, githubHosts: cfg.gitHosts, canPublish: Boolean(cfg.githubToken) },
+        projects: { local: roots.length > 0, canBrowse: isAdmin(req, cfg), roots: roots.map((r) => ({ label: r.label, readOnly: r.readOnly })), github: true, githubHosts: cfg.gitHosts, canPublish: Boolean(cfg.githubToken) },
       });
     }
     if (parts[1] === 'projects') return projectsApi(req, res, parts);
@@ -350,6 +350,18 @@ export async function createServer(overrides = {}) {
         const body = await readBody(req);
         const id = directoryIdForPath(cfg, String(body.path || ''));
         const dir = resolveDirectory(cfg, id);
+        return json(res, 200, { id: dir.id, name: dir.name, readOnly: dir.readOnly });
+      }
+      // Folder picker: lists sub-folders of the server machine so a project folder can be chosen without typing a path.
+      // Host authority (it reveals folder names and can authorize a folder), so administrators only.
+      if ((parts[2] === 'browse' && method === 'GET') || (parts[2] === 'pick' && method === 'POST')) {
+        if (!isAdmin(req, cfg)) throw new HttpError(403, 'Browsing folders needs an authenticated session (set an access password) or a browser on the server machine.');
+        if (parts[2] === 'browse') {
+          const q = new URL(req.url, 'http://x').searchParams;
+          return json(res, 200, await browseDirectory(cfg, q.get('path') || '', { hidden: q.get('hidden') === '1' }));
+        }
+        const body = await readBody(req, 16 * 1024);
+        const dir = pickDirectory(cfg, body.path, { authorize: body.authorize === true });
         return json(res, 200, { id: dir.id, name: dir.name, readOnly: dir.readOnly });
       }
       if (parts[2] === 'inspect' && method === 'POST') {

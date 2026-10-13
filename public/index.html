@@ -63,7 +63,8 @@
               <label class="field check" id="reg-publish-field" hidden><input name="regPublish" id="reg-publish" type="checkbox"> <span>Push the run branch and open a pull request when finished</span></label>
             </div>
             <div class="src" id="src-local" hidden>
-              <label class="field"><span>Authorized directory <em>chosen from the server's list</em></span><select name="directoryId" id="directory-id"></select></label>
+              <label class="field"><span>Directory <em>chosen from the server's authorized folders</em></span><select name="directoryId" id="directory-id"></select></label>
+              <div class="actions" id="browse-row" hidden><button class="btn" type="button" id="browse-dir">Browse for a folder…</button><span class="hint">Pick any folder on the machine running da-prompt.</span></div>
               <label class="field"><span>Isolation</span><select name="workingMode" id="working-mode"></select></label>
             </div>
             <div class="src" id="src-github" hidden>

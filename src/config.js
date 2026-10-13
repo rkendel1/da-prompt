@@ -20,7 +20,7 @@ function int(name, fallback) {
 export function loadConfig(overrides = {}) {
   const cfg = {
     root: ROOT,
-    port: int('PORT', 3000),
+    port: int('PORT', 4747),
     // Loopback unless you have set an access password (the secured remote-access configuration) or chosen a host.
     // Containers set HOST=0.0.0.0 explicitly.
     host: process.env.HOST || (process.env.FACTORY_PASSWORD ? '0.0.0.0' : '127.0.0.1'),

@@ -15,9 +15,10 @@ import { runGit, git, explainGitError, GitError, redactUrl, BOT } from './gituti
 import { redact } from './security.js';
 
 export class ProjectError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra) {
     super(message);
     this.status = status;
+    if (extra) this.extra = extra;
   }
 }
 
@@ -129,6 +130,85 @@ export async function listDirectories(cfg, { signal } = {}) {
     }))));
   }
   return { roots: roots.map((r) => ({ label: r.label, readOnly: r.readOnly })), directories: out };
+}
+
+// ── Folder picker (administrator only) ───────────────────────────────────────────────────────────
+
+/**
+ * List the sub-folders of a directory on the server machine so a person can pick a project folder.
+ * Directories only, no file names or contents. The caller must already have checked it is an administrator.
+ */
+export async function browseDirectory(cfg, input, { hidden = false } = {}) {
+  const roots = authorizedRoots(cfg);
+  const start = String(input || '').trim() || roots[0]?.real || os.homedir();
+  const expanded = start === '~' || start.startsWith('~/') ? path.join(os.homedir(), start.slice(1)) : start;
+  let real;
+  try {
+    real = fs.realpathSync(path.resolve(expanded));
+    if (!fs.statSync(real).isDirectory()) throw new Error('not a directory');
+  } catch {
+    throw new ProjectError(404, `folder not found: ${start}`);
+  }
+  let kids;
+  try {
+    kids = await fsp.readdir(real, { withFileTypes: true });
+  } catch (e) {
+    throw new ProjectError(403, `cannot read ${real}: ${e.code || e.message}`);
+  }
+  const dirs = [];
+  for (const e of kids) {
+    if (!(e.isDirectory() || e.isSymbolicLink()) || (!hidden && e.name.startsWith('.'))) continue;
+    try {
+      if (!fs.statSync(path.join(real, e.name)).isDirectory()) continue;
+    } catch {
+      continue; // dangling link
+    }
+    dirs.push({ name: e.name, isGit: fs.existsSync(path.join(real, e.name, '.git')) });
+  }
+  dirs.sort((a, b) => a.name.localeCompare(b.name));
+  const parent = path.dirname(real);
+  const root = roots.filter((r) => within(real, r.real)).sort((a, b) => b.real.length - a.real.length)[0];
+  return {
+    path: real,
+    parent: parent === real ? null : parent,
+    home: os.homedir(),
+    isGit: fs.existsSync(path.join(real, '.git')),
+    authorized: Boolean(root),
+    readOnly: Boolean(root?.readOnly),
+    entries: dirs.slice(0, 500),
+    truncated: dirs.length > 500,
+  };
+}
+
+/**
+ * Turn a picked folder into a directoryId. Inside an authorized root that is free. Outside, the folder's parent
+ * (or the folder itself, when the parent would be the home directory or `/`) must be authorized first, which
+ * needs `authorize: true` so the person has seen what they are granting.
+ */
+export function pickDirectory(cfg, input, { authorize = false } = {}) {
+  let real;
+  try {
+    real = fs.realpathSync(path.resolve(String(input || '')));
+    if (!fs.statSync(real).isDirectory()) throw new Error('not a directory');
+  } catch {
+    throw new ProjectError(404, `folder not found: ${input}`);
+  }
+  const data = cfg.dataDir && path.resolve(cfg.dataDir);
+  if (data && (within(real, data) || within(data, real))) throw new ProjectError(400, 'that folder overlaps the factory data directory; choose a project folder elsewhere');
+  const inside = authorizedRoots(cfg).some((r) => within(real, r.real));
+  if (!inside) {
+    if (real === path.parse(real).root || real === os.homedir()) throw new ProjectError(400, 'choose a project folder inside your home directory, not the home directory or / itself');
+    const parent = path.dirname(real);
+    const grant = parent === path.parse(parent).root || parent === os.homedir() ? real : parent;
+    if (!authorize) throw new ProjectError(409, `${real} is not in an authorized project folder yet`, { needsAuthorization: true, grant });
+    if (!cfg.settings) throw new ProjectError(403, 'this server cannot save settings, so it cannot authorize a new folder; set FACTORY_PROJECT_ROOTS');
+    try {
+      cfg.settings.update({ projectRoots: [...new Set([...(cfg.projectRoots || []), grant])] }, { admin: true });
+    } catch (e) {
+      throw new ProjectError(e.status || 400, e.errors?.projectRoots ? `cannot authorize ${grant}: ${e.errors.projectRoots}` : e.message);
+    }
+  }
+  return resolveDirectory(cfg, directoryIdForPath(cfg, real));
 }
 
 // ── Git state of a local directory (read-only) ──────────────────────────────────────────────────
