@@ -63,11 +63,12 @@ const step = async (title, fn) => {
     log(`**PASS**${note ? ` — ${note}` : ''}`);
     return true;
   } catch (e) {
-    log(`**FAIL** — ${e.message}`);
+    log(`**FAIL** — ${e.message}\n\nlast screen lines:\n\`\`\`\n${(await buf().catch(() => '')).trim().split('\n').slice(-12).join('\n')}\n\`\`\``);
     return false;
   }
 };
 const results = [];
+const running = (pattern) => { try { return execFileSync('pgrep', ['-f', pattern], { encoding: 'utf8' }).trim().length > 0; } catch { return false; } };
 
 log(`# Terminal acceptance run\n\n- date: ${new Date().toISOString()}\n- host: ${process.platform}/${process.arch}, node ${process.version}, shell \`${process.env.SHELL || '(none; account shell)'}\`\n- repository under test: \`${repoRoot}\` (project root authorized: \`${parent}\`)`);
 
@@ -138,12 +139,12 @@ results.push(await step('Run a real development command with an installed local 
 
 results.push(await step('Interrupt a running process (Ctrl-C from the keyboard, then the Interrupt button)', async () => {
   await line('clear; sleep 300');
-  await new Promise((r) => setTimeout(r, 600));
+  await wait(() => running('^sleep 300$')); // interrupt only once the process really exists
   await page.keyboard.press('Control+C');
   await line('echo AFTER_CTRL_C=$?');
   await waitBuf(/\nAFTER_CTRL_C=130\n/);
   await line('yes > /dev/null');
-  await new Promise((r) => setTimeout(r, 600));
+  await wait(() => running('^yes$'));
   await page.click('#term-int');
   await line('echo AFTER_BUTTON=$?');
   await waitBuf(/\nAFTER_BUTTON=130\n/);
