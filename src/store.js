@@ -103,6 +103,7 @@ export class RunStore {
           updatedAt: r.updatedAt,
           source: r.source?.mode && r.source.mode !== 'new' ? { mode: r.source.mode, label: r.source.label } : undefined,
           projectId: r.projectId,
+          taskId: r.taskId,
           projectName: r.projectName,
           tasks: r.plan?.tasks?.length || 0,
           completedTasks: r.plan?.tasks?.filter((t) => t.status === 'completed').length || 0,

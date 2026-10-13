@@ -305,6 +305,34 @@ configuration is limited to working mode and default ref. Status freshness: list
 Projects page and every use re-validate). A moved folder is not auto-detected elsewhere — it is repaired by choosing its
 new location. Several registered checkouts of one repository are separate projects.
 
+## Chat and Backlog
+
+> Chat helps you think; the backlog preserves what you intend to do; execution happens only when you explicitly start a task.
+
+### Project-scoped chat (`#/chat`)
+
+Every conversation belongs to **one registered project**, fixed at creation (a project id, not a path). Switching project means starting a new conversation; a conversation is never silently moved (`PATCH` ignores `projectId`). Conversations have stable `cnv_…` ids and are stored on the backend (`<dataDir>/chat/<id>.json`, atomic writes, mode 0600), independent of the browser, terminals and runs. They survive refresh and restart; a response that was streaming when the server stopped is marked *failed* and can be retried.
+
+- **Provider and model** are chosen per conversation (and per message). Each assistant message records the provider and model that actually produced it (and every retry attempt); changing the selection only affects future messages. Credentials stay server-side: the browser receives provider ids and labels, never keys or base URLs.
+- **Streaming, Stop, Retry.** Providers stream through their adapters (`chatStream` on Anthropic, OpenAI-compatible and Ollama; providers without it deliver the answer whole). Stop keeps the partial text as *stopped*; Retry regenerates the latest failed/stopped response in place. One response runs at a time per conversation.
+- **Retrieved vs inferred.** Before each answer the server retrieves bounded context through the project registry (`registry.locate()`): project record, git state, top-level docs, a file list, files you mention by path or that match your question, open tasks and recent runs. Secret-like files (`.env`, keys…) are never read; everything passes `redact()`. The list of what was retrieved (and limitations: missing folder, remote repository, archived or removed project) is stored on the message and shown under it; everything else in an answer is the model's inference. Context never crosses projects.
+- **Advisory only.** Chat has no tools: it cannot run commands, edit files, create runs or publish. Model output is rendered as escaped text; code blocks are text with a Copy button.
+- **Copy.** Whole response, each code block independently, a text selection, a conversation excerpt (tick messages) or the whole conversation. If the browser blocks the clipboard the UI says so and shows the text selected in a dialog instead of claiming success.
+
+### Backlog (`#/backlog`)
+
+One persistent, ordered list of tasks across **all** products and projects (`<dataDir>/tasks.json`). The array order *is* the priority (position 1 first); there is no second ordering. Rows show title, project, product, status, origin (manual or the chat conversation) and the linked run's real status; **Details** opens editing, history and status changes.
+
+- **Reorder.** Drag a row by its handle, or use **Move up / Move down** (keyboard accessible; focus stays on the moved row). A plain click never reorders. The UI updates immediately and then reconciles with the server's answer. Moves are relative (`beforeId`/`afterId`/`top`/`bottom`) and carry the client's `rev`; if the backlog changed elsewhere the server refuses with `409` and returns the authoritative list (nothing is moved), and a failed save puts the order back with a visible error.
+- **Filters** (search, product, project, status) are views over the same global order and never create another one; positions shown are positions in the full backlog. Completed/cancelled tasks stay in the list; *Open only* is an explicit status filter.
+- **Product.** There was no Product entity, so a project has an optional `product` label (set on the project page or at registration; empty clears). It is never derived from the repository name.
+- **Tasks from chat.** *Create task* on a message, a text selection, ticked messages or the whole conversation opens a draft. A model may summarize the conversation (`POST /api/chat/conversations/:id/task-draft`; falls back to a plain extract with a warning), but nothing is saved until you review and edit it. The task keeps its origin (conversation, message ids, optional excerpt) and defaults to the conversation's project. Manual tasks use the same entity.
+- **Lifecycle.** `backlog`, `ready`, `in_progress`, `blocked`, `completed`, `cancelled`. Creating, editing, reordering or changing status never runs anything. **Start** (with a confirmation showing the exact description) creates a normal factory run on the task's project (`source: { projectId }`, `taskId`), links it, and moves the task to *in progress*; the run's own status/verdict is displayed. A finished run **does not complete the task** — you do. Applying and publishing stay separately approved on the run. Tasks of an archived, unavailable or removed project remain inspectable (labelled) but cannot be started.
+
+### Limitations
+
+Conversations are plain text (no Markdown rendering beyond code blocks); context retrieval is keyword/path based, not semantic, and remote repositories get metadata only; there is no history search across conversations; the backlog polls every 5 s for changes made elsewhere instead of pushing; there is one backlog per da-prompt data directory (no per-user lists); drag-and-drop needs a pointer — keyboard users use the Move buttons.
+
 ## Embedded terminal
 
 The **Terminal** page (`#/terminal`, in the sidebar) is an integrated developer terminal: real shells on a real pseudo-terminal, rendered by xterm.js (the emulator VS Code's terminal uses), on the machine that runs the da-prompt backend. It is **not** an agent, not routed through any model, provider, Chip/AppPort/FeltDB, PAX or run orchestration, and works when all of them are broken, so you can open it and repair da-prompt itself.
@@ -799,6 +827,13 @@ See `.env.example`.
 | GET / PATCH / DELETE | `/api/projects/<prj_id>` | Details + git state / rename + settings, `acceptRemoteChange`, `acceptNewRemote` / remove the registration (`{confirm: name}`) |
 | POST | `/api/projects/<prj_id>/validate` · `/repair` · `/archive` · `/restore` | Re-check against the host / point at another folder (`acceptDifferentRepository`) / make inactive / reactivate |
 | GET | `/api/projects/<prj_id>/runs` | Run history of the project |
+| GET / POST | `/api/chat/conversations` | List (`?projectId`) / create `{ projectId, provider?, model?, title? }` |
+| GET / PATCH | `/api/chat/conversations/<cnv_id>` | Conversation with messages, live project status / `{ title, provider, model }` (future messages only) |
+| POST | `/api/chat/conversations/<cnv_id>/messages` · `/stop` · `/messages/<msg_id>/retry` · `/task-draft` | Send `{ content, provider?, model? }` (202; the answer streams) / stop / retry the latest failed or stopped response / draft a task (not saved) |
+| GET | `/api/chat/conversations/<cnv_id>/stream` | Server-sent events: `sync`, `messages`, `context`, `delta`, `message`, `idle` |
+| GET / POST | `/api/tasks` | The backlog in order (`?projectId&product&status=open|finished|<status>&q`; returns `rev`, `total`) / create `{ title, description, projectId, status, position, origin }` |
+| GET / PATCH | `/api/tasks/<tsk_id>` | One task / `{ title, description, projectId }` (never reorders) |
+| POST | `/api/tasks/<tsk_id>/status` · `/move` · `/start` | `{ status }` / `{ beforeId \| afterId \| top \| bottom, rev }` (409 + current list when stale) / explicit start: creates and links a run |
 | GET | `/api/projects/directories` | Authorized local directories (ids, names, git state — no paths) |
 | POST | `/api/projects/inspect` | Read-only summary of `{ source: { mode: 'local', directoryId } }` or `{ mode: 'github', repoUrl, ref }` |
 | GET / PUT | `/api/settings` | Effective settings with sources and masking / validate + save (`{ values: { key: value \| null } }`; `null` resets) |

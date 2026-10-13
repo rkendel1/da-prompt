@@ -148,8 +148,11 @@ export async function renderProjectsPage(main, api, { toast, id }) {
       <div class="proj-head"><h1 id="proj-name">${esc(p.name)}</h1> ${pill(p)}
         <button class="btn" id="proj-rename">Rename</button></div>
       <p class="muted mono">${esc(p.id)}</p>
+      <form id="product-form" class="inline" aria-label="Product label"><label class="field"><span>Product <em>optional label that groups projects in the backlog</em></span><input name="product" maxlength="80" value="${esc(p.product || '')}" placeholder="e.g. Payments"></label><button class="btn" type="submit">Save product</button></form>
       <div class="proj-primary">
         ${p.kind === 'local' ? `<a class="btn accent ${usable ? '' : 'disabled'}" id="open-terminal" ${usable ? `href="#/terminal?project=${esc(p.id)}"` : 'aria-disabled="true"'}>Open terminal</a>` : ''}
+        <a class="btn ${p.archived ? 'disabled' : ''}" id="open-chat" ${p.archived ? 'aria-disabled="true"' : `href="#/chat?project=${esc(p.id)}"`}>Chat about it</a>
+        <a class="btn" id="open-backlog" href="#/backlog">Backlog</a>
         <a class="btn ${usable ? 'accent' : 'disabled'}" id="start-task" ${usable ? `href="#/?project=${esc(p.id)}"` : 'aria-disabled="true"'}>Start a task</a>
         <button class="btn" id="proj-validate">Re-check</button>
         ${p.archived ? '<button class="btn" id="proj-restore">Restore</button>' : '<button class="btn" id="proj-archive">Archive</button>'}
@@ -189,6 +192,7 @@ export async function renderProjectsPage(main, api, { toast, id }) {
       $('#rename-cancel').addEventListener('click', () => detail(pid));
       $('#rename-form').addEventListener('submit', (e) => { e.preventDefault(); act(() => call(`/${encodeURIComponent(pid)}`, { method: 'PATCH', body: { name: $('#rename-input').value } }), 'Renamed'); });
     });
+    $('#product-form').addEventListener('submit', (e) => { e.preventDefault(); act(() => call(`/${encodeURIComponent(pid)}`, { method: 'PATCH', body: { product: e.target.product.value } }), 'Product saved'); });
     $('#proj-validate').addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/validate`, { method: 'POST', body: {} }), 'Checked'));
     $('#proj-archive')?.addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/archive`, { method: 'POST', body: {} }), 'Archived: history is kept; no new work starts until you restore it'));
     $('#proj-restore')?.addEventListener('click', () => act(() => call(`/${encodeURIComponent(pid)}/restore`, { method: 'POST', body: {} }), 'Restored'));

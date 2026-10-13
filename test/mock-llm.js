@@ -39,7 +39,7 @@ async function think(messages, toolNames, brain) {
  *  noTools: reject requests that include tools (like an Ollama model without tool support);
  *           the client must fall back to JSON tool calls in text.
  */
-export async function startMockLLM({ flavor = 'openai', models = ['mock-coder'], noTools = false, apiKey = null } = {}) {
+export async function startMockLLM({ flavor = 'openai', models = ['mock-coder'], noTools = false, apiKey = null, streamOpts = {} } = {}) {
   const brain = new OfflineProvider({ faults: 'on', delayMs: 0 });
   const log = [];
   const server = http.createServer(async (req, res) => {
@@ -76,6 +76,26 @@ export async function startMockLLM({ flavor = 'openai', models = ['mock-coder'],
     const { calls = [], text = '' } = await think(body.messages, toolNames, brain);
     const usage = { prompt: Math.ceil(raw.length / 4), completion: 50 };
 
+    if (body.stream && !calls.length) {
+      // Streaming reply (plain text): SSE for OpenAI-compatible, NDJSON for Ollama. `slowMs` spaces the pieces out;
+      // `failAfter` kills the connection after that many pieces (a mid-stream failure).
+      const pieces = (text || 'ok').match(/\S+\s*/g) || ['ok'];
+      res.writeHead(200, { 'content-type': flavor === 'ollama' ? 'application/x-ndjson' : 'text/event-stream' });
+      let i = 0;
+      const tick = () => {
+        if (res.destroyed) return;
+        if (streamOpts.failAfter != null && i >= streamOpts.failAfter) return res.destroy();
+        if (i < pieces.length) {
+          const piece = pieces[i++];
+          res.write(flavor === 'ollama' ? `${JSON.stringify({ message: { role: 'assistant', content: piece }, done: false })}\n` : `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}\n\n`);
+          return setTimeout(tick, streamOpts.slowMs || 0);
+        }
+        if (flavor === 'ollama') res.write(`${JSON.stringify({ message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop', prompt_eval_count: 7, eval_count: pieces.length })}\n`);
+        else res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 7, completion_tokens: pieces.length } })}\n\ndata: [DONE]\n\n`);
+        res.end();
+      };
+      return tick();
+    }
     let message;
     if (!body.tools?.length && calls.length) {
       // JSON tool calls in text, one object per line (as weaker local models tend to do).
