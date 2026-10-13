@@ -107,13 +107,20 @@ the selected project id in `~/.config/da-prompt/cli.json` (`DA_PROMPT_CONFIG_DIR
 ### Projects
 
 ```bash
-da-prompt projects list                    # authorized folders: opaque ids, read-only vs writable, git state
-da-prompt projects use my-app              # by name or id; also: `projects use .` (a path inside an authorized folder)
-da-prompt projects connect acme/api --ref develop    # a GitHub repo: read, edited in an isolated clone, never pushed unless you publish
-da-prompt projects inspect                 # stack, test commands, instruction files, isolation mode
-da-prompt projects current
-da-prompt projects init "A habit tracker"  # start a new application (same as `run … --new`)
+da-prompt projects add ~/code/my-app --use           # register once (a path inside an authorized folder); --use selects it
+da-prompt projects add acme/api --ref develop        # a remote repository: just the identity, nothing is cloned
+da-prompt projects list [--status missing] [--folders]   # registered projects with live status; --folders = candidates
+da-prompt projects show my-app                       # identity, location, branch/dirty/remote, problems, run count
+da-prompt projects use my-app                        # by name or id (the id is what is remembered)
+da-prompt projects rename my-app "Shop v2"           # the id never changes
+da-prompt projects repair my-app ~/code/shop         # the folder moved; --accept-different-repository only if intended
+da-prompt projects validate my-app                   # exit 6 if missing/inaccessible/needs attention
+da-prompt projects archive my-app | restore my-app
+da-prompt projects remove my-app --yes               # the registration only: files, runs and artifacts stay
+da-prompt projects inspect | current | clear | init "A habit tracker"
 ```
+
+`run --project my-app`, terminals and the browser all refer to the same registered project by id. See [Projects](#projects-persistent-workspaces).
 
 ### Run, monitor and recover
 
@@ -233,6 +240,71 @@ review → apply`, then validated with plain npm. Read [`docs/selfhost/README.md
 real and what was a stand-in (no real model credentials were available, so a scripted OpenAI-compatible server played the
 model).
 
+## Projects (persistent workspaces)
+
+A **project** is a durable record of a workspace: an opaque, stable id (`prj_…`) associated with a location. It is *not* a
+terminal session, a run, a checkout or a folder name, and it survives restarts, browser refreshes, closing terminals and
+finished or failed runs. Register a repository or folder once; every later visit, terminal, task and run history refers
+to it by id. Renaming it, moving the folder, or reopening it never changes its identity.
+
+**Where it is stored.** `<data dir>/projects.json` (mode 0600), owned by the backend: written atomically (temp file +
+rename) under a single in-process lock, so concurrent registrations cannot both win. Nothing is kept in the browser. A
+corrupt file is set aside as `projects.json.corrupt-<time>` and never silently overwritten. No credentials are ever stored
+in a project record (remote URLs with credentials are rejected; tokens stay in Settings).
+
+**Data model** (`src/registry.js`): `id`, `name`, `kind` (`local` | `remote`), `createdAt`, `updatedAt`, `lastUsedAt`,
+`archived`, `settings` (`workingMode`, `defaultRef`), `validation` (`status`, `errors`, `warnings`, `checkedAt`), and
+either `location` (`path`, `rootKey`, `rel`) plus `repo` identity (`isGit`, first commit(s), remote, default branch) for a
+local project, or `remote` (`url`, host, owner, repo, default branch) for a remote one.
+
+| Workspace type | What is registered | Notes |
+| --- | --- | --- |
+| **Local folder** | an existing directory | allowed without Git (snapshot working mode only) |
+| **Local Git repository** | the repository root, its first commit(s), remote and default branch | Git itself decides (no provider is assumed; ssh/scp and https remotes both work); the folder name may differ from the remote's |
+| **Remote repository** | host/owner/repo + default ref (GitHub workflow) | a *repository* identity, never a clone: each run gets its own isolated clone under the data dir; a remote project has no local folder (no terminal) |
+
+**Statuses come from looking at the host**, not from stored flags: `available`; `missing` (folder moved/deleted: the record
+and history stay, work is blocked); `inaccessible` (unreadable, or no longer inside an authorized root); `attention` (the
+remote changed, the folder is no longer a repository, or it now holds a **different repository** — detected from its first
+commit — so it is never used just because the folder name matches). A blocked project is repaired explicitly
+(`POST /api/projects/<id>/repair` / the *Fix* panel / `projects repair`); a folder with a different repository needs
+`acceptDifferentRepository`, a changed remote needs `acceptRemoteChange`, a changed remote URL needs `acceptNewRemote`.
+The id and all history stay through every repair.
+
+**Conflicts are explained, never silently resolved.** The same folder twice is a hard conflict (it names the existing
+project and the resolution). The same repository from another checkout (same first commit or remote) needs
+`acknowledgeSameRepository` and becomes a separate, clearly distinguished project. Concurrent duplicates: exactly one wins.
+
+**Authorization.** A record grants nothing. Every use re-resolves the stored path against the *current* authorized roots
+(symlink/traversal-safe), re-checks the repository identity, and refuses archived, missing, inaccessible or
+needs-attention projects — and read-only roots stay read-only (no apply, no terminal). Registering by `path` needs an
+authenticated session or a local browser and the path must be inside an authorized root; anyone may register from the
+authorized-folder list (it adds no authority). Non-administrators never see absolute paths in project views. Registration
+clones, changes and deletes nothing. Removing a registration (`DELETE /api/projects/<id>` with `{confirm: "<name>"}`)
+deletes **no** files, repositories, runs, artifacts or terminal data.
+
+**Common workspace reference.** Terminals (`{projectId}`: validated now, session records only the id, starts in the
+project's directory), new runs (`source: {projectId}`; the run stores `projectId` + a name snapshot), run history
+(`GET /api/projects/<id>/runs`, `GET /api/runs?projectId=`), inspect, and **apply/publish** (apply follows the project's
+*current* folder, so a moved-and-repaired project still receives its runs' results, and is blocked while the project is
+missing or archived). Runs show the project's current name; if the registration was removed they keep the id and the
+old name (`projectRemoved`). The CLI uses the same ids (`projects use` remembers the id, not a path).
+
+**Migration.** On startup, earlier runs that used an existing project (local directory or GitHub repository) and have no
+project id are attached to a registered project — created once per distinct folder/repository, marked
+`migratedFrom: "runs"` — and only `projectId`/`projectName` are added to the run. Re-running it creates no duplicates; runs
+whose folder is no longer authorized are left alone. The legacy `directoryId`/`repoUrl` API still works (and the
+terminal's "other authorized folders" picker), so nothing has to be re-registered after upgrading.
+
+**UI.** *Projects* in the sidebar: search, status filter, archived toggle, register (folder / repository), a detail page
+with location, repository state, run history, **Open terminal**, **Start a task**, rename, archive/restore, repair and
+remove (typed-name confirmation). New Run has a *Registered project* source; the run page links back to its project.
+
+**Limitations.** A project's folder is where `apply` writes; a terminal's shell is not confined to it. Project-specific
+configuration is limited to working mode and default ref. Status freshness: lists reuse a validation for 5 s (opening the
+Projects page and every use re-validate). A moved folder is not auto-detected elsewhere — it is repaired by choosing its
+new location. Several registered checkouts of one repository are separate projects.
+
 ## Embedded terminal
 
 The **Terminal** page (`#/terminal`, in the sidebar) is an integrated developer terminal: real shells on a real pseudo-terminal, rendered by xterm.js (the emulator VS Code's terminal uses), on the machine that runs the da-prompt backend. It is **not** an agent, not routed through any model, provider, Chip/AppPort/FeltDB, PAX or run orchestration, and works when all of them are broken, so you can open it and repair da-prompt itself.
@@ -290,6 +362,7 @@ Everything routine is done in the web UI; no editor, terminal or CLI is needed a
 | --- | --- |
 | **New run** (`#/`) | Pick a project (new, authorized local folder, GitHub repo), describe the change, choose models, review the *"what this run may do"* summary, start. |
 | **Run view** | Follow the seven layers and the Connect/Inspect/Baseline stages live (it reconnects by itself after a refresh or a network blip), cancel, resume, retry/skip escalated tasks. Tabs: Overview, Task graph, Activity, Files (changed files + diff), **Evidence**, Delivery. |
+| **Projects** (`#/projects`) | Your registered repositories and folders: register once, see live status, open a terminal or start a task, repair, rename, archive, remove. |
 | **Terminal** (`#/terminal`) | A real shell in a project folder — see [Embedded terminal](#embedded-terminal). Works with no provider, no PAX and no agent. |
 | **History** (`#/history`) | Every run on record, searchable by task, project, id, model; filter by status, project type and verification. |
 | **Setup & health** (`#/setup`) | First-run checklist and ongoing health. Every line is a real probe, with what was observed and the next step. |
@@ -722,6 +795,10 @@ See `.env.example`.
 | POST | `/api/runs/:id/tasks/:taskId/retry` | Escalation: retry, optionally `{ description, verify, acceptance }` |
 | POST | `/api/runs/:id/tasks/:taskId/skip` | Escalation: skip and continue |
 | GET | `/api/runs/:id/files[?path=]` | Workspace listing / file content |
+| GET / POST | `/api/projects` | **Registry**: list (`?q&status&archived=false|only|all&refresh=1`) / register `{kind, directoryId \| path \| repoUrl, name, workingMode, defaultRef, acknowledgeSameRepository}` |
+| GET / PATCH / DELETE | `/api/projects/<prj_id>` | Details + git state / rename + settings, `acceptRemoteChange`, `acceptNewRemote` / remove the registration (`{confirm: name}`) |
+| POST | `/api/projects/<prj_id>/validate` · `/repair` · `/archive` · `/restore` | Re-check against the host / point at another folder (`acceptDifferentRepository`) / make inactive / reactivate |
+| GET | `/api/projects/<prj_id>/runs` | Run history of the project |
 | GET | `/api/projects/directories` | Authorized local directories (ids, names, git state — no paths) |
 | POST | `/api/projects/inspect` | Read-only summary of `{ source: { mode: 'local', directoryId } }` or `{ mode: 'github', repoUrl, ref }` |
 | GET / PUT | `/api/settings` | Effective settings with sources and masking / validate + save (`{ values: { key: value \| null } }`; `null` resets) |

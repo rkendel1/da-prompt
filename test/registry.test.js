@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { cleanMachineEnv } from './cli-helpers.js';
-import { startRegistryBackend, initRepo, git, writer, NEW_FILE, NODE_FILES, writeFiles } from './registry-helpers.js';
+import { startRegistryBackend, initRepo, git, writer, NEW_FILE, writeFiles } from './registry-helpers.js';
 import { makeRemote } from './project-helpers.js';
 import { tmpDir, waitFor } from './helpers.js';
 import { remoteKey } from '../src/registry.js';

@@ -35,7 +35,7 @@ const safeSet = (k, v) => { try { v ? sessionStorage.setItem(k, v) : sessionStor
 const STATE_TEXT = { starting: 'starting…', running: 'running', exited: 'exited', failed: 'failed to start', disconnected: 'disconnected', reconnecting: 'reconnecting…', closed: 'closed on the server' };
 
 /** Mount the page. Returns a cleanup function that detaches every stream (the shells keep running on the server). */
-export async function renderTerminalPage(main, api, { toast }) {
+export async function renderTerminalPage(main, api, { toast, project: wantProject = '' }) {
   main.innerHTML = `<section class="page terminal-page">
     <p class="eyebrow">developer terminal · host shell</p>
     <h1>Terminal</h1>
@@ -60,9 +60,13 @@ export async function renderTerminalPage(main, api, { toast }) {
     root.innerHTML = `<div class="card callout fail" role="alert"><h3>The terminal can't start on this host</h3><p>${esc(info.reason || 'It is turned off in Settings → Server → Terminal.')}</p></div>`;
     return () => {};
   }
+  let registered = [];
   try {
     dirs = (await api('api/projects/directories')).directories.filter((d) => !d.readOnly);
   } catch { /* the picker explains below */ }
+  try {
+    registered = (await api('api/projects')).projects.filter((p) => p.kind === 'local');
+  } catch { /* the registry is optional for the terminal */ }
   try {
     await loadXterm();
   } catch (e) {
@@ -88,9 +92,16 @@ export async function renderTerminalPage(main, api, { toast }) {
     <div class="term-stage" id="term-stage"></div>`;
 
   const sel = $('#term-project', root);
-  sel.innerHTML = dirs.length ? dirs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}${d.git?.isGit ? ` · ${esc(d.git.branch || 'detached')}` : ''}</option>`).join('') : '<option value="">(no writable project folders)</option>';
-  $('#term-new', root).disabled = !dirs.length;
-  if (!dirs.length) $('#term-stage', root).innerHTML = '<div class="card empty-term"><h3>Authorize a project folder first</h3><p>A terminal starts inside a folder you have authorized, never a path typed in the browser. Add one under <a href="#/settings?group=folders">Settings → Folders</a> (or <code>da-prompt config set projectRoots ~/projects</code>), then come back.</p></div>';
+  const usableReg = registered.filter((p) => p.status === 'available' && !p.archived && !p.location.readOnly);
+  sel.innerHTML = [
+    usableReg.length || registered.length ? `<optgroup label="Projects">${registered.filter((p) => !p.archived).map((p) => `<option value="${esc(p.id)}" ${usableReg.includes(p) ? '' : 'disabled'}>${esc(p.name)}${p.status !== 'available' ? ` — ${esc(p.status)}` : p.location.readOnly ? ' — read-only' : ''}</option>`).join('')}</optgroup>` : '',
+    dirs.length ? `<optgroup label="Other authorized folders">${dirs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}${d.git?.isGit ? ` · ${esc(d.git.branch || 'detached')}` : ''} (not registered)</option>`).join('')}</optgroup>` : '',
+  ].join('') || '<option value="">(no projects)</option>';
+  if (wantProject && usableReg.some((p) => p.id === wantProject)) sel.value = wantProject;
+  else if (usableReg.length) sel.value = usableReg[0].id;
+  const canOpen = Boolean(usableReg.length || dirs.length);
+  $('#term-new', root).disabled = !canOpen;
+  if (!canOpen) $('#term-stage', root).innerHTML = '<div class="card empty-term"><h3>Register a project first</h3><p>A terminal starts inside a project you registered, never a path typed in the browser. Register a folder or repository under <a href="#/projects">Projects</a> (it needs a parent folder authorized in <a href="#/settings?group=folders">Settings → Folders</a>), then come back.</p></div>';
   $('#term-policy-toggle', root).addEventListener('click', (e) => {
     e.preventDefault();
     const ul = $('#term-policy', root);
@@ -219,7 +230,7 @@ export async function renderTerminalPage(main, api, { toast }) {
     const exit = i.state === 'exited' ? ` · exit ${i.exitCode ?? '—'}${i.signal ? ` (signal ${i.signal})` : ''}` : '';
     meta.innerHTML = `<span class="tstate ${esc(dotClass(v))}" data-state="${esc(i.state === 'running' ? v.conn : i.state)}">${esc(stateTxt)}${esc(exit)}</span>
       <span class="tcwd" title="Current directory of the shell"><span class="muted">cwd</span> <code id="term-cwd">${esc(i.cwd || '—')}</code></span>
-      <span class="tproj"><span class="muted">project</span> ${esc(i.project?.name || '—')}</span>
+      <span class="tproj"><span class="muted">project</span> ${i.project?.projectId ? `<a href="#/projects/${esc(i.project.projectId)}">${esc(i.project.name)}</a>` : esc(i.project?.name || '—')}</span>
       ${i.insideProject === false ? '<span class="pill warn" title="The shell is outside the folder it was started in. Terminals are not confined to the project.">outside project</span>' : ''}
       <span class="muted">${esc(i.shell || '')} · ${i.cols}×${i.rows}</span>
       ${v.conn === 'disconnected' ? '<button class="btn" id="term-reconnect">Reconnect</button>' : ''}
@@ -240,14 +251,15 @@ export async function renderTerminalPage(main, api, { toast }) {
     const btn = $('#term-new', root);
     btn.disabled = true;
     try {
-      const { session } = await call('sessions', { method: 'POST', body: { directoryId, cols: 100, rows: 30 } });
+      const target = String(directoryId).startsWith('prj_') ? { projectId: directoryId } : { directoryId };
+      const { session } = await call('sessions', { method: 'POST', body: { ...target, cols: 100, rows: 30 } });
       const v = makeView(session);
       select(v);
     } catch (e) {
       toast(`Could not open a terminal: ${e.message}`);
       showError(e.message);
     } finally {
-      btn.disabled = !dirs.length;
+      btn.disabled = !(usableReg.length || dirs.length);
     }
   }
   function showError(msg) {
@@ -304,7 +316,13 @@ export async function renderTerminalPage(main, api, { toast }) {
   for (const s of existing) makeView(s);
   const prefer = safeGet(STORE);
   select(views.get(prefer) || [...views.values()].find((v) => v.info.state === 'running') || [...views.values()].at(-1) || null);
-  if (!views.size && dirs.length) {
+  // Arrived from a project ("Open terminal"): reuse its running terminal or open a new one in it.
+  if (wantProject && usableReg.some((p) => p.id === wantProject)) {
+    const have = [...views.values()].find((v) => v.info.project?.projectId === wantProject && v.info.state === 'running');
+    if (have) select(have);
+    else await open(wantProject);
+  }
+  if (!views.size && (dirs.length || registered.length)) {
     const hint = $('#term-meta', root);
     hint.innerHTML = '<span class="muted">No terminals yet — pick a project and press “+ New terminal”.</span>';
   }

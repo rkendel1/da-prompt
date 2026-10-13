@@ -238,7 +238,8 @@ test('publish is explicit: needs approval, a token held by the backend and --yes
     const mainBefore = git(remote.bare, 'rev-parse', 'main');
     const conn = await cli(['projects', 'connect', 'acme/widgets', '--json'], { backend: be });
     assert.equal(conn.code, 0, conn.err);
-    assert.equal(conn.json.canPublish, false);
+    assert.equal(conn.json.project.kind, 'remote');
+    assert.equal((await cli(['projects', 'inspect', 'acme/widgets', '--json'], { backend: be })).json.canPublish, false);
     const r = await cli(['run', 'Add a farewell helper', '--project', 'acme/widgets', '--json'], { backend: be });
     assert.equal(r.code, 0, r.err);
     const id = r.lines.at(-1).run.id;
