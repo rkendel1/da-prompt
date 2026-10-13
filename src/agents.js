@@ -1,7 +1,8 @@
 // Layer 2 (specialized agents) and Layer 3 (execution): each agent works on one task with only
 // the context it needs, using real tools against the shared workspace.
 
-import { renderPrompt } from './prompt.js';
+import { renderRunPrompt } from './prompt.js';
+import { plannerContext, agentContext, isExisting } from './project.js';
 import { ROLES, validatePlan } from './graph.js';
 import { redact } from './security.js';
 
@@ -24,6 +25,17 @@ const WORKSPACE_RULES = `Workspace rules:
 - Commands run non-interactively with a timeout; never start long-running servers in the foreground (start them in tests on port 0 instead).
 - Never hardcode secrets; read them from environment variables.
 - Finish by calling complete_task with an honest summary. Only claim what you have verified.`;
+
+const EXISTING_WORKSPACE_RULES = `Workspace rules (existing project):
+- All paths are relative to the project root, which is an isolated copy of the user's project. Never write outside it, and never write inside .git.
+- Read the relevant code first. Change only what the task needs, in the project's own style and structure.
+- Verify with the project's own test/lint/build commands. Dependencies are not installed unless the run authorizes it; if a command fails because tooling is missing, say so instead of working around it.
+- Never run deploy, publish, migration or privileged commands, and do not use git to switch branches or rewrite history; the factory commits and delivers.
+- Commands run non-interactively with a timeout; never start long-running servers in the foreground.
+- Never hardcode secrets; read them from environment variables.
+- Finish by calling complete_task with an honest summary. Only claim what you have verified.`;
+
+const rulesFor = (run) => (isExisting(run) ? EXISTING_WORKSPACE_RULES : WORKSPACE_RULES);
 
 export const AGENT_TOOLS = [
   {
@@ -94,11 +106,14 @@ export const PLAN_TOOL = {
             dependsOn: { type: 'array', items: { type: 'string' } },
             acceptance: { type: 'array', items: { type: 'string' } },
             outputs: { type: 'array', items: { type: 'string' }, description: 'Files this task produces' },
+            files: { type: 'array', items: { type: 'string' }, description: 'Existing projects: existing files this task is likely to read or change' },
             verify: { type: 'array', items: { type: 'string' }, description: 'Shell commands that must exit 0 when the task is done' },
           },
           required: ['id', 'role', 'title', 'description', 'dependsOn', 'acceptance', 'verify'],
         },
       },
+      architecture: { type: 'string', description: 'Existing projects: how the relevant part of the codebase is structured today' },
+      affectedFiles: { type: 'array', items: { type: 'string' }, description: 'Existing projects: files likely to change' },
       risks: { type: 'array', items: { type: 'string' } },
       openQuestions: { type: 'array', items: { type: 'string' } },
       finalVerify: { type: 'array', items: { type: 'string' }, description: 'Commands that prove the whole app works, e.g. "npm test"' },
@@ -115,8 +130,31 @@ export const PLAN_TOOL = {
   },
 };
 
+/** For existing projects deploy is optional: it only applies when the run authorizes a preview. */
+export const planToolFor = (run) => {
+  if (!isExisting(run)) return PLAN_TOOL;
+  return { ...PLAN_TOOL, input_schema: { ...PLAN_TOOL.input_schema, required: ['product', 'tasks', 'finalVerify'] } };
+};
+
+function existingPlannerSystem(run) {
+  return `${renderRunPrompt(run)}
+
+You are acting in LAYER 1 (plan) for a change to an EXISTING project. Produce the plan by calling submit_plan exactly once.
+Planning rules:
+- Ground everything in the inventory in the user message: the real stack, modules, conventions and commands. Do not assume Node.js, npm or any framework that the inventory does not show.
+- 2–8 small tasks, each with one owner role, a precise spec, acceptance criteria, the existing files it will read or change (files), and verify commands that exit 0 only when it truly works.
+- Verify and finalVerify commands MUST come from the detected commands (or be narrower runs of them, e.g. a single test file). Include the project's full test command in finalVerify. If nothing was detected, say so in risks.
+- Do not plan greenfield work: no PRD task, no Dockerfile/DEPLOY.md, no README rewrite unless the request needs it. Add tests next to the project's existing tests.
+- Baseline failures are pre-existing: never make a task's success depend on them passing.
+- Fill architecture (how the relevant code is organised today) and affectedFiles. Put risks and open questions honestly.
+- Omit deploy unless the inventory says deployment is authorized for this run.
+- Maximise parallelism: only add a dependency when a task needs another task's output.
+${EXISTING_WORKSPACE_RULES}`;
+}
+
 function plannerSystem(run) {
-  return `${renderPrompt(run.inputs)}
+  if (isExisting(run)) return existingPlannerSystem(run);
+  return `${renderRunPrompt(run)}
 
 You are acting in LAYER 1 (plan). Produce the plan by calling submit_plan exactly once.
 Planning rules:
@@ -129,14 +167,15 @@ ${WORKSPACE_RULES}`;
 }
 
 export async function runPlanner({ provider, run, signal, track, log }) {
+  const existing = isExisting(run);
   const messages = [
     {
       role: 'user',
-      content: `Plan the build for this idea.\n\nIdea: ${run.inputs.idea}\nRequirements: ${run.inputs.requirements}\nStack / constraints: ${run.inputs.stack}\nBudget / limits: ${run.inputs.limits}\nAccess: ${run.inputs.tools}`,
+      content: `${existing ? 'Plan this change to the existing project.' : 'Plan the build for this idea.'}\n\n${existing ? 'Request' : 'Idea'}: ${run.inputs.idea}\nRequirements: ${run.inputs.requirements}\nStack / constraints: ${run.inputs.stack}\nBudget / limits: ${run.inputs.limits}\nAccess: ${run.inputs.tools}${existing ? `\n\n${plannerContext(run)}` : ''}`,
     },
   ];
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await call(provider, { system: plannerSystem(run), messages, tools: [PLAN_TOOL], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan' } }, track);
+    const res = await call(provider, { system: plannerSystem(run), messages, tools: [planToolFor(run)], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan', project: existing ? run.project : null, source: run.source } }, track);
     const use = res.content.find((c) => c.type === 'tool_use' && c.name === 'submit_plan');
     messages.push({ role: 'assistant', content: res.content });
     if (!use) {
@@ -169,8 +208,11 @@ export function normalizePlan(p = {}) {
       dependsOn: arr(t?.dependsOn),
       acceptance: arr(t?.acceptance),
       outputs: arr(t?.outputs),
+      files: arr(t?.files),
       verify: arr(t?.verify),
     })),
+    architecture: typeof p.architecture === 'string' ? p.architecture.slice(0, 2000) : '',
+    affectedFiles: arr(p.affectedFiles).slice(0, 60),
     risks: arr(p.risks),
     openQuestions: arr(p.openQuestions),
     finalVerify: arr(p.finalVerify),
@@ -179,11 +221,12 @@ export function normalizePlan(p = {}) {
 }
 
 function agentSystem(run, task, lessons) {
-  return `${renderPrompt(run.inputs)}
+  const project = isExisting(run) ? agentContext(run, task) : '';
+  return `${renderRunPrompt(run)}
 
 ${ROLE_BRIEFS[task.role] || ROLE_BRIEFS.engineer}
 You are executing ONE task from the plan (LAYER 3). Other agents may be working on other files in parallel; stay within your task.
-${WORKSPACE_RULES}
+${rulesFor(run)}${project ? `\n\n${project}` : ''}
 ${lessons ? `\nLessons recorded in CLAUDE.md from earlier failures — follow them:\n${lessons}\n` : ''}`;
 }
 
@@ -194,6 +237,7 @@ function taskBrief(run, task, { attempt, maxAttempts, feedback, upstream }) {
     `## Product\n${run.plan.product.name} — ${run.plan.product.summary}`,
     '',
     `## Spec\n${task.description}`,
+    ...(task.files?.length ? ['', `## Existing files likely involved\n${task.files.map((f) => `- ${f}`).join('\n')}`] : []),
     '',
     `## Acceptance criteria\n${task.acceptance.map((a) => `- ${a}`).join('\n')}`,
   ];
@@ -222,7 +266,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
 
   for (let turn = 1; turn <= settings.maxAgentTurns; turn++) {
     if (signal?.aborted) return { ok: false, error: 'cancelled' };
-    const res = await call(provider, { system, messages, tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs } }, track);
+    const res = await call(provider, { system, messages, tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run) } }, track);
     messages.push({ role: 'assistant', content: res.content });
 
     for (const block of res.content) {
@@ -324,12 +368,13 @@ export async function writeSummary({ provider, run, signal, track }) {
     tasks: run.plan.tasks.map((t) => ({ id: t.id, role: t.role, title: t.title, status: t.status, attempts: t.attempts?.length, summary: t.result?.summary })),
     checklist: run.checklist,
     deployment: run.deployment,
+    ...(isExisting(run) ? { baseline: (run.project?.baseline || []).map((b) => ({ command: b.command, status: b.status })), verification: (run.finalVerification || []).map((v) => ({ command: v.command, state: v.state })) } : {}),
   };
   try {
     const res = await call(
       provider,
       {
-        system: `${renderPrompt(run.inputs)}\n\nYou are writing the final <deliver> summary. Be factual: only claim what the evidence shows.`,
+        system: `${renderRunPrompt(run)}\n\nYou are writing the final <deliver> summary. Be factual: only claim what the evidence shows.`,
         messages: [{ role: 'user', content: `Write a concise final summary (under 250 words, plain markdown, no top-level heading): what was built, what works (with evidence), what is left, and 3–5 recommendations.\n\nEvidence:\n${JSON.stringify(facts, null, 2)}` }],
         tools: [],
         signal,

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { safeEnv } from './sandbox.js';
+import { isExisting, verificationSummary, changeSummary, changePatch, commitChanges } from './project.js';
 
 function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -73,7 +74,71 @@ export async function exportProject(ws, dir, runId) {
   }
 }
 
+/** One honest word for the state of the project's checks. */
+export function verdictOf(run) {
+  const v = verificationSummary(run);
+  if (v.regressions || v.newFailures || v.blocked) return 'failed';
+  if (!v.passed && !v.fixed) return 'unverified';
+  if (v.unavailable) return 'partially-verified';
+  if (v.preexisting) return 'verified-with-preexisting-failures';
+  return 'verified';
+}
+
+const STATE_LABEL = { passed: 'passed', fixed: 'passed (was failing at baseline)', preexisting: 'FAILED — pre-existing, nothing new', regression: 'FAILED — regression introduced by this run', 'new-failure': 'FAILED — new check failing', unavailable: 'NOT RUN — tool or command unavailable', blocked: 'NOT RUN — blocked by command policy' };
+
+function existingSections(run) {
+  const L = [];
+  const src = run.source;
+  L.push('## Source');
+  L.push(`- Mode: **${src.mode === 'github' ? 'GitHub repository' : 'local directory'}** — ${src.label}${src.ref ? ` @ ${src.ref}` : ''}`);
+  L.push(`- Isolation: \`${src.workingMode}\` (the source itself is never edited)`);
+  if (src.baseSha) L.push(`- Baseline commit: \`${src.baseSha.slice(0, 12)}\`${src.baseBranch ? ` on \`${src.baseBranch}\`` : ''}`);
+  if (src.branch) L.push(`- Working branch: \`${src.branch}\``);
+  if (src.snapshotNote) L.push(`- Note: ${src.snapshotNote}`);
+  const i = run.project?.inspection;
+  if (i) L.push(`- Detected: ${i.ecosystems.join(', ') || 'unknown stack'}, ${i.files} files; checks: ${i.baselineCommands.map((c) => `\`${c.command}\``).join(', ') || 'none detected'}`);
+  L.push('');
+  if (run.project?.baseline?.length) {
+    L.push('## Baseline (before any change)', '| Command | Result | Notes |', '| --- | --- | --- |');
+    for (const b of run.project.baseline) L.push(`| \`${b.command}\` | ${b.status} | ${(b.limitation || b.signature?.[0] || '').replace(/\|/g, '\\|').slice(0, 140)} |`);
+    L.push('');
+  }
+  if (run.finalVerification?.length) {
+    const v = verificationSummary(run);
+    L.push(`## Verification — ${verdictOf(run).replace(/-/g, ' ')}`);
+    L.push(`${v.passed + v.fixed} passed · ${v.preexisting} pre-existing failure(s) · ${v.regressions + v.newFailures} new failure(s) · ${v.unavailable + v.blocked} not run`, '');
+    for (const c of run.finalVerification) L.push(`- \`${c.command}\` → ${STATE_LABEL[c.state] || (c.ok ? 'passed' : 'failed')} (exit ${c.exitCode})`);
+    L.push('');
+  } else {
+    L.push('## Verification — unverified', 'No project checks were run, so nothing here is claimed as verified.', '');
+  }
+  if (run.changes) {
+    L.push(`## Changes (${run.changes.files.length} file${run.changes.files.length === 1 ? '' : 's'}, +${run.changes.additions} −${run.changes.deletions})`);
+    for (const f of run.changes.files.slice(0, 80)) L.push(`- \`${f.status}\` ${f.path} (+${f.additions}/−${f.deletions})`);
+    if (!run.changes.files.length) L.push('- No files were changed.');
+    L.push('');
+  }
+  if (run.delivery) {
+    const d = run.delivery;
+    L.push('## Delivery');
+    L.push(`- Readiness: **${d.readiness?.ready ? 'ready for review' : 'not ready'}**${d.readiness?.reasons?.length ? ` — ${d.readiness.reasons.join('; ')}` : ''}`);
+    if (d.integrity) L.push(`- Source protection: ${d.integrity.ok ? 'verified — the source ref and history were not modified' : `VIOLATED — ${d.integrity.problems.join('; ')}`}`);
+    const pub = d.publication;
+    if (pub) {
+      L.push(`- Publication: **${pub.state}**${pub.error ? ` — ${pub.error}` : ''}${pub.prError ? ` — ${pub.prError}` : ''}`);
+      if (pub.pr) L.push(`- Pull request: ${pub.pr.url}${pub.pr.draft ? ' (draft)' : ''}${pub.pr.reused ? ' (existing)' : ''}`);
+    } else {
+      L.push(`- Publication: ${src.mode === 'github' ? 'not requested (push and pull request are explicit)' : 'not applicable (local runs never push)'}`);
+    }
+    if (d.local?.applied) L.push(`- Applied to the source directory: ${d.local.applied.files.length} file(s)`);
+    if (d.local?.branch) L.push(`- Exported branch in your repository: \`${d.local.branch.branch}\``);
+    L.push('');
+  }
+  return L;
+}
+
 export function buildReport(run) {
+  const existing = isExisting(run);
   const p = run.plan;
   const L = [];
   L.push(`# ${p?.product?.name || run.title} — Factory Report`, '');
@@ -82,7 +147,8 @@ export function buildReport(run) {
   if (run.outputDir) L.push(`- Delivered to: \`${run.outputDir}\``);
   L.push(`- Tokens: ${(run.usage?.input || 0) + (run.usage?.output || 0)} (${run.usage?.input || 0} in / ${run.usage?.output || 0} out), ${run.usage?.calls || 0} model calls`);
   if (run.startedAt && run.finishedAt) L.push(`- Duration: ${Math.round((Date.parse(run.finishedAt) - Date.parse(run.startedAt)) / 1000)}s`);
-  L.push('', '## Idea', run.inputs.idea, '');
+  L.push('', existing ? '## Request' : '## Idea', run.inputs.idea, '');
+  if (existing) L.push(...existingSections(run));
   if (run.summary) L.push('## Summary', run.summary, '');
   if (p) {
     L.push('## Product', p.product.summary, '', '**Success criteria**', ...p.product.successCriteria.map((c) => `- ${c}`), '');
@@ -94,14 +160,15 @@ export function buildReport(run) {
   }
   if (run.checklist?.length) {
     L.push('## Completion checklist');
-    for (const c of run.checklist) L.push(`- [${c.ok ? 'x' : ' '}] ${c.label}${c.detail ? ` — ${c.detail}` : ''}`);
+    for (const c of run.checklist) L.push(`- [${c.ok ? 'x' : ' '}] ${c.label}${c.state && c.state !== 'pass' && c.state !== 'fail' ? ` (${c.state})` : ''}${c.detail ? ` — ${c.detail}` : ''}`);
     L.push('');
   }
-  if (run.finalVerification?.length) {
+  if (!existing && run.finalVerification?.length) {
     L.push('## Test results');
     for (const v of run.finalVerification) L.push(`- \`${v.command}\` → exit ${v.exitCode} (${v.durationMs}ms)`);
     L.push('');
   }
+  if (existing && !run.deployment) L.push('## Deployment', run.settings.deploy ? 'No deployment was started.' : 'Not requested for this run (nothing was deployed).', '');
   if (run.deployment) {
     L.push('## Deployment');
     if (run.deployment.ok) L.push(`Live preview: ${run.deployment.url} (health ${run.deployment.healthPath} → ${run.deployment.status})`);
@@ -109,7 +176,7 @@ export function buildReport(run) {
     L.push(`Start command: \`${run.deployment.start}\`. See DEPLOY.md for production deployment.`, '');
   }
   if (run.lessons?.length) {
-    L.push('## Lessons recorded (CLAUDE.md)', ...run.lessons.map((l) => `- ${l.text}`), '');
+    L.push(existing ? '## Lessons recorded (factory notes; your repository was not modified)' : '## Lessons recorded (CLAUDE.md)', ...run.lessons.map((l) => `- ${l.text}`), '');
   }
   const left = [];
   for (const t of p?.tasks || []) if (t.status !== 'completed') left.push(`${t.id}: ${t.status}${t.error ? ` (${t.error})` : ''}`);
@@ -158,4 +225,47 @@ export async function pushToGit(ws, { repoUrl, token, branch = 'main', message, 
   const auth = token ? ['-c', `http.extraheader=AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`] : [];
   const r = await sh('git', [...auth, 'push', '-q', repoUrl, `HEAD:${branch}`], opts);
   return r.code === 0 ? { ok: true, repoUrl, branch } : { ok: false, error: r.out.replace(/basic [A-Za-z0-9+/=]+/g, 'basic ***') };
+}
+
+/**
+ * Delivery for a run against an existing project: commit the work onto the run branch (workspace only),
+ * then write the patch, a changed-files archive, the report and the machine-readable results into the
+ * run's delivery folder. Nothing is written into the project itself.
+ */
+export async function packageExistingDelivery(cfg, run, ws, deliveryDir, { commit: doCommit = true } = {}) {
+  await fsp.mkdir(deliveryDir, { recursive: true });
+  const commit = doCommit ? await commitChanges(cfg, run, ws.root, `da-prompt: ${run.title}`) : { sha: null, commits: 0, committed: false, skipped: 'source protection check failed' };
+  const changes = await changeSummary(cfg, run, ws.root);
+  run.changes = changes;
+  const patch = await changePatch(cfg, run, ws.root);
+  await fsp.writeFile(path.join(deliveryDir, 'changes.patch'), patch);
+  const keep = changes.files.filter((f) => f.status !== 'D').map((f) => f.path);
+  const removed = changes.files.filter((f) => f.status === 'D').map((f) => f.path);
+  let archive = null;
+  let archiveError = null;
+  if (keep.length) {
+    const list = path.join(deliveryDir, 'changed-files.list');
+    await fsp.writeFile(list, `${keep.join('\0')}\0`);
+    const r = await sh('tar', ['-czf', path.join(deliveryDir, 'project.tar.gz'), '--null', '-T', list], { cwd: ws.root });
+    await fsp.rm(list, { force: true });
+    if (r.code === 0) archive = 'project.tar.gz';
+    else archiveError = r.out;
+  } else {
+    await fsp.rm(path.join(deliveryDir, 'project.tar.gz'), { force: true });
+  }
+  if (removed.length) await fsp.writeFile(path.join(deliveryDir, 'DELETED_FILES.txt'), `${removed.join('\n')}\n`);
+  const tests = {
+    verdict: verdictOf(run),
+    baseline: (run.project?.baseline || []).map(({ command, kind, status, exitCode, limitation }) => ({ command, kind, status, exitCode, limitation })),
+    final: (run.finalVerification || []).map(({ command, state, ok, exitCode, durationMs }) => ({ command, state, ok, exitCode, durationMs })),
+    tasks: (run.plan?.tasks || []).map((t) => ({ id: t.id, status: t.status, verification: (t.attempts?.at(-1)?.verification || []).map(({ command, state, ok, exitCode }) => ({ command, state, ok, exitCode })) })),
+    security: run.security || null,
+    changes: changes.files,
+  };
+  await fsp.writeFile(path.join(deliveryDir, 'test-results.json'), JSON.stringify(tests, null, 2));
+  return { report: 'FACTORY_REPORT.md', tests: 'test-results.json', patch: 'changes.patch', archive, archiveError, deleted: removed.length ? 'DELETED_FILES.txt' : null, commit };
+}
+
+export async function writeReport(run, deliveryDir) {
+  await fsp.writeFile(path.join(deliveryDir, 'FACTORY_REPORT.md'), buildReport(run));
 }

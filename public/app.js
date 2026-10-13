@@ -19,7 +19,11 @@ let current = null; // { id, run, events, es, tab, selectedTask, file }
 async function api(path, options = {}) {
   const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
   const body = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(body?.error || `Request failed (${res.status})`);
+    err.body = body;
+    throw err;
+  }
   return body;
 }
 
@@ -100,6 +104,7 @@ function renderNew() {
     }
   });
   const picker = mountModelPicker($('#model-picker'), api);
+  const project = mountProjectPicker(form);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
   form.tokenBudget.value = config.defaults.tokenBudget;
@@ -111,6 +116,12 @@ function renderNew() {
     const err = $('#form-error');
     err.hidden = true;
     const btn = form.querySelector('button[type=submit]');
+    const missing = project.validate(new FormData(form));
+    if (missing) {
+      err.textContent = missing;
+      err.hidden = false;
+      return;
+    }
     btn.disabled = true;
     const fd = new FormData(form);
     const choice = (await picker).getChoice();
@@ -121,7 +132,8 @@ function renderNew() {
       stack: fd.get('stack'),
       limits: fd.get('limits'),
       tools: fd.get('tools'),
-      repoUrl: fd.get('repoUrl') || undefined,
+      repoUrl: project.mode() === 'new' ? fd.get('repoUrl') || undefined : undefined,
+      source: project.source(fd),
       outputDir: fd.get('outputDir') || undefined,
       settings: {
         maxParallel: Number(fd.get('maxParallel')),
@@ -139,6 +151,131 @@ function renderNew() {
       btn.disabled = false;
     }
   });
+}
+
+// Project section: new project | local directory | GitHub repository. Paths never come from the browser:
+// local directories are picked from the server's authorized list and referenced by opaque id.
+function mountProjectPicker(form) {
+  const cfg = config.projects || {};
+  const radios = [...form.querySelectorAll('[name=sourceMode]')];
+  const summary = $('#src-summary');
+  const dirSel = $('#directory-id');
+  const modeSel = $('#working-mode');
+  let dirs = null;
+  let info = null;
+  const mode = () => form.querySelector('[name=sourceMode]:checked').value;
+
+  const local = radios.find((r) => r.value === 'local');
+  if (!cfg.local) {
+    local.disabled = true;
+    local.nextElementSibling.title = 'No project roots are configured on the server (FACTORY_PROJECT_ROOTS)';
+  }
+  const showSummary = (html, bad = false) => {
+    summary.hidden = !html;
+    summary.className = `srcsummary${bad ? ' bad' : ''}`;
+    summary.innerHTML = html || '';
+  };
+  const warnList = (w) => (w?.length ? `<ul>${w.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '');
+
+  const render = () => {
+    const m = mode();
+    if (m === 'local' && info?.mode === 'local') {
+      const g = info.git;
+      const where = modeSel.value === 'snapshot' ? 'an isolated copy of the working tree' : 'an isolated clone of the last commit';
+      showSummary(`<b>Reads:</b> ${esc(info.name)}${g.isGit ? ` · branch ${esc(g.branch || 'detached')} · ${g.dirty ? `${g.counts.staged + g.counts.unstaged + g.counts.untracked} uncommitted change(s)` : 'clean'}` : ' · not a git repository'}<br>
+        <b>Edits happen in:</b> ${where}, ${g.isGit && modeSel.value === 'clone' ? 'on branch <code>da-prompt/&lt;run id&gt;</code>' : 'under the factory data directory'}<br>
+        <b>Your directory:</b> ${info.readOnly ? 'read-only — results can only be downloaded' : 'never written during the run; results are applied only if you choose to, with a conflict check'}<br>
+        <b>Publishing:</b> off — local runs never push or open pull requests
+        ${info.detected ? `<br><b>Detected:</b> ${esc(info.detected.summary)}` : ''}${warnList(info.warnings)}`);
+    } else if (m === 'github' && info?.mode === 'github') {
+      const publish = form.publish.checked && cfg.canPublish;
+      showSummary(`<b>Reads:</b> ${esc(info.repo)} @ ${esc(info.ref.name)}${info.ref.kind === 'default' ? ' (default branch)' : ` (${esc(info.ref.kind)})`}<br>
+        <b>Edits happen in:</b> an isolated clone on a new branch <code>da-prompt/&lt;run id&gt;</code>; ${esc(info.ref.name)} is never modified<br>
+        <b>Publishing:</b> ${publish ? 'ON — pushes only the run branch and opens a pull request' : 'off — you get a patch and archive; nothing is pushed'}${warnList(info.warnings)}`);
+    } else if (m !== 'new') showSummary('');
+    else showSummary('');
+  };
+
+  const inspectLocal = async () => {
+    info = null;
+    if (!dirSel.value) return render();
+    showSummary('Inspecting…');
+    try {
+      info = await api('api/projects/inspect', { method: 'POST', body: JSON.stringify({ source: { mode: 'local', directoryId: dirSel.value } }) });
+      modeSel.innerHTML = info.workingModes.map((w) => `<option value="${esc(w)}">${w === 'clone' ? 'Clone — committed state (HEAD), on its own branch' : 'Snapshot — copy of the working tree, including uncommitted changes'}</option>`).join('');
+      modeSel.value = info.defaultWorkingMode;
+      render();
+    } catch (e) {
+      showSummary(esc(e.message), true);
+    }
+  };
+  const loadDirs = async () => {
+    if (dirs) return;
+    try {
+      dirs = await api('api/projects/directories');
+      dirSel.innerHTML = dirs.directories.length
+        ? dirs.directories.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} — ${d.git.isGit ? `${esc(d.git.branch || 'detached')}${d.git.dirty ? ' · uncommitted changes' : ' · clean'}` : 'not a git repository'}${d.readOnly ? ' · read-only' : ''}</option>`).join('')
+        : '<option value="">(no directories under the authorized roots)</option>';
+    } catch (e) {
+      dirSel.innerHTML = '<option value="">(could not list directories)</option>';
+      showSummary(esc(e.message), true);
+    }
+    inspectLocal();
+  };
+  const inspectRepo = async () => {
+    const repoUrl = form.sourceRepo.value.trim();
+    if (!repoUrl) return showSummary('Enter a repository, e.g. owner/repo.', true);
+    showSummary('Checking the repository…');
+    try {
+      info = await api('api/projects/inspect', { method: 'POST', body: JSON.stringify({ source: { mode: 'github', repoUrl, ref: form.ref.value.trim() || undefined } }) });
+      $('#repo-branches').innerHTML = info.branches.map((b) => `<option value="${esc(b)}"></option>`).join('');
+      form.ref.placeholder = info.defaultBranch;
+      form.publish.disabled = !info.canPublish;
+      if (!info.canPublish) form.publish.checked = false;
+      render();
+    } catch (e) {
+      info = null;
+      showSummary(esc(e.message), true);
+    }
+  };
+
+  const apply = () => {
+    const m = mode();
+    $('#src-local').hidden = m !== 'local';
+    $('#src-github').hidden = m !== 'github';
+    $('#install-field').hidden = m === 'new';
+    $('#idea-label').innerHTML = m === 'new' ? 'Idea <em>required</em>' : 'What do you want to change? <em>required</em>';
+    form.idea.placeholder = m === 'new' ? 'A shared reading list for book clubs…' : 'Add password reset to this application…';
+    $('#examples').hidden = m !== 'new';
+    $('#repo-field').hidden = m !== 'new' || !config.gitPush;
+    $('#deploy-label').textContent = m === 'new' ? 'Deploy a live preview' : 'Authorize a local preview of the result (off by default)';
+    form.deploy.checked = m === 'new';
+    info = null;
+    if (m === 'local') loadDirs();
+    else showSummary('');
+  };
+  radios.forEach((r) => r.addEventListener('change', apply));
+  dirSel.addEventListener('change', inspectLocal);
+  modeSel.addEventListener('change', render);
+  $('#check-repo').addEventListener('click', inspectRepo);
+  form.sourceRepo.addEventListener('change', () => form.sourceRepo.value.trim() && inspectRepo());
+  form.ref.addEventListener('change', () => form.sourceRepo.value.trim() && inspectRepo());
+  form.publish.addEventListener('change', render);
+
+  return {
+    mode,
+    validate(fd) {
+      if (mode() === 'local' && !fd.get('directoryId')) return 'Choose one of the authorized directories.';
+      if (mode() === 'github' && !String(fd.get('sourceRepo') || '').trim()) return 'Enter the GitHub repository to change.';
+      return '';
+    },
+    source(fd) {
+      const m = mode();
+      if (m === 'local') return { mode: m, directoryId: fd.get('directoryId'), workingMode: fd.get('workingMode') || undefined, allowInstall: fd.get('allowInstall') === 'on' };
+      if (m === 'github') return { mode: m, repoUrl: fd.get('sourceRepo'), ref: fd.get('ref') || undefined, publish: fd.get('publish') === 'on', allowInstall: fd.get('allowInstall') === 'on' };
+      return undefined;
+    },
+  };
 }
 
 // ── Prompt view ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +348,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>
@@ -225,7 +362,8 @@ function renderRun({ keepTab = false } = {}) {
         ${!run.previewLive && run.deployment?.ok && !run.executing ? '<button class="btn" data-act="deploy">Restart preview</button>' : ''}
         ${run.executing ? '<button class="btn danger" data-act="cancel">Cancel</button>' : ''}
         ${canResume ? '<button class="btn" data-act="resume">Resume</button>' : ''}
-        ${run.delivery?.archive ? `<a class="btn" href="api/runs/${esc(run.id)}/download/project.tar.gz">Download code</a>` : ''}
+        ${run.source && run.delivery?.patch ? `<a class="btn" href="api/runs/${esc(run.id)}/download/changes.patch">Download patch</a>` : ''}
+        ${!run.source && run.delivery?.archive ? `<a class="btn" href="api/runs/${esc(run.id)}/download/project.tar.gz">Download code</a>` : ''}
         ${!run.executing ? '<button class="btn danger" data-act="delete" title="Delete run">Delete</button>' : ''}
       </div>
     </div>
@@ -236,6 +374,7 @@ function renderRun({ keepTab = false } = {}) {
         return `<div class="layer ${esc(st)}" role="listitem"><span class="n">0${i + 1}</span><span class="name">${name}</span><span class="st">${esc(label)}</span></div>`;
       }).join('')}
     </div>
+    ${stagesHtml(run)}
     ${run.error ? `<div class="card escalation" style="margin-bottom:16px"><h3>Run stopped</h3><p>${esc(run.error)}</p>${canResume ? '<p class="muted">Resume to continue from where it stopped.</p>' : ''}</div>` : ''}
     <div class="tabs" role="tablist">
       ${[['overview', 'Overview'], ['graph', 'Task graph'], ['activity', 'Activity'], ['files', 'Files'], ['delivery', 'Delivery']]
@@ -255,6 +394,60 @@ function renderRun({ keepTab = false } = {}) {
   tab.dataset.tab = current.tab;
   tab.dataset.delivered = run.delivery ? '1' : '';
   ({ overview: renderOverview, graph: renderGraph, activity: renderActivity, files: renderFiles, delivery: renderDelivery })[current.tab](tab, run, escalated);
+}
+
+const STAGE_NAMES = { connect: 'Connect', inspect: 'Inspect', baseline: 'Baseline' };
+// Connect → Inspect → Baseline happen inside the Plan layer for existing projects; the seven layers are unchanged.
+function stagesHtml(run) {
+  if (!run.source) return '';
+  return `<div class="stages" aria-label="Existing project stages">${Object.entries(STAGE_NAMES).map(([k, name]) => {
+    const st = run.project?.stages?.[k];
+    return `<div class="stage ${esc(st?.state || 'pending')}" title="${esc(st?.detail || '')}"><b>${name}</b><span class="st">${esc(st?.state || 'pending')}</span></div>`;
+  }).join('')}</div>`;
+}
+
+const VERDICT_LABEL = { verified: 'verified', 'verified-with-preexisting-failures': 'verified, pre-existing failures remain', 'partially-verified': 'partially verified', unverified: 'not verified', failed: 'failed' };
+// Mirrors the server's verdict: failures introduced by the run beat everything; nothing proven means unverified.
+function verdictOf(run) {
+  const f = run.finalVerification || [];
+  const n = (s) => f.filter((v) => v.state === s).length;
+  if (n('regression') || n('new-failure') || n('blocked')) return 'failed';
+  if (!n('passed') && !n('fixed')) return 'unverified';
+  if (n('unavailable')) return 'partially-verified';
+  if (n('preexisting')) return 'verified-with-preexisting-failures';
+  return 'verified';
+}
+
+function sourceCard(run) {
+  const s = run.source;
+  const i = run.project?.inspection;
+  return `<div class="card"><h2>Project source</h2><table class="plain">
+    <tr><th>source</th><td>${s.mode === 'github' ? `GitHub ${esc(s.label)}${s.ref ? ` @ ${esc(s.ref)}` : ''}` : `local directory ${esc(s.label)}${s.readOnly ? ' (read-only root)' : ''}`}</td></tr>
+    <tr><th>isolation</th><td>${esc(s.workingMode || 'pending')} — the source is never edited</td></tr>
+    ${s.baseSha ? `<tr><th>base</th><td>${esc(s.baseSha.slice(0, 12))}${s.baseBranch ? ` on ${esc(s.baseBranch)}` : ''}</td></tr>` : ''}
+    ${s.branch ? `<tr><th>working branch</th><td>${esc(s.branch)}</td></tr>` : ''}
+    ${s.snapshotNote ? `<tr><th>note</th><td>${esc(s.snapshotNote)}</td></tr>` : ''}
+    ${i ? `<tr><th>detected</th><td>${esc(i.ecosystems.join(', ') || 'unknown stack')} · ${i.files} files · ${i.instructions.length} instruction file(s)${i.instructions.length ? `: ${esc(i.instructions.map((x) => x.path).join(', '))}` : ''}</td></tr>` : ''}
+    <tr><th>publishing</th><td>${s.mode === 'github' ? (s.publish ? 'enabled for this run' : 'off — explicit action in Delivery') : 'not applicable (local runs never push)'}</td></tr>
+  </table></div>`;
+}
+
+function baselineCard(run) {
+  const b = run.project?.baseline;
+  if (!run.project?.inspection) return '';
+  if (!b?.length) return `<div class="card"><h2>Baseline</h2><p class="muted">${run.project.stages?.baseline?.state === 'skipped' ? 'No test, lint or build command was detected, so there is no baseline and nothing can be claimed as verified.' : 'Running the project\'s own checks before any change…'}</p></div>`;
+  return `<div class="card"><h2>Baseline <span class="muted mono">before any change</span></h2><table class="plain">${b.map((x) => `<tr><td>${esc(x.command)}</td><td><span class="pill ${esc(x.status)}">${esc(x.status)}</span></td><td class="muted">${esc(x.limitation || x.signature?.[0] || '')}</td></tr>`).join('')}</table></div>`;
+}
+
+function verificationCard(run) {
+  const f = run.finalVerification;
+  if (!run.source || !f?.length) return '';
+  const groups = [['Regressions and new failures', ['regression', 'new-failure', 'blocked']], ['Pre-existing failures (not caused by this run)', ['preexisting']], ['Could not run', ['unavailable']], ['Passing', ['passed', 'fixed']]];
+  return `<div class="card"><h2>Verification <span class="pill ${esc(verdictOf(run))}">${esc(VERDICT_LABEL[verdictOf(run)])}</span></h2>
+    ${groups.map(([title, states]) => {
+      const rows = f.filter((v) => states.includes(v.state));
+      return rows.length ? `<h3>${title}</h3>${rows.map((v) => `<div class="vcheck"><span class="pill ${esc(v.state)}">${esc(v.state)}</span><span>${esc(v.command)} · exit ${v.exitCode}</span></div>${v.newFailures?.length ? `<ul class="plain mono">${v.newFailures.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${!v.ok ? `<pre class="out">${esc(v.output)}</pre>` : ''}`).join('')}` : '';
+    }).join('')}</div>`;
 }
 
 function updateTabCounts() {
@@ -310,7 +503,9 @@ function renderOverview(el, run, escalated) {
   const tasks = p?.tasks || [];
   const checklist = run.checklist?.length
     ? run.checklist
-    : ['All core features work and are tested', 'Full test suite passes', 'No critical errors or security issues', 'Deployment is successful (URL or clear instructions)', 'Documentation is updated', 'Final summary and next steps provided'].map((label) => ({ label, pending: true }));
+    : (run.source
+      ? ['Requested change implemented; every planned task verified', 'Project checks pass with no regressions', 'No critical errors or security issues in the changed files', 'Deployment', 'Documentation', 'Final summary and next steps provided']
+      : ['All core features work and are tested', 'Full test suite passes', 'No critical errors or security issues', 'Deployment is successful (URL or clear instructions)', 'Documentation is updated', 'Final summary and next steps provided']).map((label) => ({ label, pending: true }));
   el.innerHTML = `
     ${escalated.map((t) => `
       <div class="card escalation" style="margin-bottom:16px">
@@ -333,18 +528,21 @@ function renderOverview(el, run, escalated) {
     <div class="grid-2">
       <div class="stack">
         <div class="card">
-          <h2>${p ? esc(p.product.name) : 'Planning…'}</h2>
+          <h2>${p ? esc(p.product.name) : run.source && !run.plan ? 'Connecting to the project…' : 'Planning…'}</h2>
           <p>${p ? esc(p.product.summary) : esc(run.inputs.idea)}</p>
+          ${p?.architecture ? `<h3>Existing architecture</h3><p>${esc(p.architecture)}</p>` : ''}
+          ${p?.affectedFiles?.length ? `<h3 style="margin-top:14px">Files likely to change</h3><ul class="plain mono">${p.affectedFiles.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
           ${p ? `<h3>Success criteria</h3><ul class="plain">${p.product.successCriteria.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
           ${p?.product.users?.length ? `<h3 style="margin-top:14px">Users</h3><ul class="plain">${p.product.users.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
         </div>
+        ${run.source ? sourceCard(run) + baselineCard(run) + verificationCard(run) : ''}
         ${run.summary ? `<div class="card md"><h2>Final summary</h2>${md(run.summary)}</div>` : ''}
-        ${run.lessons?.length ? `<div class="card"><h2>Lessons (CLAUDE.md)</h2><ul class="plain">${run.lessons.map((l) => `<li>${esc(l.text)}</li>`).join('')}</ul></div>` : ''}
+        ${run.lessons?.length ? `<div class="card"><h2>Lessons (${run.source ? 'factory notes' : 'CLAUDE.md'})</h2><ul class="plain">${run.lessons.map((l) => `<li>${esc(l.text)}</li>`).join('')}</ul></div>` : ''}
       </div>
       <div class="stack">
         <div class="card">
           <h2>Completion checklist</h2>
-          <ul class="checklist">${checklist.map((c) => `<li><span class="ic ${c.pending ? 'pending' : c.ok ? 'ok' : 'no'}">${c.pending ? '○' : c.ok ? '✓' : '✗'}</span><span>${esc(c.label)}</span>${c.detail ? `<small>${esc(c.detail)}</small>` : ''}</li>`).join('')}</ul>
+          <ul class="checklist">${checklist.map((c) => `<li><span class="ic ${c.pending ? 'pending' : c.state === 'na' ? 'na' : c.state === 'warn' || c.state === 'partial' ? 'warn' : c.state === 'skipped' ? 'skipped' : c.ok ? 'ok' : 'no'}">${c.pending ? '○' : c.state === 'na' ? '–' : c.state === 'warn' || c.state === 'partial' ? '!' : c.state === 'skipped' ? '○' : c.ok ? '✓' : '✗'}</span><span>${esc(c.label)}</span>${c.detail ? `<small>${esc(c.detail)}</small>` : ''}</li>`).join('')}</ul>
         </div>
         ${run.deployment ? `<div class="card"><h2>Deployment</h2>
           ${run.deployment.ok && run.previewLive ? `<p><a class="btn accent" href="preview/${esc(run.id)}/" target="_blank" rel="noopener">Open the running app ↗</a></p>` : ''}
@@ -458,7 +656,7 @@ function plannerLabel(r) {
 function describe(e) {
   const who = e.taskId ? `${e.taskId}${e.role ? ` · ${e.role}` : ''}` : 'factory';
   switch (e.type) {
-    case 'run.created': return [who, `Run created · ${esc(e.provider)} · ${esc(e.model || '')}${plannerLabel(e)}${e.outputDir ? ` · output ${esc(e.outputDir)}` : ''}`];
+    case 'run.created': return [who, `Run created · ${esc(e.provider)} · ${esc(e.model || '')}${plannerLabel(e)}${e.source ? ` · ${esc(e.source.mode)} ${esc(e.source.label)}` : ''}${e.outputDir ? ` · output ${esc(e.outputDir)}` : ''}`];
     case 'output': return [who, e.ok ? `Project delivered to ${esc(e.dir)}` : `Delivery to ${esc(e.dir)} failed: ${esc(e.error)}`, e.ok ? 'ok' : 'bad'];
     case 'run.status': return [who, `Status → <b>${esc(statusLabel(e.status))}</b>${e.note ? ` — ${esc(e.note)}` : ''}`];
     case 'layer': return [who, `Layer <b>${esc(LAYER_NAMES[e.layer] || e.layer)}</b>: ${esc(e.state)}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'warn' : ''];
@@ -479,6 +677,12 @@ function describe(e) {
     case 'deploy': return [who, e.ok ? `Deployed — live preview at <a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.url)}</a>` : `Deploy failed: ${esc(e.error)}`, e.ok ? 'ok' : 'bad'];
     case 'deliver': return [who, `Delivered: ${esc([e.report, e.tests, e.archive].filter(Boolean).join(', '))}`, 'ok'];
     case 'git': return [who, e.ok ? `Pushed to ${esc(e.repoUrl)}` : `Git push failed: ${esc(e.error)}`, e.ok ? 'ok' : 'bad'];
+    case 'stage': return [who, `<b>${esc(STAGE_NAMES[e.stage] || e.stage)}</b>: ${esc(e.state)}${e.detail ? ` — ${esc(e.detail)}` : ''}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'bad' : ''];
+    case 'source': return [who, `Source: ${esc(e.mode)} ${esc(e.label)}${e.ref ? ` @ ${esc(e.ref)}` : ''} · isolation ${esc(e.workingMode)} · base ${esc(String(e.baseSha || '').slice(0, 10))} · branch ${esc(e.branch)}${e.note ? ` · ${esc(e.note)}` : ''}`];
+    case 'inspect': return [who, `Inspected: ${esc(e.summary)}${e.instructions?.length ? ` · instructions: ${esc(e.instructions.join(', '))}` : ''}`, 'ok'];
+    case 'baseline': return [who, `Baseline <span class="${e.status === 'passed' ? 'ok' : 'bad'}">${e.status === 'passed' ? '✓' : '✗'}</span> ${esc(e.command)} → ${esc(e.status)}${e.limitation ? ` (${esc(e.limitation)})` : ''}`, e.status === 'passed' ? 'ok' : 'warn'];
+    case 'publish': return [who, e.state === 'failed' ? `Publish failed (${esc(e.step)}): ${esc(e.error)}` : `Publish: ${esc(e.state)}${e.branch ? ` ${esc(e.branch)}` : ''}${e.pr ? ` — <a href="${esc(e.pr.url)}" target="_blank" rel="noopener">pull request #${e.pr.number}</a>` : ''}${e.prError ? ` — ${esc(e.prError)}` : ''}`, e.state === 'failed' || e.prError ? 'bad' : 'ok'];
+    case 'apply': return [who, e.mode === 'branch' ? `Branch exported to your repository: ${esc(e.branch)}` : e.ok ? `Applied ${e.files} file(s) to your directory` : `Apply refused: ${(e.conflicts || []).length} conflicting file(s)`, e.ok === false ? 'bad' : 'ok'];
     case 'error': return [who, esc(e.message), 'bad'];
     case 'log': return [who, esc(e.text), e.level === 'warn' ? 'warn' : ''];
     default: return [who, esc(e.type)];
@@ -525,7 +729,59 @@ function appendFeed(e, feed = $('#feed')) {
 }
 
 // Files -------------------------------------------------------------------------------------
+function filesToggle(view) {
+  return `<div class="toggle" role="group" aria-label="File view"><button data-view="changed" aria-pressed="${view === 'changed'}">Changed files</button><button data-view="all" aria-pressed="${view === 'all'}">All files</button></div>`;
+}
+function bindToggle(el, run) {
+  el.querySelectorAll('[data-view]').forEach((b) => (b.onclick = () => {
+    current.filesView = b.dataset.view;
+    renderFiles(el, run);
+  }));
+}
+
+async function renderChangedFiles(el, run) {
+  let changes;
+  try {
+    changes = await api(`api/runs/${run.id}/changes`);
+  } catch (e) {
+    el.innerHTML = `${filesToggle('changed')}<div class="card empty-state">${esc(e.message)}</div>`;
+    return bindToggle(el, run);
+  }
+  const files = changes.files;
+  if (!files.length) {
+    el.innerHTML = `${filesToggle('changed')}<div class="card empty-state">No files changed so far. The original project is untouched; edits appear here as agents work in the isolated workspace.</div>`;
+    return bindToggle(el, run);
+  }
+  if (!current.changedFile || !files.some((f) => f.path === current.changedFile)) current.changedFile = files[0].path;
+  el.innerHTML = `${filesToggle('changed')}<div class="files">
+    <ul class="card tree" aria-label="Changed files">${files.map((f) => `<li><button data-path="${esc(f.path)}" aria-current="${f.path === current.changedFile}"><span class="left"><span class="st ${esc(f.status)}">${esc(f.status)}</span><span>${esc(f.path)}</span></span><small>${f.binary ? 'binary' : `<span class="plus">+${f.additions}</span> <span class="minus">−${f.deletions}</span>`}</small></button></li>`).join('')}</ul>
+    <div class="card viewer" id="viewer"><p class="muted">Loading…</p></div></div>
+    <p class="muted mono" style="margin-top:10px">${files.length} file(s) · +${changes.additions} −${changes.deletions} against the baseline</p>`;
+  bindToggle(el, run);
+  el.querySelectorAll('[data-path]').forEach((b) => (b.onclick = () => {
+    current.changedFile = b.dataset.path;
+    el.querySelectorAll('[data-path]').forEach((x) => x.setAttribute('aria-current', String(x === b)));
+    showDiff(run.id, current.changedFile);
+  }));
+  showDiff(run.id, current.changedFile);
+}
+
+async function showDiff(id, p) {
+  const v = $('#viewer');
+  try {
+    const { diff } = await api(`api/runs/${id}/changes?path=${encodeURIComponent(p)}`);
+    const lines = diff.split('\n').map((l) => {
+      const cls = l.startsWith('+++') || l.startsWith('---') || l.startsWith('diff ') || l.startsWith('index ') ? 'meta' : l.startsWith('@@') ? 'hunk' : l.startsWith('+') ? 'add' : l.startsWith('-') ? 'del' : '';
+      return `<span class="${cls || 'ctx'}">${esc(l) || ' '}</span>`;
+    });
+    v.innerHTML = `<div class="head"><span>${esc(p)}</span><span>diff against the baseline</span></div><pre class="diff">${lines.join('') || 'No textual changes.'}</pre>`;
+  } catch (e) {
+    v.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+  }
+}
+
 async function renderFiles(el, run) {
+  if (run.source?.baseSha && (current.filesView || 'changed') === 'changed') return renderChangedFiles(el, run);
   el.innerHTML = '<p class="muted">Loading files…</p>';
   const { files } = await api(`api/runs/${run.id}/files`);
   if (!files.length) {
@@ -533,9 +789,10 @@ async function renderFiles(el, run) {
     return;
   }
   if (!current.file || !files.some((f) => f.path === current.file)) current.file = (files.find((f) => f.path === 'README.md') || files.find((f) => f.path === 'PLAN.md') || files[0]).path;
-  el.innerHTML = `<div class="files">
+  el.innerHTML = `${run.source?.baseSha ? filesToggle('all') : ''}<div class="files">
     <ul class="card tree">${files.map((f) => `<li><button data-path="${esc(f.path)}" aria-current="${f.path === current.file}"><span>${esc(f.path)}</span><small>${f.size < 1024 ? `${f.size}b` : `${(f.size / 1024).toFixed(1)}k`}</small></button></li>`).join('')}</ul>
     <div class="card viewer" id="viewer"><p class="muted">Loading…</p></div></div>`;
+  if (run.source?.baseSha) bindToggle(el, run);
   el.querySelectorAll('[data-path]').forEach((b) => (b.onclick = () => {
     current.file = b.dataset.path;
     el.querySelectorAll('[data-path]').forEach((x) => x.setAttribute('aria-current', String(x === b)));
@@ -558,6 +815,7 @@ async function showFile(id, p) {
 
 // Delivery ----------------------------------------------------------------------------------
 async function renderDelivery(el, run) {
+  if (run.delivery && run.source) return renderDeliveryExisting(el, run);
   if (!run.delivery) {
     el.innerHTML = `<div class="card empty-state"><h2>Not delivered yet</h2><p>The factory packages the code, test results and report after the completion checklist.</p></div>`;
     return;
@@ -576,6 +834,84 @@ async function renderDelivery(el, run) {
       ${run.security ? `<div class="card"><h2>Security review</h2><p>${run.security.blocking} blocking · ${run.security.findings.length} total findings</p>${run.security.findings.length ? `<ul class="plain mono">${run.security.findings.slice(0, 20).map((f) => `<li>[${esc(f.severity)}] ${esc(f.rule)} — ${esc(f.file)}:${f.line}</li>`).join('')}</ul>` : ''}</div>` : ''}
       ${run.git ? `<div class="card"><h2>Repository</h2><p>${run.git.ok ? `Pushed to ${esc(run.git.repoUrl)} (${esc(run.git.branch)})` : `Push failed: ${esc(run.git.error)}`}</p></div>` : ''}
     </div></div>`;
+}
+
+async function renderDeliveryExisting(el, run) {
+  const d = run.delivery;
+  const s = run.source;
+  const pub = d.publication;
+  const verdict = verdictOf(run);
+  const open = (run.plan?.tasks || []).filter((t) => t.status !== 'completed' && t.status !== 'skipped');
+  const report = await api(`api/runs/${run.id}/report`).catch(() => '');
+  const dl = (name, label, cls = '') => `<a class="btn ${cls}" href="api/runs/${esc(run.id)}/download/${name}">${label}</a>`;
+  const busy = run.executing;
+  el.innerHTML = `<div class="grid-2">
+    <div class="card md">${md(report)}</div>
+    <div class="stack">
+      <div class="card"><h2>Delivery <span class="pill ${d.readiness?.ready ? 'ready' : 'notready'}">${d.readiness?.ready ? 'ready for review' : 'not ready'}</span></h2>
+        <p>Implementation verification: <span class="pill ${esc(verdict)}">${esc(VERDICT_LABEL[verdict])}</span></p>
+        ${d.readiness?.reasons?.length ? `<ul class="plain">${d.readiness.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+        <p class="mono">${d.integrity?.ok ? '✓ source protection verified — the source ref and history were not modified' : `✗ source protection: ${esc((d.integrity?.problems || []).join('; '))}`}</p>
+        <table class="plain">
+          ${s.baseBranch ? `<tr><th>source branch</th><td>${esc(s.baseBranch)} @ ${esc(s.baseSha.slice(0, 12))}</td></tr>` : `<tr><th>baseline</th><td>${esc(s.baseSha.slice(0, 12))}</td></tr>`}
+          <tr><th>working branch</th><td>${esc(s.branch)}${d.commit?.sha ? ` @ ${esc(d.commit.sha.slice(0, 12))}` : ''}</td></tr>
+          <tr><th>changed files</th><td>${run.changes?.files.length ?? 0} · +${run.changes?.additions ?? 0} −${run.changes?.deletions ?? 0}</td></tr>
+        </table></div>
+      <div class="card"><h2>Downloads</h2><div class="actions">
+        ${d.patch ? dl('changes.patch', 'Patch (.patch)', 'accent') : ''}
+        ${d.archive ? dl('project.tar.gz', 'Changed files (.tar.gz)') : ''}
+        ${d.deleted ? dl('DELETED_FILES.txt', 'Deleted files') : ''}
+        ${dl('FACTORY_REPORT.md', 'Factory report')}
+        ${dl('test-results.json', 'Test results')}
+      </div></div>
+      ${open.length ? `<div class="card escalation"><h3>Unresolved tasks</h3><ul class="plain">${open.map((t) => `<li><b>${esc(t.id)}</b> — ${esc(t.status)}${t.escalation?.reason || t.error ? `: ${esc(t.escalation?.reason || t.error)}` : ''}</li>`).join('')}</ul><p class="muted">Resolve them from the Overview tab (retry, edit or skip).</p></div>` : ''}
+      ${verificationCard(run)}
+      ${s.mode === 'github' ? `<div class="card" id="pub-card"><h2>GitHub</h2>
+        <p>${pub ? `Publication: <span class="pill ${pub.state === 'failed' ? 'failed' : pub.state === 'nothing-to-publish' ? 'skipped' : 'completed'}">${esc(pub.state)}</span>` : s.publish ? 'Publishing was enabled for this run.' : 'Not published. Pushing and opening a pull request are explicit actions.'}</p>
+        ${pub?.error ? `<p class="form-error">${esc(pub.error)}</p>` : ''}${pub?.prError ? `<p class="form-error">${esc(pub.prError)}</p>` : ''}
+        ${pub?.pr ? `<p><a class="btn accent" href="${esc(pub.pr.url)}" target="_blank" rel="noopener">Pull request #${pub.pr.number}${pub.pr.draft ? ' (draft)' : ''} ↗</a></p>` : ''}
+        ${pub?.branch ? `<p class="mono">pushed ${esc(pub.branch)}${pub.sha ? ` @ ${esc(pub.sha.slice(0, 12))}` : ''}</p>` : ''}
+        <div class="actions"><button class="btn ${pub?.pr ? '' : 'accent'}" data-pub="pr" ${busy || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>${pub?.state === 'failed' || pub?.prError ? 'Retry: push &amp; open pull request' : pub?.pr ? 'Re-run publish (idempotent)' : 'Push branch &amp; open pull request'}</button>
+        <button class="btn" data-pub="push" ${busy || !config.projects?.canPublish || !d.integrity?.ok || !run.changes?.files.length ? 'disabled' : ''}>Push branch only</button></div>
+        ${config.projects?.canPublish ? '<p class="muted">Pushes only the run branch (never forced, never the base branch). Opens a draft PR unless everything is verified.</p>' : '<p class="muted">Set GITHUB_TOKEN on the server to enable pushing.</p>'}
+      </div>` : `<div class="card" id="local-card"><h2>Your directory</h2>
+        ${d.local?.applied ? `<p class="mono">✓ applied ${d.local.applied.files.length} file(s) to the source directory (nothing staged or committed)</p>` : ''}
+        ${d.local?.branch ? `<p class="mono">✓ branch <b>${esc(d.local.branch.branch)}</b> added to your repository (nothing checked out)</p>` : ''}
+        <ul class="conflicts" id="conflicts" hidden></ul>
+        <p class="muted">Nothing was written to your directory during the run. Apply only if no file the run changed has changed in your directory since it started; otherwise nothing is written.${s.readOnly ? ' This directory is in a read-only root, so use the patch.' : ''}</p>
+        <div class="actions"><button class="btn accent" data-apply="working-tree" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Apply to my directory</button>
+        ${s.workingMode === 'clone' ? `<button class="btn" data-apply="branch" ${busy || s.readOnly || !run.changes?.files.length || !d.integrity?.ok ? 'disabled' : ''}>Add as a branch in my repository</button>` : ''}</div>
+      </div>`}
+      ${run.outputDir ? `<div class="card"><h2>Project folder</h2>${d.output?.ok ? `<p>Full resulting project exported to <code>${esc(run.outputDir)}</code> (a new folder; your source was not touched).</p>` : `<p class="form-error">Could not export to <code>${esc(run.outputDir)}</code>: ${esc(d.output?.error || 'not delivered')}.</p>`}</div>` : ''}
+      ${run.security ? `<div class="card"><h2>Security review <span class="muted mono">changed files</span></h2><p>${run.security.blocking} blocking · ${run.security.findings.length} total findings</p>${run.security.findings.length ? `<ul class="plain mono">${run.security.findings.slice(0, 20).map((f) => `<li>[${esc(f.severity)}] ${esc(f.rule)} — ${esc(f.file)}:${f.line}</li>`).join('')}</ul>` : ''}</div>` : ''}
+    </div></div>`;
+  el.querySelectorAll('[data-pub]').forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try {
+      current.run = (await api(`api/runs/${run.id}/publish`, { method: 'POST', body: JSON.stringify({ pullRequest: b.dataset.pub === 'pr' }) })).run;
+      const pb = current.run.delivery?.publication;
+      toast(pb?.state === 'failed' ? `Publish failed: ${pb.error}` : pb?.prError ? `Pushed, but: ${pb.prError}` : pb?.pr ? 'Pull request ready' : 'Branch pushed');
+    } catch (e) {
+      toast(e.message);
+    }
+    renderRun();
+  }));
+  el.querySelectorAll('[data-apply]').forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try {
+      current.run = (await api(`api/runs/${run.id}/apply`, { method: 'POST', body: JSON.stringify({ mode: b.dataset.apply }) })).run;
+      toast(b.dataset.apply === 'branch' ? 'Branch added to your repository' : 'Applied to your directory');
+      renderRun();
+    } catch (e) {
+      toast(e.message);
+      const list = $('#conflicts');
+      if (e.body?.conflicts?.length && list) {
+        list.hidden = false;
+        list.innerHTML = e.body.conflicts.map((c) => `<li>${esc(c.path)} — ${esc(c.reason)}</li>`).join('');
+      }
+      b.disabled = false;
+    }
+  }));
 }
 
 // Minimal, safe markdown renderer (escapes first).

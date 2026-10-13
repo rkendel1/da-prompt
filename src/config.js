@@ -3,6 +3,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+function paths(name) {
+  return (process.env[name] || '')
+    .split(path.delimiter)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => path.resolve(p));
+}
+
 function int(name, fallback) {
   const v = Number.parseInt(process.env[name] ?? '', 10);
   return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -41,6 +49,18 @@ export function loadConfig(overrides = {}) {
     maxPreviews: int('FACTORY_MAX_PREVIEWS', 5),
     password: process.env.FACTORY_PASSWORD || '',
     githubToken: process.env.GITHUB_TOKEN || '',
+    // Existing projects. A browser can never supply a filesystem path: local projects are chosen from
+    // directories under these server-side roots (path-delimiter separated). Roots are read/write
+    // (results may be applied back after review); "read-only" roots can be inspected and used as a
+    // source, but nothing is ever written back to them.
+    projectRoots: paths('FACTORY_PROJECT_ROOTS'),
+    projectRootsReadOnly: paths('FACTORY_PROJECT_ROOTS_READONLY'),
+    // Git hosts a GitHub-backed run may clone from (GitHub Enterprise: add its host). GITHUB_TOKEN is only
+    // ever sent to these hosts. The REST API base defaults to api.github.com / https://<host>/api/v3.
+    gitHosts: (process.env.FACTORY_GIT_HOSTS || 'github.com').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
+    githubApiUrl: process.env.FACTORY_GITHUB_API_URL || '',
+    // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).
+    gitConfig: [],
   };
   return { ...cfg, ...overrides, defaults: { ...cfg.defaults, ...(overrides.defaults || {}) } };
 }
