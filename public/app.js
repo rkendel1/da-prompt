@@ -1,5 +1,6 @@
 // da-prompt factory UI. No framework: hash routing, fetch, EventSource.
 import { mountModelPicker, renderProvidersPage } from './providers.js';
+import { renderTerminalPage } from './terminal.js';
 import { renderSetupPage, renderSettingsPage, renderPaxPage, renderHistoryPage, renderEvidence, refreshHealthDot, loadHealth } from './ops.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -88,7 +89,9 @@ async function refreshRuns() {
 }
 
 // ── Router ──────────────────────────────────────────────────────────────────────────────────
+let pageCleanup = null;
 function route() {
+  if (pageCleanup) { try { pageCleanup(); } catch { /* ignore */ } pageCleanup = null; }
   const full = location.hash.replace(/^#/, '') || '/';
   const [hash, query = ''] = full.split('?');
   const params = new URLSearchParams(query);
@@ -106,6 +109,9 @@ function route() {
   } else if (hash === '/settings') {
     current = null;
     renderSettingsPage(main, api, { toast, group: params.get('group') });
+  } else if (hash === '/terminal') {
+    current = null;
+    renderTerminalPage(main, api, { toast }).then((c) => { if (location.hash.replace(/^#/, '').split('?')[0] === '/terminal') pageCleanup = c; else c(); });
   } else if (hash === '/pax') {
     current = null;
     renderPaxPage(main, api, { toast });

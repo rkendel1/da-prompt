@@ -21,7 +21,9 @@ export function loadConfig(overrides = {}) {
   const cfg = {
     root: ROOT,
     port: int('PORT', 3000),
-    host: process.env.HOST || '0.0.0.0',
+    // Loopback unless you have set an access password (the secured remote-access configuration) or chosen a host.
+    // Containers set HOST=0.0.0.0 explicitly.
+    host: process.env.HOST || (process.env.FACTORY_PASSWORD ? '0.0.0.0' : '127.0.0.1'),
     dataDir: path.resolve(process.env.FACTORY_DATA_DIR || path.join(ROOT, 'data')),
     // Optional: force a default provider/model. Otherwise the factory picks the first provider
     // that is ready (a configured key, or a local server such as Ollama that is running) and
@@ -65,6 +67,14 @@ export function loadConfig(overrides = {}) {
     paxTimeoutMs: int('FACTORY_PAX_TIMEOUT_MS', 120_000),
     paxAutoRun: false,
     paxSteps: ['info', 'doctor', 'reality', 'drift'],
+    // Embedded terminal (a host shell for the authenticated local user; see src/terminal.js).
+    terminalEnabled: process.env.FACTORY_TERMINAL !== '0',
+    terminalShell: process.env.FACTORY_TERMINAL_SHELL || '',
+    terminalPython: process.env.FACTORY_TERMINAL_PYTHON || '',
+    terminalMaxSessions: int('FACTORY_TERMINAL_MAX_SESSIONS', 8),
+    terminalBufferBytes: int('FACTORY_TERMINAL_BUFFER_BYTES', 1_048_576),
+    terminalIdleMs: Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS ?? '', 10) >= 0 ? Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS, 10) : 30 * 60_000,
+    terminalExitedKeepMs: int('FACTORY_TERMINAL_EXITED_KEEP_MS', 10 * 60_000),
     // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).
     gitConfig: [],
   };

@@ -233,6 +233,55 @@ review → apply`, then validated with plain npm. Read [`docs/selfhost/README.md
 real and what was a stand-in (no real model credentials were available, so a scripted OpenAI-compatible server played the
 model).
 
+## Embedded terminal
+
+The **Terminal** page (`#/terminal`, in the sidebar) is an integrated developer terminal: real shells on a real pseudo-terminal, rendered by xterm.js (the emulator VS Code's terminal uses), on the machine that runs the da-prompt backend. It is **not** an agent, not routed through any model, provider, Chip/AppPort/FeltDB, PAX or run orchestration, and works when all of them are broken, so you can open it and repair da-prompt itself.
+
+What you get: multiple sessions in tabs, each started in an authorized project; the shell's own history (↑/↓), editing, completion and job control; copy/paste/selection/scrollback; Ctrl-C and an Interrupt button; resize; the shell's current directory (with an *outside project* marker); running / exited (with the exit status) / reconnecting / disconnected / closed states; sessions that survive a browser refresh; **Check tools**, which shows what a login shell finds for `git node npm python3 cargo rustc ollama pax make`.
+
+### Security model (read this)
+
+A terminal runs your login shell **with the permissions of the user who started da-prompt**. It can read, change and delete anything that user can, and run anything installed. A project root is a *starting directory*, **not a sandbox**: after it starts, `cd`, absolute paths and child processes reach the rest of the filesystem. The page says so and shows when the shell has left the project. The security boundary is *who may open a terminal*, not what the shell can touch:
+
+| Boundary | Behaviour |
+| --- | --- |
+| Who | Only an authenticated request (access password) or a browser **on the server machine** (loopback, not relayed by a proxy — the same rule as host-level settings). Everything else gets 403, including a LAN browser to an unprotected server. The terminal can be removed entirely (`FACTORY_TERMINAL=0` or Settings → Server). |
+| Every call | Create, attach (stream), input, resize, signal, close, list: each re-checks the above and that the session belongs to the caller's principal. Unknown, malformed and foreign ids return the same 404. |
+| Session ids | 192 random bits (`crypto.randomBytes(24)`); a capability, never an index; never logged. |
+| Browser attacks | Requests with a foreign `Origin` or `Sec-Fetch-Site: cross-site` are refused (CSRF); on an unprotected server the `Host` must be `localhost`/`127.0.0.1`/`[::1]` (DNS rebinding). |
+| Start directory | The browser sends an opaque `directoryId` from the authorized list; the server resolves it (symlink-escape, traversal and the data directory are refused). Read-only roots are refused — a shell cannot honour "read-only". A path in the request is ignored. |
+| Injection | No shell string is ever built: the PTY helper receives `argv` as an array; input is raw bytes written to the PTY (a 64 KiB cap per message). |
+| Secrets | The shell inherits the backend's environment minus `FACTORY_PASSWORD`/`DA_PROMPT_PASSWORD` (it is *your* shell: variables you exported for the backend, such as provider keys, are visible to it). No environment is ever sent to the browser; terminal input/output is never logged by the server; errors go through `redact()`; the session is not persisted. |
+| Resource limits | At most 8 sessions (`FACTORY_TERMINAL_MAX_SESSIONS`), 1 MiB of retained output per session, output flood-safe (below), idle and abandoned-session cleanup. No CPU/memory quotas on what the shell runs: use a container for that. |
+| Transport | HTTP. With a password, credentials and terminal traffic are cleartext unless you put TLS in front (reverse proxy). Prefer `127.0.0.1` (the default when no password is set; the CLI starts the backend there) and an SSH tunnel for remote use. |
+
+### Architecture and lifecycle
+
+```
+xterm.js ──POST /input /resize /signal──▶ server.js (/api/terminal, guards) ──▶ TerminalManager (src/terminal.js)
+   ▲                                                                                  │ stdin/fd3 ▲ stdout/fd4
+   └────── SSE /stream?after=<byte offset> (data · state · truncated) ◀─ ring buffer ◀─ src/terminal-pty.py ── PTY ── $SHELL -l
+```
+
+* **PTY.** Node has no pseudo-terminal and this repository has no native dependencies, so a ~250-line Python 3 helper (standard library only, `os.forkpty`) owns the PTY, runs the shell as a session leader with a controlling TTY (so prompts, job control, `Ctrl-C`, `stty`, `[ -t 0 ]` and programs that need a TTY work; full-screen programs such as `vim` or `top` run on the same TTY but were not part of the automated tests) and relays bytes. Python 3 ships with the Xcode command line tools on macOS and with most Linux hosts; without it the page says so and how to fix it (`xcode-select --install`) — there is deliberately no fake non-TTY fallback.
+* **Transport.** The repository's existing mechanism: server-sent events for output (resumable by **byte offset**, so a reconnect continues exactly where it stopped, with no duplication) and small JSON POSTs for input, resize and signals. No WebSocket dependency.
+* **Session lifecycle.** create → attach (stream) → detach (browser closes/refreshes: the shell keeps running) → reattach (`after=<offset>` or from the start of the retained buffer) → close. Exited sessions stay readable for 10 minutes (`FACTORY_TERMINAL_EXITED_KEEP_MS`).
+* **Backpressure and limits.** Output goes into a bounded ring (`FACTORY_TERMINAL_BUFFER_BYTES`, default 1 MiB); a client that is slower than the shell is skipped forward and told (`truncated`), a client that never reads only costs its own socket; the shell is never blocked by a browser. Input is delivered in order, batched while a request is in flight.
+* **Cleanup (no orphans).** *Close* hangs the shell up, then kills everything in its process tree (descendants snapshotted from `ps`, plus every process in its login session, with SIGKILL after a 2 s grace; processes that ignore SIGHUP/SIGTERM are killed). *Server shutdown* closes every session. If the backend dies hard (SIGKILL, crash) the helper sees its control pipe close and takes the shell and its tree down. A session with no browser attached for 30 minutes (`FACTORY_TERMINAL_IDLE_MS`; `0` disables) is closed as abandoned. When the shell exits by itself, whatever is left in its session is killed. **Limit:** a process that deliberately daemonizes (`setsid` + parent exits) leaves the session and tree and is not tracked.
+* **Working directory.** Shown live (`/proc/<pid>/cwd` on Linux, `lsof` on macOS). Navigation is the shell's; nothing switches directories for you. A deleted/moved project directory is reported at create time ("it was deleted or moved") and nothing is started.
+
+### Environment on macOS (and everywhere)
+
+Shells are started as **login shells** (`$SHELL -l`, else the account's shell, else `/bin/zsh` on macOS, `/bin/bash` elsewhere), so they read the same startup files a Terminal.app window does (zsh: `/etc/zprofile` → `path_helper`, `~/.zprofile`, `~/.zshrc`). That is how a terminal finds Homebrew (`/opt/homebrew/bin`), `cargo` (`~/.cargo/bin`), `ollama`, `pax`, even when da-prompt was launched from the Dock/launchd with a minimal PATH (the GUI-vs-terminal difference). **Check tools** reports what a login shell finds and which PATH folders only it adds; da-prompt **never edits** `.zshrc`, `.zprofile`, `.bash_profile` or any shell file. Tools added to PATH only in files the shell does not read are not found — the page says where to put them. Override the shell with `FACTORY_TERMINAL_SHELL=/bin/bash`, the Python with `FACTORY_TERMINAL_PYTHON`.
+
+### Settings
+
+`FACTORY_TERMINAL=0` (or Settings → Server → *Embedded terminal*), `FACTORY_TERMINAL_SHELL`, `FACTORY_TERMINAL_PYTHON`, `FACTORY_TERMINAL_MAX_SESSIONS` (8), `FACTORY_TERMINAL_BUFFER_BYTES` (1048576), `FACTORY_TERMINAL_IDLE_MS` (1800000), `FACTORY_TERMINAL_EXITED_KEEP_MS` (600000).
+
+### Limitations
+
+Needs Python 3 on the backend host; POSIX only (no Windows); the `lsof`-based directory display on macOS and the macOS login-shell PATH behaviour are implemented from documentation but were **not run on macOS** in development (the automated and manual tests ran on Linux); sessions do not survive a backend restart (they are shells, not tmux); only one principal (the password holder / the local user); no shell-integration markers (command boundaries), file upload/download, split panes or search; the scrollback replayed after a refresh is at most the last 1 MiB; terminal bytes are not scrubbed for secrets (that is the shell's output, shown to you only).
+
 ## Using da-prompt from the browser
 
 Everything routine is done in the web UI; no editor, terminal or CLI is needed after the server is running.
@@ -241,6 +290,7 @@ Everything routine is done in the web UI; no editor, terminal or CLI is needed a
 | --- | --- |
 | **New run** (`#/`) | Pick a project (new, authorized local folder, GitHub repo), describe the change, choose models, review the *"what this run may do"* summary, start. |
 | **Run view** | Follow the seven layers and the Connect/Inspect/Baseline stages live (it reconnects by itself after a refresh or a network blip), cancel, resume, retry/skip escalated tasks. Tabs: Overview, Task graph, Activity, Files (changed files + diff), **Evidence**, Delivery. |
+| **Terminal** (`#/terminal`) | A real shell in a project folder — see [Embedded terminal](#embedded-terminal). Works with no provider, no PAX and no agent. |
 | **History** (`#/history`) | Every run on record, searchable by task, project, id, model; filter by status, project type and verification. |
 | **Setup & health** (`#/setup`) | First-run checklist and ongoing health. Every line is a real probe, with what was observed and the next step. |
 | **Settings** (`#/settings`) | The supported configuration, saved on the server, with the source of each value. |
@@ -636,7 +686,7 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 | `FACTORY_OUTPUT_ROOT` | — | Confine run output folders to this directory (relative names resolve inside it) |
 | `FACTORY_MAX_OUTPUT_TOKENS` | `8192` | Max tokens per model reply |
 | `FACTORY_HIDE_OFFLINE` | — | `1` hides the offline demo agents |
-| `PORT` / `HOST` | `3000` / `0.0.0.0` | Server address |
+| `PORT` / `HOST` | `3000` / `127.0.0.1` (`0.0.0.0` when `FACTORY_PASSWORD` is set; the Docker image sets `0.0.0.0`) | Server address |
 | `FACTORY_DATA_DIR` | `./data` | Runs, workspaces, deliveries |
 | `FACTORY_PASSWORD` | — | HTTP basic auth for the whole server |
 | `FACTORY_MAX_PARALLEL` | `3` | Default parallel agents |

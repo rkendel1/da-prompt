@@ -34,3 +34,8 @@ verification/feedback loop, completion checklist and delivery, with a web UI.
 - `node --check` treats `.js` as CommonJS when no `package.json` with `"type":"module"` is above it; fixtures that test `scripts/check.mjs` need one.
 - The factory's per-command timeout (`commandTimeoutMs`, 3 min) is shorter than this repo's full `npm test`; when da-prompt works on itself raise it (`da-prompt config set commandTimeoutMs 900000`) or the baseline `npm test` reports a timeout.
 - In CLI tests, `main()` reads `io.env`/`io.cfg`; state helpers must be passed `ctx.env` (a `writeState()` without it wrote to the real HOME once).
+- Terminal (`src/terminal.js`, `src/terminal-pty.py`, `public/terminal.js`, `/api/terminal`): a privileged host-shell feature. Never route it through agents/providers/runs; never build a shell string (argv arrays + raw PTY bytes); keep every route behind `terminalGuard` (admin + Origin/Host checks) and the session principal; never log or persist terminal I/O or environment.
+- Terminal tests: the typed command line is echoed by the PTY, so wait for output with a leading newline (`/\nMARK/`), not for the bare word. Use `/bin/bash` in UI tests (dash has no history); a test must never leave `sleep` children behind (they keep the test runner's pipes open and the run hangs).
+- `req.on('close')` does not fire for a dead socket once the request body was read; SSE cleanup must also listen on `res`.
+- `npm test` preloads `test/setup-env.cjs`, which strips FACTORY_*/DA_PROMPT_*/PORT/HOST/keys/tokens from the environment (except `DA_PROMPT_PAX_BIN`).
+
