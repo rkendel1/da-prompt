@@ -294,6 +294,7 @@ test('a run with PAX: live progress, evidence kept apart from verification, arti
   assert.equal(body.command, 'info');
   assert.ok(!(await page.content()).includes(main.app.store.workspaceDir(id)), 'no host path in the page');
   // collect more evidence from the browser; the test step needs an explicit confirmation
+  await page.waitForSelector('#pax-run fieldset:not([disabled])', { timeout: 60_000 }); // the form is disabled while the backend still counts the run as executing (a race under load)
   await page.check('#pax-run input[value=test]');
   page.once('dialog', (d) => { assert.match(d.message(), /native tests through PAX/); d.accept(); });
   await page.click('#pax-run button');

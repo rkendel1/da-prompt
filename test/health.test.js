@@ -36,7 +36,7 @@ const get = async (b, p, h = {}) => {
 const byId = (health) => Object.fromEntries(health.checks.map((c) => [c.id, c]));
 
 test('first run: nothing is configured, and the health report says exactly what is missing and how to fix it', async () => {
-  const s = await startServer();
+  const s = await startServer({ host: '0.0.0.0' }); // an explicit network-wide bind: the default is loopback (see below)
   const { status, data } = await get(s.base, '/api/system/health?refresh=1');
   assert.equal(status, 200);
   const c = byId(data);
@@ -243,3 +243,12 @@ test('the Docker/CLI liveness endpoint stays unauthenticated and minimal', async
   assert.equal((await fetch(`${s.base}/api/system/health`)).status, 401);
 });
 void OfflineProvider; void withPath; void before;
+
+test('the default listen address is loopback; only an access password (or an explicit HOST) opens it to the network', async () => {
+  const { loadConfig } = await import('../src/config.js');
+  assert.equal(loadConfig({ dataDir: tmpDir() }).host, '127.0.0.1');
+  process.env.FACTORY_PASSWORD = 'a long enough password';
+  try { assert.equal(loadConfig({ dataDir: tmpDir() }).host, '0.0.0.0'); } finally { delete process.env.FACTORY_PASSWORD; }
+  process.env.HOST = '10.1.2.3';
+  try { assert.equal(loadConfig({ dataDir: tmpDir() }).host, '10.1.2.3'); } finally { delete process.env.HOST; }
+});

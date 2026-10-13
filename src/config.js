@@ -21,7 +21,9 @@ export function loadConfig(overrides = {}) {
   const cfg = {
     root: ROOT,
     port: int('PORT', 3000),
-    host: process.env.HOST || '0.0.0.0',
+    // Loopback unless you have set an access password (the secured remote-access configuration) or chosen a host.
+    // Containers set HOST=0.0.0.0 explicitly.
+    host: process.env.HOST || (process.env.FACTORY_PASSWORD ? '0.0.0.0' : '127.0.0.1'),
     dataDir: path.resolve(process.env.FACTORY_DATA_DIR || path.join(ROOT, 'data')),
     // Optional: force a default provider/model. Otherwise the factory picks the first provider
     // that is ready (a configured key, or a local server such as Ollama that is running) and

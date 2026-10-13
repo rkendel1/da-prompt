@@ -186,7 +186,7 @@ test('check and build run with no backend, no config and no network, and report 
   assert.equal(build.code, 0, build.out + build.err);
   const b = JSON.parse(build.out);
   assert.equal(b.ok, true);
-  assert.deepEqual(b.steps.map((s) => s.name), ['static checks', 'package contents', 'required files present in package', 'bin entry', 'cli --help', 'cli --version', 'modules import cleanly']);
+  assert.deepEqual(b.steps.map((s) => s.name), ['static checks', 'package contents', 'required files present in package', 'bin entry', 'cli --help', 'cli --version', 'terminal PTY helper', 'modules import cleanly']);
   assert.equal(record(e), null, 'no backend was involved');
 });
 
