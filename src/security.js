@@ -84,3 +84,27 @@ export function redact(text) {
     .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
     .replace(/(x-api-key["']?\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***');
 }
+
+/**
+ * Remove the exact values of known credentials from text, plus a cut-off copy of one at either end of the text: upstream
+ * truncation (a provider error body sliced to N characters) can leave only the first or last characters of a key, which
+ * redact() cannot recognise by shape. Values shorter than 8 characters are ignored (too likely to match ordinary text).
+ */
+export function hideSecretValues(text, secrets = []) {
+  let s = String(text ?? '');
+  for (const v of secrets) {
+    if (typeof v !== 'string' || v.length < 8) continue;
+    s = s.split(v).join('***');
+    for (let k = v.length - 1; k >= 6; k--) {
+      if (s.endsWith(v.slice(0, k))) {
+        s = `${s.slice(0, -k)}***`;
+        break;
+      }
+      if (s.startsWith(v.slice(-k))) {
+        s = `***${s.slice(k)}`;
+        break;
+      }
+    }
+  }
+  return s;
+}
