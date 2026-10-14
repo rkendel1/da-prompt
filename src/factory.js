@@ -9,6 +9,9 @@ import { Workspace } from './sandbox.js';
 import { normalizeInputs } from './prompt.js';
 import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from './graph.js';
 import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
+import { detectCapabilities, checkOutput, validateArtifact, checkTaskContracts, outputKind } from './capabilities.js';
+import { InferenceLimiter, limitProvider } from './inference.js';
+import { STOP_KINDS, isTransient, failureFingerprint, buildFeedback, taskOutcomes } from './recovery.js';
 import { scanWorkspace, redact, existingProjectPolicy, hideSecretValues } from './security.js';
 import { runGit, scrubPaths } from './gitutil.js';
 import {
@@ -22,7 +25,7 @@ import crypto from 'node:crypto';
 import { ProviderRegistry } from './providers/registry.js';
 import { ENGINE_IDS, checkProvider, loadEngineModule } from './engines/index.js';
 import { makeFxRunner } from './engines/fx.js';
-import { RunDiagnostics, instrumentProvider } from './diagnostics.js';
+import { RunDiagnostics, instrumentProvider, failureKind, readRecords, buildRunMetrics } from './diagnostics.js';
 import { contractWarnings } from './contract.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
@@ -38,6 +41,7 @@ export class Factory {
     this.store = store;
     this.previews = previews;
     this.active = new Map(); // runId -> { controller, promise }
+    this.limiters = new Map(); // local inference endpoint -> InferenceLimiter (shared by every run that uses that endpoint)
     this.providers = new ProviderRegistry(cfg);
     // cfg.providerFactory lets tests inject a provider instance.
     this.makeProvider = (run) =>
@@ -127,6 +131,9 @@ export class Factory {
       tokenBudget: clamp(s.tokenBudget, 10_000, 50_000_000, d.tokenBudget),
       timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, 120),
       commandTimeoutMs: d.commandTimeoutMs,
+      // Recovery: one task may spend this long in total, and stops early when the same failure repeats this many times in a row.
+      taskDeadlineMinutes: clamp(s.taskDeadlineMinutes, 1, 24 * 60, d.taskDeadlineMinutes),
+      maxRepeatedFailures: clamp(s.maxRepeatedFailures, 1, 5, d.maxRepeatedFailures),
       // Existing projects are never deployed unless the request explicitly authorizes a local preview.
       deploy: existing ? s.deploy === true : s.deploy !== false,
       // PAX evidence is opt-in per run (default from Settings). The steps are fixed at creation so a run is reproducible.
@@ -214,6 +221,10 @@ export class Factory {
     if (Number(o.numCtx) > 0) options.numCtx = Math.max(2048, Math.min(1_048_576, Math.round(Number(o.numCtx))));
     if (o.temperature !== undefined && o.temperature !== '' && Number.isFinite(Number(o.temperature))) options.temperature = Math.max(0, Math.min(2, Number(o.temperature)));
     if (['auto', 'native', 'json'].includes(o.toolMode)) options.toolMode = o.toolMode;
+    // Ollama-only request options; other providers ignore them (see the settings table in src/contract.js).
+    if (typeof o.keepAlive === 'string' ? /^(-1|\d+(ms|s|m|h)?)$/.test(o.keepAlive.trim()) : Number.isFinite(o.keepAlive)) options.keepAlive = typeof o.keepAlive === 'string' ? o.keepAlive.trim() : o.keepAlive;
+    if (o.seed !== undefined && o.seed !== '' && Number.isInteger(Number(o.seed))) options.seed = Number(o.seed);
+    if (o.topP !== undefined && o.topP !== '' && Number.isFinite(Number(o.topP))) options.topP = Math.max(0, Math.min(1, Number(o.topP)));
     return { provider: providerId, label: spec.label, type: spec.type, model: model || 'default', options };
   }
 
@@ -273,7 +284,7 @@ export class Factory {
       ...old.inputs,
       provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
       planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps },
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, taskDeadlineMinutes: s.taskDeadlineMinutes, maxRepeatedFailures: s.maxRepeatedFailures, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps },
       source,
     });
   }
@@ -341,6 +352,8 @@ export class Factory {
         maxAgentTurns: clamp(s.maxAgentTurns, 2, 200, cur.maxAgentTurns),
         tokenBudget: clamp(s.tokenBudget, 10_000, 50_000_000, cur.tokenBudget),
         timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, cur.timeoutMinutes),
+        taskDeadlineMinutes: clamp(s.taskDeadlineMinutes, 1, 24 * 60, cur.taskDeadlineMinutes ?? this.cfg.defaults.taskDeadlineMinutes),
+        maxRepeatedFailures: clamp(s.maxRepeatedFailures, 1, 5, cur.maxRepeatedFailures ?? this.cfg.defaults.maxRepeatedFailures),
         ...(typeof s.deploy === 'boolean' ? { deploy: s.deploy } : {}),
       };
       set('settings', next);
@@ -412,6 +425,7 @@ export class Factory {
       if (t.status === 'blocked' || t.status === 'cancelled' || t.status === 'running') {
         t.status = 'pending';
         delete t.blockedBy;
+        delete t.blockedReason; // capabilities are checked again when the run starts
       }
     }
     await this.store.save(run);
@@ -439,11 +453,14 @@ export class Factory {
     task.attemptBase = task.attempts.length; // fresh budget of attempts
     delete task.escalation;
     delete task.error;
+    delete task.failure;
+    delete task.blockedReason;
     for (const d of dependentsOf(run.plan.tasks, taskId)) {
       const t = run.plan.tasks.find((x) => x.id === d);
       if (t.status === 'blocked') {
         t.status = 'pending';
         delete t.blockedBy;
+        delete t.blockedReason;
       }
     }
     await this.store.save(run);
@@ -486,8 +503,12 @@ export class Factory {
     const rawPlanner = this.makePlannerProvider(run);
     // Observation only (src/diagnostics.js): times each model call and run phase; it cannot change what the call returns.
     const diag = new RunDiagnostics({ dir: this.store.runDir(id), runId: id, engine: run.engine || 'builtin', secrets: () => [rawProvider.apiKey, rawPlanner.apiKey, this.cfg.githubToken, this.cfg.password] });
-    const provider = instrumentProvider(rawProvider, diag, 'agent');
-    const plannerProvider = instrumentProvider(rawPlanner, diag, 'planner');
+    // Order matters: the diagnostics wrapper is outermost, so a call's recorded duration includes any wait for a generation slot,
+    // and the limiter (inner) reports that wait and the server's own load/generation timings on the reply.
+    const provider = instrumentProvider(this.limited(rawProvider, run.provider), diag, 'agent');
+    const plannerProvider = instrumentProvider(this.limited(rawPlanner, run.plannerProvider || run.provider), diag, 'planner');
+    const caps = detectCapabilities(this.cfg, { engine: run.engine || 'builtin' });
+    emit('capabilities', Object.fromEntries(Object.entries(caps).map(([k, v]) => [k, v.available ? { available: true } : { available: false, reason: v.reason }])));
     const layer = async (name, state) => {
       if (run.layers[name] === state) return;
       run.layers[name] = state;
@@ -523,7 +544,9 @@ export class Factory {
         await layer('plan', 'active');
         const desc = plannerProvider.describe();
         emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
-        const plan = await runPlanner({ provider: plannerProvider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
+        const planStart = Date.now();
+        const plan = await runPlanner({ provider: plannerProvider, run, signal, track, caps, log: (text) => emit('log', { level: 'warn', text }) });
+        run.planningMs = Date.now() - planStart;
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));
         run.plan = plan;
@@ -531,6 +554,8 @@ export class Factory {
         await save();
         await this.writePlanArtifacts(run, existing ? notes : ws);
         emit('plan', { tasks: plan.tasks.length, levels: Math.max(...Object.values(depth)) + 1 });
+        for (const text of plan.warnings || []) emit('log', { level: 'warn', text });
+        for (const text of plan.adjustments || []) emit('log', { level: 'warn', text: `Plan adjusted: ${text}` });
         await layer('plan', 'done');
       }
 
@@ -542,7 +567,7 @@ export class Factory {
       // ── Execution loop (layers 3–6) ───────────────────────────────────────────────────────
       await setStatus('running');
       await layer('execution', 'active');
-      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer, diag });
+      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer, diag, caps });
       if (signal.aborted) throw signal.reason || new Error('cancelled');
       const tasks = run.plan.tasks;
       const allDone = tasks.every((t) => DONE_STATES.has(t.status));
@@ -579,6 +604,7 @@ export class Factory {
         run.git = await pushToGit(ws, { repoUrl: run.repoUrl, token: this.cfg.githubToken, message: `${run.plan.product.name}: built by da-prompt factory run ${run.id}` });
         emit('git', run.git);
       }
+      this.collectMetrics(run);
       await save();
       emit('deliver', run.delivery);
       emit('run.status', { status: run.status });
@@ -589,6 +615,7 @@ export class Factory {
       run.error = this.hideSecrets(existing ? this.scrub(run, reason) : redact(reason));
       run.finishedAt = new Date().toISOString();
       run.status = cancelled ? 'cancelled' : err instanceof BudgetError ? 'needs_attention' : 'failed';
+      this.collectMetrics(run);
       await save();
       emit('error', { message: run.error });
       emit('run.status', { status: run.status });
@@ -598,29 +625,87 @@ export class Factory {
     return run;
   }
 
+  /**
+   * Local inference is shared by every run on the same endpoint: wrap the provider so at most `maxLocalInference` generations
+   * run at once there. Cloud providers keep their own limits (maxParallel); an offline or unknown provider is left alone.
+   */
+  limited(raw, providerId) {
+    let key = null;
+    try {
+      const spec = this.providers.get(providerId);
+      if (spec.type !== 'offline' && (spec.local || spec.type === 'ollama')) key = String(spec.baseUrl);
+    } catch {
+      /* an injected provider has no registry entry */
+    }
+    if (!key && raw?.local === true) key = `injected:${providerId}`;
+    if (!key) return raw;
+    const max = this.cfg.defaults.maxLocalInference || 1;
+    let limiter = this.limiters.get(key);
+    if (!limiter || limiter.max !== max) this.limiters.set(key, (limiter = new InferenceLimiter(max)));
+    return limitProvider(raw, limiter);
+  }
+
+  /** Run-level accounting kept on the run record (observation only; it never feeds a decision). */
+  collectMetrics(run) {
+    try {
+      run.metrics = buildRunMetrics(run, readRecords(this.store.runDir(run.id)), [...this.limiters.entries()].map(([endpoint, l]) => ({ endpoint: endpoint.replace(/^https?:\/\//, ''), ...l.snapshot() })), taskOutcomes(run.plan?.tasks || []));
+    } catch {
+      /* metrics must never fail a run */
+    }
+  }
+
+  /** Mark tasks that promise something no available tool can produce as blocked, with the capability reason. Nothing is weakened. */
+  async blockCapabilityGaps(run, { caps, save, emit }) {
+    const { gaps } = checkTaskContracts({ tasks: run.plan.tasks }, caps);
+    for (const t of run.plan.tasks) {
+      const own = [...gaps.filter((g) => g.taskId === t.id)];
+      for (const c of t.capabilities || []) {
+        const cap = c === 'render_screenshot' ? caps.browser_render : c === 'generate_image' ? caps.image_generation : null;
+        if (cap && !cap.available) own.push({ capability: c, reason: `${c} is required but not available: ${cap.reason}` });
+      }
+      if (!own.length || t.status !== 'pending') continue;
+      t.status = 'blocked';
+      t.blockedReason = { kind: 'capability', capability: own[0].capability, reason: own.map((g) => g.reason).join('; ') };
+      t.failure = { category: 'capability', kind: 'capability', reason: t.blockedReason.reason };
+      emit('task', { taskId: t.id, status: 'blocked', reason: t.blockedReason.reason, category: 'capability' });
+    }
+    await save();
+  }
+
   async executionLoop(run, ctx) {
     const { signal, save, emit } = ctx;
     const running = new Map();
+    const runningTasks = new Map();
     const tasks = run.plan.tasks;
+    if (ctx.caps) await this.blockCapabilityGaps(run, ctx);
     while (!signal.aborted) {
       const blocked = propagateBlocked(tasks);
       if (blocked.length) {
         await save();
         for (const b of blocked) emit('task', { taskId: b, status: 'blocked', blockedBy: tasks.find((t) => t.id === b).blockedBy });
       }
+      // Two tasks never write the same declared output at the same time (the planner is told this too; this is the runtime guarantee).
+      const held = new Set([...runningTasks.values()].flatMap((t) => t.outputs || []));
       for (const t of readyTasks(tasks)) {
         if (running.size >= run.settings.maxParallel) break;
+        if ((t.outputs || []).some((o) => held.has(o))) continue;
+        (t.outputs || []).forEach((o) => held.add(o));
         t.status = 'running';
+        runningTasks.set(t.id, t);
         const p = this.runTask(run, t, ctx)
           .catch(async (err) => {
             if (err instanceof BudgetError || signal.aborted) throw err;
             t.status = 'escalated';
             t.error = this.hideSecrets(redact(err.message));
+            t.failure = { category: 'execution', kind: failureKind(err), reason: t.error };
             t.escalation = escalationFor(t, err.message);
             await save();
             emit('escalation', { taskId: t.id, reason: t.error, options: t.escalation.options });
           })
-          .finally(() => running.delete(t.id));
+          .finally(() => {
+            running.delete(t.id);
+            runningTasks.delete(t.id);
+          });
         running.set(t.id, p);
       }
       if (running.size === 0) break;
@@ -635,93 +720,209 @@ export class Factory {
     await Promise.allSettled(running.values());
   }
 
-  async runTask(run, task, { ws, notes = ws, provider, signal, track, emit, save, layer, diag }) {
-    const maxAttempts = run.settings.maxAttempts;
+  async runTask(run, task, { ws, notes = ws, provider, signal: runSignal, track, emit, save, layer, diag, caps }) {
+    const d = this.cfg.defaults;
+    const maxAttempts = Math.min(task.maxAttempts || run.settings.maxAttempts, run.settings.maxAttempts);
+    const repeatLimit = run.settings.maxRepeatedFailures ?? d.maxRepeatedFailures ?? 2;
+    const deadlineMs = (run.settings.taskDeadlineMinutes ?? d.taskDeadlineMinutes ?? 30) * 60_000;
     const base = task.attemptBase || 0;
-    let feedback = task.attempts.length > base ? task.attempts.at(-1).feedback : null;
+    const resumed = task.attempts.length > base ? task.attempts.at(-1) : null;
+    let feedback = resumed ? resumed.feedback : null;
+    let prevFp = resumed?.fingerprint || null;
+    let repeats = resumed?.repeats || 0;
+    let previousFailed = (resumed?.verification || []).filter((c) => !c.ok).map((c) => c.command);
+    let reuse = resumed?.reuse || [];
+    task.startedAt ||= new Date().toISOString();
+    // One deadline for the whole task (all attempts), separate from the run's own time limit and from cancellation.
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new Error(`task deadline of ${Math.round(deadlineMs / 60_000)} minute(s) reached`)), deadlineMs);
+    const signal = AbortSignal.any([runSignal, deadline.signal]);
     const upstream = (task.dependsOn || [])
-      .map((d) => run.plan.tasks.find((t) => t.id === d))
-      .filter((t) => t?.result)
-      .map((t) => ({ id: t.id, role: t.role, summary: t.result.summary, files: t.result.files }));
+      .map((id) => run.plan.tasks.find((t) => t.id === id))
+      .filter((t) => t?.status === 'completed' || t?.status === 'skipped')
+      .map((t) => ({ id: t.id, role: t.role, files: t.verified?.files || [], summary: t.status === 'completed' ? String(t.result?.summary || '').slice(0, 300) : 'skipped' }));
 
-    for (let n = task.attempts.length - base + 1; n <= maxAttempts; n++) {
-      if (signal.aborted) return;
-      const attempt = { n, startedAt: new Date().toISOString(), verification: [] };
-      task.attempts.push(attempt);
-      task.status = 'running';
+    /** The task cannot go on: record why in one place (status, failure, escalation) and tell the run. */
+    const stop = async (status, failure, attempt) => {
+      task.status = status;
+      task.error = this.hideSecrets(redact(failure.reason));
+      task.failure = { ...failure, reason: task.error, attempts: task.attempts.length };
+      if (status === 'blocked') task.blockedReason = { kind: failure.category, capability: failure.capability, reason: task.error };
+      else task.escalation = escalationFor(task, failure.reason);
+      await this.recordLesson(run, notes, task, attempt, emit, { unresolved: true });
       await save();
-      emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title });
+      emit(status === 'blocked' ? 'task' : 'escalation', status === 'blocked' ? { taskId: task.id, status, reason: task.error, category: failure.category } : { taskId: task.id, reason: task.error, category: failure.category, options: task.escalation.options });
+    };
 
-      const lessons = await readLessons(notes);
-      const out = await this.agentRunner(run)({
-        provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
-        settings: run.settings, signal, track, diag,
-        emit: (type, data) => emit(type, { ...data, attempt: n }),
-      });
-      if (signal.aborted) return;
+    try {
+      let last = null;
+      for (let n = task.attempts.length - base + 1; n <= maxAttempts; n++) {
+        if (runSignal.aborted) return;
+        const attempt = { n, startedAt: new Date().toISOString(), provider: run.provider, model: run.model, verification: [] };
+        task.attempts.push(attempt);
+        task.status = 'running';
+        await save();
+        emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title });
 
-      if (!out.ok) {
-        attempt.ok = false;
-        attempt.error = this.hideSecrets(out.error);
-        feedback = `The agent did not complete the task: ${attempt.error}`;
-      } else {
-        attempt.result = out.result;
-        // ── Layer 5: verify before moving on ──
-        await layer('verification', 'active');
-        const checks = await this.verifyTask(task, ws, run, signal);
-        attempt.verification = checks;
-        emit('verify', { taskId: task.id, attempt: n, results: checks.map(({ command, exitCode, ok, durationMs, output, state }) => ({ command, exitCode, ok, durationMs, output: redact(output).slice(-3000), ...(state ? { state } : {}) })) });
-        const failed = checks.filter((c) => !c.ok);
-        attempt.ok = failed.length === 0;
-        if (attempt.ok) {
-          attempt.finishedAt = new Date().toISOString();
-          task.status = 'completed';
-          task.result = out.result;
-          if (task.attempts.length > 1) await this.recordLesson(run, notes, task, attempt, emit);
-          await save();
-          emit('task', { taskId: task.id, status: 'completed', attempt: n, summary: out.result.summary });
-          return;
+        const lessons = await readLessons(notes);
+        let out;
+        const t0 = Date.now();
+        try {
+          out = await this.agentRunner(run)({
+            provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons, reuse,
+            settings: run.settings, signal, track, diag, caps, cfg: this.cfg,
+            emit: (type, data) => emit(type, { ...data, attempt: n }),
+          });
+        } catch (err) {
+          if (err instanceof BudgetError || runSignal.aborted) throw err;
+          const kind = deadline.signal.aborted ? 'deadline' : failureKind(err);
+          // The HTTP layer has already retried transient errors, so the task stops here (as it always did) with the cause classified.
+          out = { ok: false, fatal: true, error: err.message, failure: { category: deadline.signal.aborted ? 'deadline' : 'execution', kind, transient: isTransient(kind) } };
         }
-        feedback = failed.map((c) => `$ ${c.command}\nexit code ${c.exitCode}${c.state === 'regression' ? '\n(REGRESSION: this command passed or had different failures before your change)' : ''}${c.newFailures?.length ? `\nnew failures:\n${c.newFailures.map((x) => `  - ${x}`).join('\n')}` : ''}\n${c.output.slice(-3500)}`).join('\n\n');
+        attempt.agentMs = Date.now() - t0;
+        if (runSignal.aborted) return;
+        if (out.tools) attempt.tools = out.tools;
+        if (out.ops) attempt.ops = out.ops;
+        if (out.workDigest) attempt.workDigest = out.workDigest;
+        last = attempt;
+
+        if (!out.ok) {
+          attempt.ok = false;
+          attempt.error = this.hideSecrets(redact(String(out.error || 'the agent did not complete the task')));
+          attempt.failure = { category: 'execution', kind: 'agent', ...(out.failure || {}), reason: attempt.error };
+          attempt.fingerprint = failureFingerprint(attempt);
+          repeats = attempt.fingerprint === prevFp ? repeats + 1 : 1;
+          prevFp = attempt.fingerprint;
+          attempt.repeats = repeats;
+          feedback = buildFeedback({ attemptNo: n, maxAttempts, error: attempt.error, tools: out.tools, repeats });
+          previousFailed = [];
+        } else {
+          attempt.result = out.result;
+          // ── Layer 5: verify before moving on. The agent's own words are not an input to this. ──
+          await layer('verification', 'active');
+          const v = await this.verifyTask(task, ws, run, signal, { result: out.result, tools: out.tools, caps, previousFailed });
+          if (runSignal.aborted) return;
+          const checks = v.results;
+          attempt.verification = checks;
+          attempt.partial = v.partial || undefined;
+          emit('verify', { taskId: task.id, attempt: n, partial: v.partial || undefined, results: checks.map(({ command, criterion, check, exitCode, ok, durationMs, output, state, capability }) => ({ command, criterion, check, exitCode, ok, durationMs, output: redact(output).slice(-3000), ...(state ? { state } : {}), ...(capability ? { capability } : {}) })) });
+          const failed = checks.filter((c) => !c.ok);
+          attempt.ok = failed.length === 0 && !v.partial;
+          if (attempt.ok) {
+            attempt.finishedAt = new Date().toISOString();
+            task.status = 'completed';
+            task.result = out.result;
+            delete task.failure;
+            task.verified = { at: attempt.finishedAt, outputs: checks.flatMap((c) => c.artifact || []).map(({ path: p, bytes, kind, width, height }) => ({ path: p, bytes, kind, ...(width ? { width, height } : {}) })), files: [...new Set([...(out.result.files || []), ...checks.flatMap((c) => (c.artifact || []).map((a) => a.path))])].filter(Boolean) };
+            if (task.attempts.length > 1) await this.recordLesson(run, notes, task, attempt, emit);
+            await save();
+            emit('task', { taskId: task.id, status: 'completed', attempt: n, summary: out.result.summary, verified: task.verified.outputs.length });
+            return;
+          }
+          const gap = failed.find((c) => c.capability);
+          attempt.failure = gap
+            ? { category: 'capability', kind: 'capability', capability: gap.capability, reason: gap.output }
+            : { category: 'acceptance', kind: 'verification', reason: headline(failed.map((c) => `${c.criterion || c.command}: ${c.output}`).join('\n')) };
+          attempt.fingerprint = failureFingerprint(attempt);
+          repeats = attempt.fingerprint === prevFp ? repeats + 1 : 1;
+          prevFp = attempt.fingerprint;
+          attempt.repeats = repeats;
+          reuse = checks.filter((c) => c.ok && c.artifact?.length).flatMap((c) => c.artifact.map((a) => a.path));
+          attempt.reuse = reuse;
+          previousFailed = failed.map((c) => c.command);
+          const hints = [];
+          if (failed.some((c) => c.check === 'artifact' && outputKind(c.command.replace(/^artifact /, '')) === 'image') && caps?.browser_render?.available) hints.push('An image is made by writing an HTML file with write_file and then calling render_screenshot; describing it in text creates nothing.');
+          if (v.partial) hints.push('Only the checks that failed last time were re-run; the full set runs once they pass.');
+          feedback = buildFeedback({ attemptNo: n, maxAttempts, failed, reuse, tools: out.tools, repeats, hints });
+        }
+
+        // ── Layer 6: feedback ──
+        attempt.finishedAt = new Date().toISOString();
+        attempt.feedback = this.hideSecrets(redact(feedback));
+        const f = attempt.failure;
+        const final = deadline.signal.aborted ? { category: 'deadline', reason: `the task deadline of ${Math.round(deadlineMs / 60_000)} minute(s) was reached` }
+          : f.category === 'capability' ? f
+          : STOP_KINDS.has(f.kind) ? { ...f, reason: `${f.kind.replace(/_/g, ' ')}: retrying cannot help. ${f.reason}` }
+          : out.fatal ? { ...f, reason: attempt.error }
+          : repeats >= repeatLimit && !f.transient ? { category: 'no_progress', kind: f.kind, reason: `the same failure repeated ${repeats} times in a row without progress: ${f.reason}` }
+          : null;
+        await layer('feedback', 'active');
+        await save();
+        emit('feedback', { taskId: task.id, attempt: n, category: f.category, kind: f.kind || null, transient: f.transient || undefined, repeats, willRetry: !final && n < maxAttempts, message: redact(feedback).slice(0, 3000), headline: headline(feedback) });
+        if (final) return stop(final.category === 'capability' ? 'blocked' : 'escalated', final, attempt);
       }
 
-      // ── Layer 6: feedback ──
-      attempt.finishedAt = new Date().toISOString();
-      attempt.feedback = this.hideSecrets(redact(feedback));
-      await layer('feedback', 'active');
-      await save();
-      emit('feedback', { taskId: task.id, attempt: n, willRetry: n < maxAttempts, message: redact(feedback).slice(0, 3000), headline: headline(feedback) });
+      // Attempts exhausted: escalate, naming the failure category of the last attempt.
+      const f = last?.failure || { category: 'execution', reason: 'no attempt ran' };
+      return stop('escalated', f, last);
+    } finally {
+      clearTimeout(timer);
     }
-
-    // Retries exhausted: escalate with options.
-    task.status = 'escalated';
-    task.error = headline(feedback);
-    task.escalation = escalationFor(task, feedback);
-    await this.recordLesson(run, notes, task, task.attempts.at(-1), emit, { unresolved: true });
-    await save();
-    emit('escalation', { taskId: task.id, reason: task.error, options: task.escalation.options });
   }
 
-  async verifyTask(task, ws, run, signal) {
-    const results = [];
-    for (const f of task.outputs || []) {
-      if (/[*?]/.test(f)) continue;
-      const ok = ws.exists(f.replace(/\/$/, ''));
-      results.push({ command: `exists ${f}`, exitCode: ok ? 0 : 1, ok, durationMs: 0, output: ok ? '' : `expected output ${f} was not produced` });
-    }
+  /**
+   * Check a task against the workspace as it is now: every declared output (present, non-empty, valid for its type), every
+   * file the agent claimed, and the task's verify commands. A task with none of these must at least have executed some work.
+   * `previousFailed` (the checks that failed last time) are re-run first; the rest run only once those pass, so a retry
+   * does not re-pay for checks it did not touch, and completion still requires the full set.
+   */
+  async verifyTask(task, ws, run, signal, { result = {}, tools = null, caps = null, previousFailed = [] } = {}) {
     const existing = isExisting(run);
-    for (const command of task.verify || []) {
-      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
-      const output = `${r.stdout}\n${r.stderr}`.trim();
-      if (existing) {
-        // A command that already failed at baseline passes the task if it fails in no new way.
-        const cls = classifyCheck(run.project.baseline?.find((b) => b.command === command), r);
-        results.push({ command, exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output });
-      } else {
-        results.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output });
-      }
+    const imageGap = !(caps?.browser_render?.available || caps?.image_generation?.available);
+    const checks = [];
+    const declared = new Set((task.outputs || []).map((o) => o.replace(/\/$/, '')));
+    for (const o of task.outputs || []) {
+      checks.push({ key: `artifact ${o}`, run: async () => {
+        const r = await checkOutput(ws, o);
+        if (!r.ok && outputKind(o) === 'image' && imageGap) return { ...r, capability: 'image', output: `${r.output}. No available tool can produce an image (no browser to render a screenshot, no image provider), so retrying cannot help.` };
+        return r;
+      } });
     }
-    return results;
+    for (const command of task.verify || []) {
+      checks.push({ key: command, run: async () => {
+        const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+        const output = `${r.stdout}\n${r.stderr}`.trim();
+        if (existing) {
+          // A command that already failed at baseline passes the task if it fails in no new way.
+          const cls = classifyCheck(run.project.baseline?.find((b) => b.command === command), r);
+          return { command, criterion: `command exits 0: ${command}`, check: 'command', exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output };
+        }
+        return { command, criterion: `command exits 0: ${command}`, check: 'command', exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output };
+      } });
+    }
+    for (const f of [...new Set(result.claimed || [])].filter((x) => typeof x === 'string' && x.trim() && !x.endsWith('/') && !declared.has(x))) {
+      checks.push({ key: `claimed file ${f}`, run: async () => {
+        const t0 = Date.now();
+        const v = await validateArtifact(ws, f);
+        return { command: `claimed file ${f}`, criterion: `file ${f} named in complete_task`, check: 'claim', exitCode: v.ok ? 0 : 1, ok: v.ok, durationMs: Date.now() - t0, output: v.ok ? '' : `${v.detail} (the agent said it produced this file)`, artifact: v.ok ? [v] : undefined };
+      } });
+    }
+    if (!(task.outputs || []).length && !(task.verify || []).length) {
+      checks.push({ key: 'executed work', run: async () => {
+        const wrote = tools ? tools.writes : (result.files || []).length;
+        const ran = tools ? tools.commandsOk : (result.commandsRun || []).filter((c) => c.exitCode === 0).length;
+        const ok = wrote > 0 || ran > 0;
+        return { command: 'executed work', criterion: 'the task has no output or verify command, so it must at least have executed work', check: 'work', exitCode: ok ? 0 : 1, ok, durationMs: 0, output: ok ? '' : 'no file was written and no command succeeded during this attempt; the agent only described the work' };
+      } });
+    }
+
+    const first = checks.filter((c) => previousFailed.includes(c.key));
+    const rest = checks.filter((c) => !previousFailed.includes(c.key));
+    const results = [];
+    const runAll = async (list) => {
+      for (const c of list) {
+        if (signal?.aborted) break;
+        const r = await c.run();
+        const { key, ...clean } = { ...r, key: c.key };
+        results.push(clean);
+      }
+    };
+    if (first.length && rest.length) {
+      await runAll(first);
+      if (results.some((r) => !r.ok)) return { results, partial: true };
+    }
+    await runAll(first.length && rest.length ? rest : checks);
+    return { results, partial: false };
   }
 
   async recordLesson(run, ws, task, attempt, emit, { unresolved = false } = {}) {

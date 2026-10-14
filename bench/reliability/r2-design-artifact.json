@@ -1,0 +1,36 @@
+{
+  "id": "r2-design-artifact",
+  "kind": "design task that must produce real artifacts",
+  "title": "Reading-list wireframe",
+  "idea": "Design the main screen of a reading-list app. Write an HTML/CSS wireframe to docs/wireframe.html (a heading, a form with a text input for the book title and an Add button, and a list of at least three sample books). Also save a screenshot of that page to docs/wireframe.png.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"reading-list\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node -e \\\"process.exit(0)\\\"\"\n  }\n}\n",
+    "README.md": "# reading-list\n\nTrack the books you want to read: add a title, tick it off when finished.\n"
+  },
+  "reference": {
+    "docs/wireframe.html": "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Reading list</title><style>body{font-family:sans-serif;max-width:32rem;margin:2rem auto}li{padding:.25rem 0}</style></head>\n<body><main><h1>Reading list</h1>\n<form><label>Title <input type=\"text\" name=\"title\"></label> <button type=\"submit\">Add</button></form>\n<ul><li>Dune</li><li>Emma</li><li>Ulysses</li></ul></main></body></html>\n"
+  },
+  "read": [
+    "README.md"
+  ],
+  "acceptance": [
+    {
+      "name": "wireframe html has a form, an input, an Add button and three books",
+      "files": {
+        "accept-html.mjs": "import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst h = fs.readFileSync('docs/wireframe.html', 'utf8');\nassert.match(h, /<form/i);\nassert.match(h, /<input/i);\nassert.match(h, /Add/);\nassert.ok((h.match(/<li/gi) || []).length >= 3);\n"
+      },
+      "command": "node accept-html.mjs"
+    },
+    {
+      "name": "screenshot is a real, non-trivial PNG (needs a renderer)",
+      "liveOnly": true,
+      "files": {
+        "accept-png.mjs": "import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst b = fs.readFileSync('docs/wireframe.png');\nassert.equal(b.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');\nassert.ok(b.readUInt32BE(16) >= 200 && b.readUInt32BE(20) >= 200, 'dimensions');\nassert.ok(b.length > 2000, 'size');\n"
+      },
+      "command": "node accept-png.mjs"
+    }
+  ],
+  "expectChanged": [
+    "docs/wireframe.html"
+  ]
+}

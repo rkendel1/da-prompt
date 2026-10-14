@@ -342,6 +342,11 @@ export class ProviderRegistry {
       dialect: p.type === 'ollama' ? 'ollama' : 'openai',
       toolMode: options.toolMode || p.toolMode || 'auto',
       numCtx: p.type === 'ollama' ? options.numCtx || p.numCtx || 32768 : undefined,
+      keepAlive: p.type === 'ollama' ? options.keepAlive ?? this.cfg.defaults?.keepAlive ?? undefined : undefined,
+      seed: options.seed ?? undefined,
+      topP: options.topP ?? undefined,
+      timeoutMs: this.cfg.defaults?.requestTimeoutMs || undefined,
+      retries: this.cfg.defaults?.httpRetries,
     });
   }
 }

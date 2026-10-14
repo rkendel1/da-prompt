@@ -23,6 +23,8 @@ export function buildEvidence(run) {
   const final = (run.finalVerification || []).map((v) => ({ command: v.command, exitCode: v.exitCode, ok: v.ok, state: v.state || (v.ok ? 'passed' : 'failed'), required: v.required, durationMs: v.durationMs, newFailures: v.newFailures, output: v.ok ? '' : trim(v.output, 2000) }));
 
   if (!run.plan) missing.push('No plan was produced, so there is no task history.');
+  for (const w of run.plan?.warnings || []) missing.push(w[0].toUpperCase() + w.slice(1) + '.');
+  for (const t of tasks.filter((x) => x.status === 'blocked' && x.blockedReason)) missing.push(`Task ${t.id} was not attempted: ${t.blockedReason.reason}`);
   if (run.plan && !final.length) missing.push(existing ? 'No project check ran at the end of the run, so nothing here is claimed as verified.' : 'The final test suite did not run.');
   if (tasks.some((t) => t.status === 'completed') && taskChecks.every((t) => !t.checks.length)) missing.push('Tasks were reported complete but no task-level check results are on record.');
   if (existing && run.project && !run.project.baseline?.length) missing.push('There is no baseline, so regressions cannot be told apart from failures that already existed.');

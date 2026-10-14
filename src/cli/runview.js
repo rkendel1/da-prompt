@@ -25,7 +25,7 @@ export function formatEvent(e, out, { verbose = false } = {}) {
     case 'baseline': return [L(`baseline ${ok(e.status === 'passed')} ${e.command} → ${e.status}${e.limitation ? ` (${e.limitation})` : ''}`)];
     case 'plan': return [L(`${out.bold('plan:')} ${e.tasks} tasks in ${e.levels} levels`)];
     case 'agents': return [L(`agents: ${e.roles.join(', ')}`)];
-    case 'task': return [L(`[${out.bold(e.taskId)}] ${e.status === 'completed' ? out.green(e.status) : e.status === 'blocked' ? out.yellow(e.status) : e.status}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.title && e.status === 'running' ? ` — ${e.title}` : ''}${e.summary ? ` — ${e.summary}` : ''}${e.blockedBy ? ` by ${e.blockedBy}` : ''}`)];
+    case 'task': return [L(`[${out.bold(e.taskId)}] ${e.status === 'completed' ? out.green(e.status) : e.status === 'blocked' ? out.yellow(e.status) : e.status}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.title && e.status === 'running' ? ` — ${e.title}` : ''}${e.summary ? ` — ${e.summary}` : ''}${e.blockedBy ? ` by ${e.blockedBy}` : ''}${e.reason ? ` — ${e.reason}` : ''}`)];
     case 'tool': {
       if (verbose) return [L(out.dim(`    ${e.taskId} › ${e.tool} ${e.input?.path || e.input?.command || ''}${e.ok ? '' : ' ✗'}`))];
       if (e.tool === 'run_command' && !e.ok) return [L(out.dim(`    ${e.taskId} › $ ${e.input?.command} → exit ${e.exitCode}`))];

@@ -762,6 +762,45 @@ default on a given machine; what context size is enough or too much; how large p
 local models need retries or malformed-tool-call re-prompts; and whether any prompt or history trimming is safe. No default was changed
 for any of these.
 
+### Truthful completion, recovery and local inference
+
+The key invariant: **model output expresses intent; executed operations and verified artifacts establish what happened.**
+
+- **A claim is never proof.** `complete_task` is refused (and the agent told why) when it names a file that is missing, empty or
+  invalid for its type. After the agent stops, the factory itself checks every declared `output` (present, non-empty, a real PNG /
+  parseable JSON / HTML with markup), every file the agent claimed, and the task's `verify` commands. A task with neither outputs
+  nor verify commands is flagged in the plan and must at least have *executed* work (a file written, a command that succeeded).
+- **Tools say what happened.** Every tool event records `invoked: true` and a `status`: `executed`, `failed`, `rejected` (unknown tool
+  or arguments that break the tool's schema; nothing ran), `unavailable` (the capability is not installed) or `duplicate` (the same
+  tool-call id, or an identical rewrite, is not executed twice). `write_file` confirms the bytes on disk; a missing `content` is an
+  error, not an empty file.
+- **Tasks are validated before they run.** Outputs must be safe relative paths; two tasks that are not ordered by `dependsOn` may not
+  write the same file (also enforced at run time); a task whose `verify` reads another task's output must depend on it; an image or
+  screenshot requirement needs an available renderer or image provider. The planner is sent back to fix these; if a task still needs
+  something that does not exist it is **blocked with the capability reason**, never weakened and never retried.
+- **Artifacts are real operations.** `render_screenshot` (needs a Chromium-family browser) renders HTML the agent wrote to a PNG and the
+  result is validated; `generate_image` calls an optional OpenAI-compatible images endpoint. Neither is offered to an agent unless it
+  exists, and neither is a dependency. A UI deliverable and its screenshot are separate outputs with separate checks.
+- **Recovery is bounded and specific.** The next attempt is told the exact failed criterion, the check that ran, its result, what the
+  last attempt actually did (from tool outcomes), and which artifacts are already valid and should be reused. Only the checks that
+  failed are re-run first; the full set must still pass. The same failure `maxRepeatedFailures` times in a row (compared on criteria
+  and evidence, never on narration) ends the task as `no_progress`; a missing capability ends it as `blocked`; authentication,
+  model-not-found and context-overflow errors end it immediately; a task has an overall deadline. Each ended task keeps its evidence
+  and a `failure.category` (`acceptance`, `execution`, `capability`, `no_progress`, `deadline`).
+- **Dependents only consume verified outputs.** A task starts only when its prerequisites are completed (or skipped by a person), and its
+  brief lists the files the factory verified, not what the agent said.
+- **Local inference is bounded.** `maxLocalInference` generations run at once per local endpoint (default 1); a slot is held only while
+  a model request is in flight, so tools, checks and filesystem work never block it, and a cancelled run leaves nothing queued.
+  Ollama requests carry `num_ctx`, a reply cap of at most a quarter of the window, `keep_alive`, `seed` and `top_p` when configured.
+  Prompts are fitted to the context window (older tool results are trimmed first; the task brief, acceptance criteria, tool schemas and
+  the newest results never are). A request that cannot fit, or that filled the whole window (Ollama silently drops the start of the
+  prompt), fails as `context_overflow`.
+- **Evidence.** `run.metrics` (planning time, wall clock, task outcomes and retries, artifact checks, tool outcomes, model/provider
+  options, queueing, backend-reported load vs generation time, tokens per second) is stored on the run, `diagnostics.jsonl` gains an
+  `inference` block per call, and `GET /api/runs/:id/evidence` lists tasks that were blocked or have no checks.
+
+Compare two revisions on the same disposable projects with `node scripts/bench.mjs run --live --provider ollama --model qwen2.5-coder:7b --task-dir bench/reliability --num-ctx 8192 --temperature 0 --seed 42` (`--mock` runs the same harness with reference solutions and measures nothing about a model).
+
 ### Deterministic tests: replay, contracts and architecture guards
 
 These tests need no model, no credentials and no network. They guard the factory's behaviour, not any model's.
@@ -1051,6 +1090,13 @@ Runs survive restarts: a run that was mid-flight is marked *interrupted* and can
 | `FACTORY_MAX_AGENT_TURNS` | `40` | Tool-use turns per attempt |
 | `FACTORY_TOKEN_BUDGET` | `2000000` | Default per-run token budget |
 | `FACTORY_COMMAND_TIMEOUT_MS` | `180000` | Timeout per command |
+| `FACTORY_MAX_LOCAL_INFERENCE` | `1` | Simultaneous model generations per local endpoint (Ollama, LM Studio, …). Independent of `FACTORY_MAX_PARALLEL`: many tasks may run while only this many wait on the model |
+| `FACTORY_OLLAMA_KEEP_ALIVE` | `30m` | Ollama `keep_alive` sent with every request so the model stays loaded between tasks (empty = the server's own default) |
+| `FACTORY_TASK_DEADLINE_MINUTES` | `30` | One task's total time (all attempts); the active model request and command are aborted |
+| `FACTORY_MAX_REPEATED_FAILURES` | `2` | The same failure this many times in a row ends the task as "no progress" |
+| `FACTORY_REQUEST_TIMEOUT_MS` / `FACTORY_HTTP_RETRIES` | adapter default (30 min / 2 for Ollama) | Per-request deadline and transport retries for OpenAI-compatible and Ollama requests |
+| `FACTORY_BROWSER_PATH` | auto-detected | Chromium-family browser used by the optional `render_screenshot` tool |
+| `FACTORY_IMAGE_URL` / `FACTORY_IMAGE_MODEL` / `FACTORY_IMAGE_API_KEY` | — | Optional OpenAI-compatible images endpoint for the `generate_image` tool; without it image generation is unavailable |
 | `FACTORY_MAX_PREVIEWS` | `5` | Live previews kept running (oldest evicted) |
 | `GITHUB_TOKEN` | — | Clone private repos, push run branches and open pull requests; also pushes a new project to `repoUrl` |
 | `FACTORY_PROJECT_ROOTS` | — | Directories (path-delimiter separated) whose subfolders can be used as local projects, read/write |

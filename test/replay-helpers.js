@@ -38,7 +38,7 @@ export class ReplayProvider extends OfflineProvider {
       return { content: [toolUse('submit_plan', spec)], stop_reason: 'tool_use', usage: USAGE };
     }
     if (meta.kind === 'task') {
-      const attempts = this.fixture.attempts || [];
+      const attempts = this.fixture.taskAttempts?.[meta.task?.id] || this.fixture.attempts || [];
       const script = attempts[Math.min(meta.attempt, attempts.length) - 1] || [];
       const turn = req.messages.filter((m) => m.role === 'assistant').length;
       const step = script[turn];

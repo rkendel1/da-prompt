@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.home', '.cache', '__pycache__', '.venv', 'dist', 'build']);
 const MAX_FILE_BYTES = 1_000_000;
+const MAX_BINARY_BYTES = 20_000_000;
 const MAX_OUTPUT = 48_000;
 
 // Commands an agent may never run. Real isolation comes from running the factory in a container;
@@ -60,7 +61,48 @@ export class Workspace {
     if (Buffer.byteLength(data) > MAX_FILE_BYTES) throw new Error(`file too large (max ${MAX_FILE_BYTES} bytes)`);
     await fsp.mkdir(path.dirname(abs), { recursive: true });
     await fsp.writeFile(abs, data);
-    return { path: this.rel(abs), bytes: Buffer.byteLength(data) };
+    return this.confirmWrite(abs, Buffer.byteLength(data));
+  }
+
+  /** Write raw bytes (images produced by a renderer or provider). Same path and .git rules as writeFile. */
+  async writeBytes(rel, buf) {
+    const abs = this.resolve(rel);
+    if (this.protectGit && this.rel(abs).split('/').some((seg) => seg.toLowerCase() === '.git')) throw new Error(`writing inside .git is not allowed: ${rel}`);
+    if (!Buffer.isBuffer(buf)) throw new Error('writeBytes needs a Buffer');
+    if (buf.length > MAX_BINARY_BYTES) throw new Error(`file too large (max ${MAX_BINARY_BYTES} bytes)`);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, buf);
+    return this.confirmWrite(abs, buf.length);
+  }
+
+  /** A write only counts once the file is on disk with the size that was written: stat it instead of trusting the call. */
+  async confirmWrite(abs, expected) {
+    const st = await fsp.stat(abs);
+    if (!st.isFile() || st.size !== expected) throw new Error(`write could not be confirmed: expected ${expected} bytes on disk, found ${st.isFile() ? st.size : 'a non-file'}`);
+    return { path: this.rel(abs), bytes: st.size, confirmed: true };
+  }
+
+  /** Size of a file, or null when it is missing or not a regular file. Never throws. */
+  async stat(rel) {
+    try {
+      const st = await fsp.stat(this.resolve(rel));
+      return st.isFile() ? { size: st.size, isFile: true } : { size: 0, isFile: false, isDirectory: st.isDirectory() };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Raw bytes of (the start of) a file, for validating artifacts. */
+  async readBuffer(rel, { maxBytes = 1_000_000 } = {}) {
+    const abs = this.resolve(rel);
+    const fh = await fsp.open(abs, 'r');
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+      return buf.subarray(0, bytesRead);
+    } finally {
+      await fh.close();
+    }
   }
 
   async readFile(rel, { maxBytes = 200_000 } = {}) {

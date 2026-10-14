@@ -134,7 +134,8 @@ test('sandbox rules are unchanged under FX: a path escape is refused and reporte
   const run = await factory.start((await create(factory, { engine: 'fx' })).id);
   assert.equal(fs.existsSync(outside), false);
   assert.ok(outcomes.slice(0, 2).every((o) => /error/i.test(o.out)), JSON.stringify(outcomes.map((o) => o.out)));
-  assert.equal(run.plan.tasks[0].status, 'completed');
+  // Both writes were refused, so nothing was done: "tried" is not accepted as completion.
+  assert.equal(run.plan.tasks[0].status, 'escalated');
 });
 
 test('credentials reach fx only as an environment variable name, are not visible to agent shells, and are removed afterwards', async () => {
@@ -263,14 +264,14 @@ test('the default engine can be set, and /api/engines says what is usable and wh
 
 test('loose completion fields (a string where a list was asked for) are accepted by every engine, not a crash', async () => {
   const loose = { summary: 'ok', nextSteps: 'run npm test', files: 'a.txt', commands: null };
-  const fx = fakeFx(() => [{ tool: 'complete_task', input: loose }]);
+  const fx = fakeFx(() => [{ tool: 'write_file', input: { path: 'a.txt', content: 'x\n' } }, { tool: 'complete_task', input: loose }]);
   const a = makeEnv({ fx, provider: new EndpointProvider({ plan: () => plan([task('t')], { finalVerify: [] }), task: noTask }) });
   const ra = await a.factory.start((await create(a.factory, { engine: 'fx' })).id);
-  assert.equal(ra.plan.tasks[0].status, 'completed', ra.error);
+  assert.equal(ra.plan.tasks[0].status, 'completed', JSON.stringify(ra.plan.tasks[0].attempts.map((a) => [a.error, a.failure, a.verification])));
   assert.deepEqual(ra.plan.tasks[0].result.nextSteps, ['run npm test']);
   assert.deepEqual(ra.plan.tasks[0].result.files, ['a.txt']);
   assert.deepEqual(ra.plan.tasks[0].result.commands, []);
-  const b = makeEnv({ provider: new EndpointProvider({ plan: () => plan([task('t')], { finalVerify: [] }), task: () => [toolUse('complete_task', loose)] }) });
+  const b = makeEnv({ provider: new EndpointProvider({ plan: () => plan([task('t')], { finalVerify: [] }), task: ({ turn }) => (turn === 0 ? [toolUse('write_file', { path: 'a.txt', content: 'x\n' })] : [toolUse('complete_task', loose)]) }) });
   const rb = await b.factory.start((await create(b.factory)).id);
   assert.equal(rb.plan.tasks[0].status, 'completed', rb.error);
   assert.deepEqual(rb.plan.tasks[0].result.nextSteps, ['run npm test']);

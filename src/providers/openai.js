@@ -12,6 +12,9 @@ import { requestWithRetry, requestStream, lineSplitter, HttpError, describeError
 export const REQUEST_TIMEOUT_MS = 30 * 60_000;
 export const OLLAMA_HTTP_RETRIES = 2;
 import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking } from './tooltext.js';
+import { ContextOverflowError, outputReserve } from './context.js';
+
+const CONTEXT_ERROR = /context[_ ](length|window)|maximum context|too many tokens|prompt is too long|exceeds the (model|context)|input is too long/i;
 
 // Remember models that rejected native tools so we don't pay for the failure every call.
 const JSON_MODE_MODELS = new Set();
@@ -19,7 +22,7 @@ const JSON_MODE_MODELS = new Set();
 const NO_TOOLS_ERROR = /does not support tools|tools? (are|is) not supported|tool[_ ]?(use|calling|choice).*not supported|unsupported.*tool|unrecognized.*tools|Extra inputs.*tools|function calling is not/i;
 
 export class OpenAICompatProvider {
-  constructor({ id, label, baseUrl, apiKey, headers = {}, model, plannerModel, dialect = 'openai', toolMode = 'auto', numCtx, temperature, maxTokens = 8192, timeoutMs }) {
+  constructor({ id, label, baseUrl, apiKey, headers = {}, model, plannerModel, dialect = 'openai', toolMode = 'auto', numCtx, temperature, maxTokens = 8192, timeoutMs, keepAlive, seed, topP, retries }) {
     if (!model) throw new Error(`no model selected for provider "${label || id}"`);
     this.name = id;
     this.label = label || id;
@@ -34,6 +37,40 @@ export class OpenAICompatProvider {
     this.temperature = temperature;
     this.maxTokens = maxTokens;
     this.timeoutMs = timeoutMs || REQUEST_TIMEOUT_MS;
+    this.keepAlive = keepAlive; // Ollama: how long the model stays loaded after a request ("30m", 1800, -1 = forever)
+    this.seed = seed;
+    this.topP = topP;
+    this.retries = Number.isInteger(retries) && retries >= 0 ? retries : OLLAMA_HTTP_RETRIES;
+  }
+
+  /** The prompt+reply window this provider enforces, in tokens; null when the server decides (not Ollama). */
+  contextLimit() {
+    return this.dialect === 'ollama' && this.numCtx ? this.numCtx : null;
+  }
+
+  /** The request options this provider actually sends, for diagnostics and tests (no secrets). */
+  effectiveOptions() {
+    const ctx = this.contextLimit();
+    return {
+      dialect: this.dialect,
+      numCtx: ctx,
+      numPredict: this.dialect === 'ollama' ? outputReserve(ctx, this.maxTokens) : this.maxTokens,
+      temperature: this.temperature ?? null,
+      seed: this.seed ?? null,
+      topP: this.topP ?? null,
+      keepAlive: this.dialect === 'ollama' ? this.keepAlive ?? null : null,
+      timeoutMs: this.timeoutMs,
+      retries: this.dialect === 'ollama' ? this.retries : null,
+    };
+  }
+
+  ollamaOptions(limit) {
+    const options = { num_predict: outputReserve(this.numCtx, limit) };
+    if (this.numCtx) options.num_ctx = this.numCtx;
+    if (this.temperature != null) options.temperature = this.temperature;
+    if (this.seed != null) options.seed = this.seed;
+    if (this.topP != null) options.top_p = this.topP;
+    return options;
   }
 
   describe() {
@@ -57,6 +94,7 @@ export class OpenAICompatProvider {
         return this.send({ model, system, messages, tools, mode: 'json', maxTokens, signal, meta });
       }
       if (signal?.aborted) throw new Error('cancelled');
+      if (err instanceof HttpError && err.status >= 400 && err.status < 500 && CONTEXT_ERROR.test(err.body)) throw new ContextOverflowError(`${this.label} (${model}): the request does not fit the model's context window (${describeError(err)})`);
       throw new Error(`${this.label} (${model}): ${describeError(err)}`);
     }
   }
@@ -68,19 +106,23 @@ export class OpenAICompatProvider {
     const limit = maxTokens || this.maxTokens;
     let raw;
     if (this.dialect === 'ollama') {
-      const body = { model, messages: msgs, stream: false, options: { num_predict: limit } };
-      if (this.numCtx) body.options.num_ctx = this.numCtx;
-      if (this.temperature != null) body.options.temperature = this.temperature;
+      const body = { model, messages: msgs, stream: false, options: this.ollamaOptions(limit) };
+      if (this.keepAlive != null && this.keepAlive !== '') body.keep_alive = this.keepAlive;
       if (mode === 'native' && tools.length) body.tools = tools.map(toOpenAITool);
-      const res = await requestWithRetry(`${this.baseUrl}/api/chat`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs }, { retries: OLLAMA_HTTP_RETRIES });
+      const res = await requestWithRetry(`${this.baseUrl}/api/chat`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs }, { retries: this.retries });
+      const ms = (ns) => (Number.isFinite(ns) ? Math.round(ns / 1e6) : null);
       raw = {
         message: res.message || {},
         finish: res.done_reason === 'length' ? 'length' : 'stop',
         usage: { input_tokens: res.prompt_eval_count || 0, output_tokens: res.eval_count || 0, reported: res.prompt_eval_count != null || res.eval_count != null },
+        // What the server itself measured: model load is separate from prompt processing and from token generation.
+        timings: { loadMs: ms(res.load_duration), promptEvalMs: ms(res.prompt_eval_duration), evalMs: ms(res.eval_duration), serverTotalMs: ms(res.total_duration), contextLimit: this.numCtx || null },
       };
     } else {
       const body = { model, messages: msgs, max_tokens: limit };
       if (this.temperature != null) body.temperature = this.temperature;
+      if (this.seed != null) body.seed = this.seed;
+      if (this.topP != null) body.top_p = this.topP;
       if (mode === 'native' && tools.length) {
         body.tools = tools.map(toOpenAITool);
         if (meta.forceTool) body.tool_choice = { type: 'function', function: { name: meta.forceTool } };
@@ -95,7 +137,7 @@ export class OpenAICompatProvider {
     }
     const content = fromOpenAIMessage(raw.message, { toolNames });
     const hasTool = content.some((c) => c.type === 'tool_use');
-    return { content, stop_reason: hasTool ? 'tool_use' : raw.finish === 'length' ? 'max_tokens' : 'end_turn', usage: raw.usage };
+    return { content, stop_reason: hasTool ? 'tool_use' : raw.finish === 'length' ? 'max_tokens' : 'end_turn', usage: raw.usage, ...(raw.timings ? { timings: raw.timings } : {}) };
   }
 
 
@@ -119,9 +161,8 @@ export class OpenAICompatProvider {
     let body;
     if (this.dialect === 'ollama') {
       url = `${this.baseUrl}/api/chat`;
-      body = { model, messages: msgs, stream: true, options: { num_predict: limit } };
-      if (this.numCtx) body.options.num_ctx = this.numCtx;
-      if (this.temperature != null) body.options.temperature = this.temperature;
+      body = { model, messages: msgs, stream: true, options: this.ollamaOptions(limit) };
+      if (this.keepAlive != null && this.keepAlive !== '') body.keep_alive = this.keepAlive;
     } else {
       url = `${this.baseUrl}/chat/completions`;
       body = { model, messages: msgs, max_tokens: limit, stream: true, stream_options: { include_usage: true } };

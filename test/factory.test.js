@@ -76,7 +76,9 @@ test('a task that keeps failing escalates, blocks dependents, and can be fixed a
   assert.equal(run.status, 'needs_attention');
   const deploy = run.plan.tasks.find((t) => t.id === 'deploy');
   assert.equal(deploy.status, 'escalated');
-  assert.equal(deploy.attempts.length, 3);
+  // The same failure twice in a row is "no progress": the task stops after 2 of its 3 attempts instead of repeating itself.
+  assert.equal(deploy.attempts.length, 2);
+  assert.equal(deploy.failure.category, 'no_progress');
   assert.match(deploy.escalation.reason, /registry unreachable/);
   assert.deepEqual(deploy.escalation.options.map((o) => o.id), ['retry', 'edit', 'skip']);
   assert.equal(run.plan.tasks.find((t) => t.id === 'docs').status, 'blocked');

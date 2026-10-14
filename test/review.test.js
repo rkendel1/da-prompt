@@ -82,8 +82,8 @@ test('evidence view: missing evidence is listed, regressions are visible, and so
   assert.equal(ev.factory.final[0].state, 'passed');
   assert.equal(ev.agent.claims[0].summary, 'ok');
   assert.match(ev.agent.note, /not evidence/);
-  // The only gap: this scripted task declared no task-level check, and the view says so instead of implying coverage.
-  assert.deepEqual(ev.missing, ['Tasks were reported complete but no task-level check results are on record.']);
+  // The only gap: this scripted task declared no task-level check (it was held only to "executed some work"), and the view says so instead of implying coverage.
+  assert.deepEqual(ev.missing, ['Task "t" has no outputs and no verify command, so the factory can only check that it executed some work (a file written or a command that succeeded), not that the work is right.']);
   // A run whose project has no checks says so rather than showing an empty "all clear".
   const { dirs, cfg: rootCfg } = makeRoot({ notes: (d) => writeFiles(d, { 'a.txt': 'x' }) });
   const env = setup({ provider: new Scripted({ plan: () => plan([task('t')], { finalVerify: [] }), task: ({ turn }) => (turn === 0 ? [toolUse('write_file', { path: 'a.txt', content: 'y' })] : [done('ok')]) }), cfg: rootCfg });

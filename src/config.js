@@ -51,6 +51,16 @@ export function loadConfig(overrides = {}) {
       maxAgentTurns: int('FACTORY_MAX_AGENT_TURNS', 40),
       tokenBudget: int('FACTORY_TOKEN_BUDGET', 2_000_000),
       commandTimeoutMs: int('FACTORY_COMMAND_TIMEOUT_MS', 180_000),
+      // Inference. maxLocalInference caps simultaneous generations per local endpoint (logical task concurrency is maxParallel).
+      // One is the conservative default for a 7B model on a 36 GB machine: measure before raising it (npm run bench).
+      maxLocalInference: int('FACTORY_MAX_LOCAL_INFERENCE', 1),
+      // Ollama keep_alive sent with every request, so the model is not unloaded between tasks ("" = the server's own default).
+      keepAlive: process.env.FACTORY_OLLAMA_KEEP_ALIVE ?? '30m',
+      requestTimeoutMs: int('FACTORY_REQUEST_TIMEOUT_MS', 0), // 0 = the provider adapter's own limit (30 minutes)
+      httpRetries: Number.parseInt(process.env.FACTORY_HTTP_RETRIES ?? '', 10) >= 0 ? Number.parseInt(process.env.FACTORY_HTTP_RETRIES, 10) : undefined,
+      // Recovery. A task has this long (all attempts together) and stops early when the same failure repeats.
+      taskDeadlineMinutes: int('FACTORY_TASK_DEADLINE_MINUTES', 30),
+      maxRepeatedFailures: int('FACTORY_MAX_REPEATED_FAILURES', 2),
       // Existing-project runs: install dependencies (in the isolated workspace) and let agents install what they need.
       allowInstall: /^(1|true|on|yes)$/i.test(process.env.FACTORY_ALLOW_INSTALL || ''),
     },
@@ -80,6 +90,15 @@ export function loadConfig(overrides = {}) {
     terminalBufferBytes: int('FACTORY_TERMINAL_BUFFER_BYTES', 1_048_576),
     terminalIdleMs: Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS ?? '', 10) >= 0 ? Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS, 10) : 30 * 60_000,
     terminalExitedKeepMs: int('FACTORY_TERMINAL_EXITED_KEEP_MS', 10 * 60_000),
+    // Optional capabilities (src/capabilities.js). A browser renders HTML to PNG; an OpenAI-compatible images endpoint generates images.
+    // Neither is required: a task that needs one that is absent is blocked with that reason instead of retried.
+    browserPath: process.env.FACTORY_BROWSER_PATH || '',
+    image: {
+      url: process.env.FACTORY_IMAGE_URL || '',
+      model: process.env.FACTORY_IMAGE_MODEL || '',
+      apiKey: process.env.FACTORY_IMAGE_API_KEY || '',
+      timeoutMs: int('FACTORY_IMAGE_TIMEOUT_MS', 120_000),
+    },
     // Run agent shell commands inside a Compute environment (src/compute.js). Off by default.
     compute: computeConfig(),
     // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).

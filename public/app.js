@@ -971,7 +971,7 @@ function describe(e) {
     case 'layer': return [who, `Layer <b>${esc(LAYER_NAMES[e.layer] || e.layer)}</b>: ${esc(e.state)}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'warn' : ''];
     case 'plan': return [who, `Plan ready: ${e.tasks} tasks across ${e.levels} levels`, 'ok'];
     case 'agents': return [who, `Agents: ${esc(e.roles.join(', '))}`];
-    case 'task': return [who, `Task ${esc(e.status)}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.summary ? ` — ${esc(e.summary)}` : ''}${e.blockedBy ? ` by ${esc(e.blockedBy)}` : ''}`, e.status === 'completed' ? 'ok' : e.status === 'blocked' ? 'warn' : ''];
+    case 'task': return [who, `Task ${esc(e.status)}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.summary ? ` — ${esc(e.summary)}` : ''}${e.blockedBy ? ` by ${esc(e.blockedBy)}` : ''}${e.reason ? ` — ${esc(e.reason)}` : ''}`, e.status === 'completed' ? 'ok' : e.status === 'blocked' ? 'warn' : ''];
     case 'agent.message': return [who, `<span class="muted">“${esc(e.text)}”</span>`];
     case 'tool': {
       const label = e.tool === 'run_command' ? `$ ${esc(e.input?.command)}` : `${esc(e.tool)} ${esc(e.input?.path || '')}${e.input?.bytes != null ? ` <span class="muted">(${e.input.bytes}b)</span>` : ''}`;

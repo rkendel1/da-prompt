@@ -1,0 +1,48 @@
+{
+  "id": "r4-multi-agent-shared",
+  "kind": "multi-agent: independent modules plus a shared dependency",
+  "title": "Three string helpers and an index",
+  "idea": "Add three independent string helpers, each in its own file with its own test file: src/vowels.js (countVowels(s) counts a, e, i, o, u in any case), src/reverse.js (reverseWords(s) reverses the order of space-separated words), src/caps.js (capitalize(s) upper-cases the first letter and lower-cases the rest). Then add src/index.js re-exporting all three, and a 'Helpers' section in README.md that names each function. npm test must run every test file and pass.",
+  "seed": {
+    "package.json": "{\n  \"name\": \"strings\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/vowels.test.js test/reverse.test.js test/caps.test.js\"\n  }\n}\n",
+    "README.md": "# strings\n"
+  },
+  "reference": {
+    "src/vowels.js": "export const countVowels = (s) => (String(s).match(/[aeiou]/gi) || []).length;\n",
+    "src/reverse.js": "export const reverseWords = (s) => String(s).split(' ').reverse().join(' ');\n",
+    "src/caps.js": "export const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : '');\n",
+    "src/index.js": "export { countVowels } from './vowels.js';\nexport { reverseWords } from './reverse.js';\nexport { capitalize } from './caps.js';\n",
+    "test/vowels.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { countVowels } from '../src/vowels.js';\ntest('countVowels', () => assert.equal(countVowels('Education'), 5));\n",
+    "test/reverse.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { reverseWords } from '../src/reverse.js';\ntest('reverseWords', () => assert.equal(reverseWords('a b c'), 'c b a'));\n",
+    "test/caps.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { capitalize } from '../src/caps.js';\ntest('capitalize', () => assert.equal(capitalize('hELLO'), 'Hello'));\n",
+    "README.md": "# strings\n\n## Helpers\n\n- countVowels\n- reverseWords\n- capitalize\n"
+  },
+  "read": [],
+  "acceptance": [
+    {
+      "name": "the three helpers and the index work",
+      "files": {
+        "accept.mjs": "import assert from 'node:assert/strict';\nimport * as m from './src/index.js';\nassert.equal(m.countVowels('Queue'), 4);\nassert.equal(m.reverseWords('one two three'), 'three two one');\nassert.equal(m.capitalize('wORLD'), 'World');\n"
+      },
+      "command": "node accept.mjs"
+    },
+    {
+      "name": "each helper has its own test file and npm test passes",
+      "files": {},
+      "command": "test -s test/vowels.test.js && test -s test/reverse.test.js && test -s test/caps.test.js && npm test"
+    },
+    {
+      "name": "README names each helper",
+      "files": {
+        "accept-readme.mjs": "import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst r = fs.readFileSync('README.md', 'utf8');\nfor (const n of ['countVowels', 'reverseWords', 'capitalize']) assert.match(r, new RegExp(n));\n"
+      },
+      "command": "node accept-readme.mjs"
+    }
+  ],
+  "expectChanged": [
+    "src/index.js",
+    "src/vowels.js",
+    "src/reverse.js",
+    "src/caps.js"
+  ]
+}

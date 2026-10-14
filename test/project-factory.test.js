@@ -104,7 +104,8 @@ test('a new failure inside an already-failing suite is a regression, and its rea
   assert.equal(t.attempts.length, 2);
   assert.equal(t.attempts[0].verification[0].state, 'regression');
   assert.match(t.attempts[0].feedback, /REGRESSION/);
-  assert.match(t.attempts[0].feedback, /new failures:\n  - not ok # - brand new bug/);
+  assert.match(t.attempts[0].feedback, /New failures:\n\s+- (not ok # - |✖ )brand new bug/);
+  assert.match(t.attempts[0].feedback, /Failed criterion: command exits 0: npm test/);
   assert.match(t.attempts[0].feedback, /actual: 3|expected: 4|brand new bug/); // the actual test output, not a summary
   // The agent's second prompt carried that feedback.
   const second = prov.seen.filter((s) => s.kind === 'task').find((s) => /Previous attempt failed verification/.test(JSON.stringify(s.messages[0])));
@@ -128,7 +129,8 @@ test('retries and escalation run through the existing orchestrator: escalate, bl
   assert.equal(run.status, 'needs_attention');
   const first = run.plan.tasks.find((t) => t.id === 'first');
   assert.equal(first.status, 'escalated');
-  assert.equal(first.attempts.length, 3);
+  assert.equal(first.attempts.length, 2, 'the same failure twice in a row is "no progress": stopped before the third attempt');
+  assert.equal(first.failure.category, 'no_progress');
   assert.deepEqual(first.escalation.options.map((o) => o.id), ['retry', 'edit', 'skip']);
   assert.equal(run.plan.tasks.find((t) => t.id === 'second').status, 'blocked');
   assert.ok(run.lessons.some((l) => /still failing/.test(l.text)));

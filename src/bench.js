@@ -94,8 +94,8 @@ export class ReferenceProvider extends OfflineProvider {
     if (meta.kind === 'plan') {
       const t = this.task;
       const plan = {
-        product: { name: t.title, summary: t.idea, users: ['maintainers'], successCriteria: t.acceptance.map((a) => a.name) },
-        tasks: [{ id: 'work', role: 'engineer', title: t.title, description: t.idea, dependsOn: [], acceptance: t.acceptance.map((a) => a.name), outputs: [], files: t.read || [], verify: ['npm test'] }],
+        product: { name: t.title, summary: t.idea, users: ['maintainers'], successCriteria: t.acceptance.filter((a) => !a.liveOnly).map((a) => a.name) },
+        tasks: [{ id: 'work', role: 'engineer', title: t.title, description: t.idea, dependsOn: [], acceptance: t.acceptance.filter((a) => !a.liveOnly).map((a) => a.name), outputs: [], files: t.read || [], verify: ['npm test'] }],
         risks: [],
         openQuestions: [],
         finalVerify: ['npm test'],
@@ -132,10 +132,11 @@ const median = (xs) => {
 };
 
 /** Run the task's acceptance commands in the run's workspace; the files they need exist only for the duration of the check. */
-export async function accept(task, wsDir) {
+export async function accept(task, wsDir, { mode = 'live' } = {}) {
   const ws = new Workspace(wsDir);
   const results = [];
   for (const a of task.acceptance) {
+    if (a.liveOnly && mode === 'mock') continue; // needs something only a real model run can produce (e.g. a rendered screenshot)
     const written = Object.keys(a.files || {});
     try {
       writeFiles(wsDir, a.files || {});
@@ -217,7 +218,7 @@ export async function runBenchmark(o) {
         const run = await store.load(created.id);
         const events = await store.events(created.id);
         const summary = summarizeRun(run, events, readRecords(store.runDir(created.id)));
-        const acceptance = first === 'timeout' ? { ok: false, results: [], skipped: 'the run did not finish' } : await accept(task, store.workspaceDir(created.id));
+        const acceptance = first === 'timeout' ? { ok: false, results: [], skipped: 'the run did not finish' } : await accept(task, store.workspaceDir(created.id), { mode });
         const changed = (run.changes?.files || []).map((f) => f.path); // the factory's own change record (against the base commit)
         const attempts = summary.outcome.tasks.attempts;
         Object.assign(result, {
@@ -237,6 +238,11 @@ export async function runBenchmark(o) {
           changedFiles: changed,
           expectedFilesChanged: (task.expectChanged || []).every((f) => (changed || []).includes(f)),
           repeatedToolFailures: summary.repeatedToolFailures.length,
+          // The factory said "completed" but the independent acceptance check disagrees: the failure this harness exists to catch.
+          falseSuccess: first !== 'timeout' && run.status === 'completed' && !acceptance.ok,
+          // The factory's verdict and the independent check agree (both pass, or the run did not claim success and acceptance fails).
+          verdictMatchesAcceptance: first !== 'timeout' ? (run.status === 'completed') === acceptance.ok : null,
+          ...(run.metrics ? { metrics: { planningMs: run.metrics.planningMs, tasks: run.metrics.tasks, artifacts: run.metrics.artifacts, tools: run.metrics.tools, inference: run.metrics.inference } } : {}),
         });
       } catch (e) {
         result.status = 'error';
@@ -307,6 +313,12 @@ export function buildReport({ results, config, startedAt = new Date(), repeat = 
       byTask,
       totals: { wallMs: sum((r) => r.wallMs), modelCalls: sum((r) => r.calls?.count), toolCalls: sum((r) => r.toolCalls), transportRetries: sum((r) => r.retries?.transport), taskRetries: sum((r) => r.retries?.taskAttempts), inputTokens: sum((r) => r.tokens?.input), outputTokens: sum((r) => r.tokens?.output), callsWithoutUsage: sum((r) => r.tokens?.callsUnavailable) },
       medianWallMs: median(results.map((r) => r.wallMs)),
+      // Recomputed from the stored results so a report from an older revision (without these fields) still compares.
+      falseSuccesses: count((r) => r.falseSuccess === true || (r.runStatus === 'completed' && r.acceptance && r.acceptance.ok === false)),
+      verificationAccuracy: (() => {
+        const judged = results.filter((r) => r.acceptance && (r.status === 'passed' || r.status === 'failed'));
+        return judged.length ? judged.filter((r) => (r.runStatus === 'completed') === (r.acceptance.ok === true)).length / judged.length : null;
+      })(),
     },
   };
 }

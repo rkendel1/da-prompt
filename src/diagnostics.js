@@ -18,7 +18,7 @@ const MAX_MESSAGE = 300;
 const MAX_LIST = 8;
 
 /** Failure kinds shared by both engines. */
-export const FAILURE_KINDS = ['authentication', 'model_not_found', 'rate_limited', 'provider_error', 'connection', 'timeout', 'first_response_timeout', 'cancelled', 'budget', 'malformed_tool_call', 'malformed_response', 'other'];
+export const FAILURE_KINDS = ['context_overflow', 'authentication', 'model_not_found', 'rate_limited', 'provider_error', 'connection', 'timeout', 'first_response_timeout', 'cancelled', 'budget', 'malformed_tool_call', 'malformed_response', 'other'];
 
 const callContext = new AsyncLocalStorage();
 
@@ -38,6 +38,7 @@ export function failureKind(err) {
   if (code === 'LIBFX_MODEL_TIMEOUT') return 'first_response_timeout';
   if (code === 'LIBFX_MODEL_CANCELLED' || code === 'ABORT_ERR' || /^cancelled$/i.test(msg)) return 'cancelled';
   if (kind === 'malformed_tool_call') return 'malformed_tool_call';
+  if (kind === 'context_overflow') return 'context_overflow';
   if (kind === 'rate_limited' || /rate limited|HTTP 429/i.test(msg)) return 'rate_limited';
   if (kind === 'server_error' || /provider-side error|HTTP 5\d\d/i.test(msg)) return 'provider_error';
   if (code === 'LIBFX_MODEL_CREDENTIAL_MISSING' || code === 'LIBFX_MODEL_CREDENTIAL_INVALID' || /authentication failed|HTTP 40[13]/i.test(msg)) return 'authentication';
@@ -179,6 +180,8 @@ export class RunDiagnostics {
       usage: err ? { source: 'unavailable' } : usageOf(res?.usage),
       request: { ...requestSize(req), outputLimit: ctx.provider?.maxTokens ?? null },
       response: err ? null : { toolCalls: uses.length, tools: uses.slice(0, MAX_LIST).map((u) => String(u.name).slice(0, 40)), stopReason: res?.stop_reason || null },
+      // Queue wait and generation time as the factory measured them, plus the backend's own load / prompt / token timings when it reports them.
+      ...(res?.inference ? { inference: res.inference } : {}),
     });
   }
 
@@ -356,5 +359,45 @@ export function summarizeRun(run, events = [], records = []) {
     tools: { calls: toolEvents.length, failed: toolEvents.filter((e) => e.ok === false).length, byTool },
     repeatedToolFailures: repeatedToolFailures(events),
     truncated: records.some((r) => r.type === 'truncated'),
+  };
+}
+
+/**
+ * Run-level accounting stored as `run.metrics`: how long planning and the run took, what happened to each task, how many
+ * retries it cost, which artifacts were verified, and what the model backend did (latency, load vs generation, queueing).
+ * Built from the stored run and its diagnostics records; observation only.
+ */
+export function buildRunMetrics(run, records = [], limiters = [], outcomes = {}) {
+  const calls = records.filter((r) => r.type === 'call');
+  const ok = calls.filter((c) => c.outcome === 'ok');
+  const inf = calls.map((c) => c.inference).filter(Boolean);
+  const tasks = run.plan?.tasks || [];
+  const checks = tasks.flatMap((t) => (t.attempts?.at(-1)?.verification || []).filter((v) => v.check === 'artifact' || v.check === 'claim'));
+  const tools = tasks.flatMap((t) => t.attempts || []).map((a) => a.tools).filter(Boolean);
+  const total = (k) => sum(tools.map((x) => x[k] || 0));
+  const started = run.startedAt ? Date.parse(run.startedAt) : NaN;
+  const finished = run.finishedAt ? Date.parse(run.finishedAt) : Date.now();
+  const reported = ok.filter((c) => c.usage?.source === 'provider' && c.inference?.evalMs > 0 && c.usage.output > 0);
+  return {
+    schema: 'da-prompt.run-metrics/1',
+    planningMs: run.planningMs ?? null,
+    wallClockMs: Number.isFinite(started) ? finished - started : null,
+    tasks: outcomes,
+    artifacts: { checked: checks.length, valid: checks.filter((c) => c.ok).length, invalid: checks.filter((c) => !c.ok).length },
+    tools: { invoked: total('invoked'), executed: total('executed'), failed: total('failed'), rejected: total('rejected'), unavailable: total('unavailable'), duplicates: total('duplicates') },
+    model: { provider: run.provider, model: run.model, plannerProvider: run.plannerProvider || null, plannerModel: run.plannerModel || null, options: run.providerOptions || {}, engine: run.engine || 'builtin' },
+    inference: {
+      calls: calls.length,
+      failed: calls.filter((c) => c.outcome === 'error').length,
+      medianCallMs: median(ok.map((c) => c.durationMs)),
+      queuedMs: sum(inf.map((i) => i.queuedMs || 0)),
+      generationMs: sum(inf.map((i) => i.generationMs || 0)),
+      modelLoadMs: inf.some((i) => i.loadMs != null) ? sum(inf.map((i) => i.loadMs || 0)) : null,
+      promptEvalMs: inf.some((i) => i.promptEvalMs != null) ? sum(inf.map((i) => i.promptEvalMs || 0)) : null,
+      evalMs: inf.some((i) => i.evalMs != null) ? sum(inf.map((i) => i.evalMs || 0)) : null,
+      tokensPerSecond: reported.length ? Math.round((sum(reported.map((c) => c.usage.output)) / (sum(reported.map((c) => c.inference.evalMs)) / 1000)) * 10) / 10 : null,
+      basis: 'timings are factory-measured; load/eval times and tokens/second are backend-reported (Ollama) and null when the backend does not say',
+      limiters,
+    },
   };
 }
