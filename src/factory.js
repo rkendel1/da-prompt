@@ -24,6 +24,8 @@ import { ENGINE_IDS, checkProvider, loadEngineModule } from './engines/index.js'
 import { makeFxRunner } from './engines/fx.js';
 import { RunDiagnostics, instrumentProvider } from './diagnostics.js';
 import { contractWarnings } from './contract.js';
+import { appportException, cleanException, checkAppPortConformance } from './appport.js';
+import { launchApp, stopProcess } from './deploy.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
@@ -133,6 +135,9 @@ export class Factory {
       pax: typeof s.pax === 'boolean' ? s.pax : Boolean(this.cfg.paxAutoRun),
       paxSteps: (Array.isArray(s.paxSteps) ? s.paxSteps : this.cfg.paxSteps || []).filter((x) => PAX_STEP_IDS.includes(x)),
     };
+    // New apps are AppPort-native (src/appport.js); a run may opt out only with a stated reason. Existing projects: not applicable.
+    const appportException = existing ? '' : cleanException(s.appportException);
+    if (appportException) settings.appportException = appportException;
     const repoUrl = !existing && typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
     if (repoUrl && /^https:\/\/[^/?#]*@/.test(repoUrl)) throw new Error('repoUrl must not contain credentials; add a GitHub token in Settings instead');
@@ -273,7 +278,7 @@ export class Factory {
       ...old.inputs,
       provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
       planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps },
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException },
       source,
     });
   }
@@ -343,6 +348,11 @@ export class Factory {
         timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, cur.timeoutMinutes),
         ...(typeof s.deploy === 'boolean' ? { deploy: s.deploy } : {}),
       };
+      if ('appportException' in s && !isExisting(run)) {
+        const reason = cleanException(s.appportException);
+        if (reason) next.appportException = reason;
+        else delete next.appportException;
+      }
       set('settings', next);
     }
     if (typeof body.allowInstall === 'boolean' && run.source) {
@@ -472,7 +482,7 @@ export class Factory {
     let run = await this.store.load(id);
     const existing = isExisting(run);
     // Existing projects: commands pass through the project command policy and .git is write-protected.
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     // Factory notes (plan, lessons) live beside the workspace for existing projects, never inside the project.
     const notes = existing ? new Workspace(this.store.notesDir(id)) : ws;
     const save = () => this.store.save(run);
@@ -496,6 +506,7 @@ export class Factory {
       emit('layer', { layer: name, state });
     };
     for (const text of contractWarnings(run, this.providers)) emit('log', { level: 'warn', text });
+    if (appportException(run)) emit('log', { level: 'warn', text: `AppPort contract not required for this run (explicit exception): ${appportException(run)}` });
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -963,7 +974,7 @@ export class Factory {
     if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
     if (run.projectId && (await this.registry.find(run.projectId).catch(() => null))) await this.registry.locate(run.projectId, { purpose: 'publish changes' });
     await this.assertApproved(run, 'publish them');
-    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true, launcher: computeLauncher(this.cfg) });
+    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true, launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache } });
     run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
     await writeReport(run, this.store.deliveryDir(id));
     await this.store.save(run);
@@ -1061,7 +1072,7 @@ export class Factory {
     const chosen = (Array.isArray(steps) && steps.length ? steps : run.settings.paxSteps?.length ? run.settings.paxSteps : this.cfg.paxSteps).filter((x) => PAX_STEP_IDS.includes(x));
     if (!chosen.length) throw new ProjectError(400, 'choose at least one PAX step');
     if (chosen.includes('test') && confirmTests !== true) throw new ProjectError(400, 'the "test" step runs the project\'s native tests through PAX and can change files; confirm it explicitly ({"confirmTests": true})');
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(isExisting(run) ? { protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(isExisting(run) ? { protectGit: true } : {}) });
     const emit = (t, d) => this.store.event(id, t, d);
     const controller = new AbortController();
     this.active.set(id, { controller, promise: Promise.resolve() });
@@ -1084,7 +1095,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!run.plan || !fs.existsSync(this.store.workspaceDir(id))) throw new ProjectError(409, 'the run has no workspace to check');
     const existing = isExisting(run);
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     const base = run.project?.baseline || [];
     const commands = [...new Set([...(run.plan.finalVerify || []), ...base.map((b) => b.command)])].filter(Boolean);
     if (!commands.length) throw new ProjectError(409, 'this run has no checks to run (no baseline or final verification commands)');
@@ -1148,6 +1159,30 @@ export class Factory {
     return { path: filePath, diff: redact(patch.length > 300_000 ? `${patch.slice(0, 300_000)}\n…[diff truncated]` : patch) };
   }
 
+  /** The AppPort checklist item of a new app: the conformance gate's verdict, or the run's explicit exception. */
+  async appportItem(run, ws, { allDone, signal, emit }) {
+    const label = 'Capabilities are AppPort-native (discoverable, authorized, invocable)';
+    const exception = appportException(run);
+    if (exception) {
+      run.appport = { exception };
+      return { id: 'appport', label, ok: true, state: 'na', detail: `explicit exception for this run: ${exception}` };
+    }
+    if (!allDone || signal.aborted) return { id: 'appport', label, ok: false, detail: 'not checked: not all tasks completed' };
+    if (!run.plan.deploy?.start) return { id: 'appport', label, ok: false, detail: 'not checked: the plan has no start command to run the app with' };
+    emit('log', { text: 'Checking the AppPort capability boundary' });
+    const gate = await checkAppPortConformance({
+      ws,
+      launch: async (env) => {
+        const r = await launchApp(ws.root, run.plan.deploy, { env: { ...env, npm_config_cache: this.cfg.npmCache }, timeoutMs: 30_000 });
+        return { ok: r.ok, port: r.port, error: r.error, stop: () => r.ok && stopProcess(r.child) };
+      },
+    });
+    run.appport = { ok: gate.ok, checks: gate.checks.map((c) => ({ ...c, detail: redact(String(c.detail)).slice(0, 600) })), capabilities: gate.capabilities, at: new Date().toISOString() };
+    emit('verify', { taskId: '_appport', results: gate.checks.map((c) => ({ command: `appport: ${c.id}`, ok: c.ok, exitCode: c.ok ? 0 : 1, output: redact(String(c.detail)).slice(0, 600) })) });
+    const failed = gate.checks.filter((c) => !c.ok);
+    return { id: 'appport', label, ok: gate.ok, detail: gate.ok ? `${gate.capabilities.length} capabilities (${gate.capabilities.filter((c) => c.effect === 'consequential').length} write), all checks passed` : failed.map((c) => `${c.id}: ${c.detail}`).join('; ').slice(0, 600) };
+  }
+
   async complete(run, ctx) {
     if (isExisting(run)) return this.completeExisting(run, ctx);
     const { ws, provider, signal, track, emit, save, allDone } = ctx;
@@ -1186,6 +1221,9 @@ export class Factory {
     }
     const deployOk = Boolean(run.deployment?.ok) || (docsDeploy && (!run.plan.deploy || run.settings.deploy === false));
     items.push({ id: 'deploy', label: 'Deployment is successful (URL or clear instructions)', ok: deployOk, detail: run.deployment?.ok ? `live at ${run.deployment.url}${docsDeploy ? ' + DEPLOY.md' : ''}` : run.deployment?.error || (docsDeploy ? 'instructions only' : 'no deployment') });
+
+    // AppPort-native: the app's capability boundary is discoverable, authorized and invocable (src/appport.js).
+    items.push(await this.appportItem(run, ws, { allDone, signal, emit }));
 
     // Documentation.
     let readme = '';

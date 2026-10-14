@@ -7,6 +7,7 @@ import { ROLES, validatePlan } from './graph.js';
 import { redact } from './security.js';
 import { extractJsonValues } from './providers/tooltext.js';
 import { compactHistory, historyBudget } from './providers/history.js';
+import { APPPORT_RULES, appportException } from './appport.js';
 
 export const ROLE_BRIEFS = {
   product: 'You are the Product agent. Refine requirements, user flows and the PRD. Write crisp, testable acceptance criteria and keep docs accurate to what was actually built.',
@@ -37,7 +38,9 @@ const EXISTING_WORKSPACE_RULES = `Workspace rules (existing project):
 - Never hardcode secrets; read them from environment variables.
 - Finish by calling complete_task with an honest summary. Only claim what you have verified.`;
 
-const rulesFor = (run) => (isExisting(run) ? EXISTING_WORKSPACE_RULES : WORKSPACE_RULES);
+// New apps are AppPort-native unless the run carries an explicit exception (src/appport.js).
+const newAppRules = (run) => (appportException(run) ? WORKSPACE_RULES : `${WORKSPACE_RULES}\n\n${APPPORT_RULES}`);
+const rulesFor = (run) => (isExisting(run) ? EXISTING_WORKSPACE_RULES : newAppRules(run));
 
 export const AGENT_TOOLS = [
   {
@@ -165,7 +168,7 @@ Planning rules:
 - Include: a product/PRD task, implementation tasks, a UI task if the product has a UI, a QA task that runs the full test suite, a devops task (start command, Dockerfile, DEPLOY.md), and a README task last.
 - finalVerify must run the full test suite. deploy.start must start the app honouring PORT; deploy.healthPath must return 2xx once it is up.
 - Agents only have a local shell and the workspace; do not plan for external services unless the inputs provide access.
-${WORKSPACE_RULES}`;
+${appportException(run) ? '' : '- The app is AppPort-native (rules below): the implementation task installs the pinned @appport packages and builds src/appport.js over the app\'s own store; the QA task tests it in test/appport.test.js; the README documents the capabilities.\n'}${newAppRules(run)}`;
 }
 
 export async function runPlanner({ provider, run, signal, track, log }) {

@@ -6,6 +6,11 @@ for (const k of Object.keys(process.env)) {
   if ((/^(FACTORY_|DA_PROMPT_|ANTHROPIC_|OPENAI_|OPENROUTER_|GEMINI_|GROQ_|MISTRAL_|DEEPSEEK_|XAI_|TOGETHER_|OLLAMA_|LMSTUDIO_|LLAMACPP_|VLLM_|GITHUB_|GH_)/.test(k) || k === 'PORT' || k === 'HOST') && k !== 'DA_PROMPT_PAX_BIN') delete process.env[k];
 }
 
+// Generated apps depend on the pinned @appport/* packages (src/appport.js): every test run of the factory installs them. One
+// npm cache for the whole suite (outside every test's data dir) means they are downloaded at most once per machine; installs
+// use --prefer-offline, so a warm cache needs no network.
+process.env.FACTORY_NPM_CACHE = require('node:path').join(require('node:os').tmpdir(), 'da-prompt-test-npm-cache');
+
 // A developer machine may have a `pax` on PATH (the real PAX, or the POSIX archiver at /usr/bin/pax on macOS and many
 // Linuxes). Tests that expect "pax is not installed" must not depend on that, and tests that want PAX put a fake or a
 // real one on PATH themselves. So: remember a real one for the opt-in smoke test, then hide every `pax` from PATH by

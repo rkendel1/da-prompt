@@ -115,7 +115,7 @@ export const INPUT_FIELDS = [
 
 const DEFAULTS = {
   requirements: 'Infer sensible core requirements from the idea.',
-  stack: 'Node.js (>=20), zero or minimal dependencies, no external services required.',
+  stack: 'Node.js (>=20), the standard library plus the pinned AppPort packages (@appport/*) for the capability boundary, no external services required.',
   limits: 'Keep scope to a solid v1 that can be built and verified in one run.',
   tools: 'None beyond the local workspace and shell.',
 };

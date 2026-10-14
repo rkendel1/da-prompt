@@ -40,3 +40,6 @@ li.done strong { text-decoration: line-through; color: var(--muted); }
 .empty { color: var(--muted); text-align: center; padding: 32px 0; }
 .empty[hidden] { display: none; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+select { font: inherit; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); min-width: 0; }
+li.entry { grid-template-columns: 1fr auto; }
+.tag { font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
