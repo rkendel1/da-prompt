@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SettingsStore } from './settings.js';
+import { computeConfig } from './compute.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -79,6 +80,8 @@ export function loadConfig(overrides = {}) {
     terminalBufferBytes: int('FACTORY_TERMINAL_BUFFER_BYTES', 1_048_576),
     terminalIdleMs: Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS ?? '', 10) >= 0 ? Number.parseInt(process.env.FACTORY_TERMINAL_IDLE_MS, 10) : 30 * 60_000,
     terminalExitedKeepMs: int('FACTORY_TERMINAL_EXITED_KEEP_MS', 10 * 60_000),
+    // Run agent shell commands inside a Compute environment (src/compute.js). Off by default.
+    compute: computeConfig(),
     // Extra git config [key, value] pairs for every factory git call (tests redirect https URLs to local repos).
     gitConfig: [],
   };

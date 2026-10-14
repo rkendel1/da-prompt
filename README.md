@@ -1148,3 +1148,17 @@ templates/         files the offline agents generate
 
 Inspired by public ideas on "software factories". Not affiliated with or endorsed by
 Cursor or its founders.
+
+## Running commands inside Compute
+
+Agent shell commands can run inside a [Compute](https://github.com/rkendel1/compute) environment instead of on the host
+(`src/compute.js`). Install `compute-configured` with Homebrew, create an environment from the stack in
+`compute/randy.stack.toml`, make the factory data directory visible inside it at the same path, then set:
+
+```sh
+FACTORY_COMPUTE=1
+FACTORY_COMPUTE_ENV=workstation
+FACTORY_COMPUTE_EXEC='["compute","exec","{environment}","--","{inner}"]'   # use your Compute CLI's exec syntax
+```
+
+`{inner}` expands to the real command line. The deny list, project policy, scrubbed environment and timeouts still apply.
