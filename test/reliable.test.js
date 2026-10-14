@@ -822,3 +822,109 @@ test('representative valid plans from small models pass untouched', async () => 
     assert.deepEqual(checkTaskContracts({ tasks }, caps).problems, []);
   }
 });
+
+// ── context fitting keeps what the task needs ────────────────────────────────────────────────────
+
+test('fitContext never alters the brief, keeps every tool_use paired with its tool_result, and only shrinks results, pasted code and narration', () => {
+  const brief = '# Task t\n## Acceptance criteria\n- works\n## Required outputs\n- src/a.js\n## Verification\n- `npm test`';
+  const big = 'y'.repeat(5000);
+  const messages = [{ role: 'user', content: brief }];
+  for (let i = 1; i <= 8; i++) {
+    messages.push({ role: 'assistant', content: [{ type: 'text', text: `step ${i} ${big}` }, { type: 'tool_use', id: `u${i}`, name: i % 2 ? 'read_file' : 'write_file', input: i % 2 ? { path: `f${i}` } : { path: `f${i}`, content: big } }] });
+    messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `u${i}`, content: `result ${i} ${big}` }] });
+  }
+  const tools = AGENT_TOOLS;
+  const before = JSON.stringify(tools);
+  const fit = fitContext({ system: 'SYSTEM RULES', messages, tools, budgetTokens: 3000 });
+  assert.equal(JSON.stringify(tools), before, 'tool schemas are never touched');
+  assert.equal(fit.messages[0].content, brief, 'the brief (criteria, outputs, verify commands) is byte-for-byte intact');
+  assert.equal(fit.messages.length, messages.length, 'no turn is dropped, so roles still alternate');
+  fit.messages.forEach((m, i) => assert.equal(m.role, i % 2 ? 'assistant' : 'user'));
+  for (let i = 1; i <= 8; i++) {
+    const use = fit.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === 'tool_use' && b.id === `u${i}`);
+    const res = fit.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === 'tool_result' && b.tool_use_id === `u${i}`);
+    assert.ok(use && res, `call u${i} and its result are both still there`);
+    assert.ok(use.input.path, 'the path of every call survives even when its content is replaced');
+  }
+  assert.match(JSON.stringify(fit.messages), /the file is on disk/);
+  assert.ok(fit.tokens <= 3000);
+  // Trimmed text says it was trimmed: nothing is cut silently.
+  assert.match(fit.messages[2].content[0].content, /trimmed to fit the context window/);
+});
+
+test('a task that fits only after trimming still shows the model its acceptance criteria and output paths on every request', async () => {
+  const bigFile = `${'// filler line to make the file large\n'.repeat(260)}`;
+  const plan = { tasks: [{ id: 't', outputs: ['out.md'], verify: ['grep -q DONE out.md'] }], finalVerify: ['npm test'] };
+  const reads = Array.from({ length: 5 }, () => [tool('read_file', { path: 'big.js' })]);
+  const r = await runReplay({
+    idea: 'tight context', planResponses: [{ plan }], maxTurns: 12,
+    attempts: [[...reads, [w('out.md', 'DONE\n')], [finish('ok', ['out.md'])]]],
+  }, {
+    files: { 'package.json': '{"name":"x","version":"1.0.0","type":"module","scripts":{"test":"node -e 0"}}\n', 'big.js': bigFile },
+    beforeStart: ({ env }) => {
+      const p = env.cfg.providerFactory();
+      p.contextLimit = () => 4000;
+      p.maxTokens = 400;
+    },
+  });
+  assert.equal(r.run.status, 'completed', JSON.stringify([r.run.error, taskOf(r).failure]));
+  const reqs = r.provider.requests.filter((q) => q.kind === 'task');
+  assert.ok(reqs.length >= 7);
+  for (const q of reqs) {
+    assert.match(q.messages[0].content, /Acceptance criteria/);
+    assert.match(q.messages[0].content, /out\.md/);
+    assert.match(q.messages[0].content, /grep -q DONE out\.md/);
+    assert.ok(q.tools.includes('write_file') && q.tools.includes('complete_task'), 'the full tool list is sent every time');
+    const ids = new Set(q.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((b) => b.type === 'tool_use').map((b) => b.id) : [])));
+    const answered = new Set(q.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id) : [])));
+    for (const id of answered) assert.ok(ids.has(id), 'no tool_result without its tool_use');
+  }
+  assert.ok(taskOf(r).attempts[0].tools.contextTrimmed > 0, 'trimming really happened in this scenario');
+});
+
+// ── tool use: a model that pastes code instead of calling write_file ──────────────────────────────
+
+const FENCE = '```';
+test('code pasted in a reply is not saved by itself; the nudge names the exact call, and an explicit save_reply_code writes and verifies it', async () => {
+  const plan = { tasks: [{ id: 't', outputs: ['docs/out.md'] }], finalVerify: ['npm test'] };
+  const r = await runReplay({
+    idea: 'paste then save', planResponses: [{ plan }],
+    attempts: [[{ text: `Here is the file:\n${FENCE}md\n# docs/out.md\nReal document content.\n${FENCE}` }, [tool('save_reply_code', { path: 'docs/out.md' })], [finish('saved', ['docs/out.md'])]]],
+  });
+  const nudge = r.provider.requests.filter((q) => q.kind === 'task')[1].messages.at(-1).content;
+  assert.match(nudge, /save_reply_code \{"path": "docs\/out\.md"\}/);
+  assert.match(nudge, /nothing was saved/);
+  assert.equal(fs.existsSync(path.join(r.store.workspaceDir(r.id), 'docs/out.md')), true);
+  assert.deepEqual(r.tools.map((e) => [e.tool, e.status]).slice(0, 1), [['save_reply_code', 'executed']]);
+  assert.equal(r.run.status, 'completed');
+  // Before the explicit call nothing existed: the prose alone created no file.
+  assert.equal(r.provider.requests.filter((q) => q.kind === 'task')[1].messages.length, 3);
+});
+
+test('save_reply_code is an ordinary, checked tool: no code block, ambiguous blocks and bad paths are errors and write nothing', async () => {
+  const ws = new Workspace(tmp());
+  const run = (input, codeBlocks) => execTool(ws, { name: 'save_reply_code', input }, { settings: {}, codeBlocks });
+  const none = await run({ path: 'a.md' }, []);
+  assert.deepEqual([none.isError, none.status], [true, 'failed']);
+  const ambiguous = await run({ path: 'a.md' }, ['one', 'two']);
+  assert.match(ambiguous.text, /has 2 code blocks; pass block/);
+  assert.match((await run({ path: 'a.md', block: 3 }, ['one', 'two'])).text, /block 3 does not exist/);
+  assert.match((await run({ path: '../x.md' }, ['one'])).text, /escapes workspace/);
+  assert.equal(fs.readdirSync(ws.root).filter((f) => f === 'a.md').length, 0, 'nothing was written by any failing call');
+  const ok = await run({ path: 'a.md', block: 2 }, ['one', 'two\n']);
+  assert.equal(ok.status, 'executed');
+  assert.equal(fs.readFileSync(path.join(ws.root, 'a.md'), 'utf8'), 'two\n');
+});
+
+test('an agent that did real work and then only narrates is verified, not trusted: valid outputs complete the task, invalid ones fail it', async () => {
+  const narrate = Array.from({ length: 6 }, () => ({ text: 'Now I will run the tests, please wait.' }));
+  const plan = { tasks: [{ id: 't', outputs: ['docs/out.md'] }], finalVerify: ['npm test'] };
+  const good = await runReplay({ idea: 'work then narrate', planResponses: [{ plan }], attempts: [[[w('docs/out.md', '# out\n\nreal content\n')], ...narrate]], maxTurns: 12 });
+  assert.equal(taskOf(good).status, 'completed');
+  assert.equal(attemptsOf(good)[0].result.implicitCompletion, true);
+  assert.match(taskOf(good).result.summary, /without a completion report/);
+  const bad = await runReplay({ idea: 'work then narrate', planResponses: [{ plan }], attempts: [[[w('docs/out.md', '')], ...narrate]], maxTurns: 12, maxAttempts: 1 });
+  assert.equal(taskOf(bad).status, 'escalated');
+  assert.equal(attemptsOf(bad)[0].failure.category, 'acceptance');
+  assert.match(attemptsOf(bad)[0].verification[0].output, /is empty/);
+});

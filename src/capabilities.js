@@ -175,7 +175,7 @@ export async function checkOutput(ws, output) {
 
 // ── plan-time contract ────────────────────────────────────────────────────────────────────────────
 
-export const AGENT_TOOL_NAMES = new Set(['list_files', 'read_file', 'write_file', 'run_command', 'complete_task', 'render_screenshot', 'generate_image']);
+export const AGENT_TOOL_NAMES = new Set(['list_files', 'read_file', 'write_file', 'save_reply_code', 'run_command', 'complete_task', 'render_screenshot', 'generate_image']);
 const looksLikePath = (s) => typeof s === 'string' && s.length < 300 && !/\s/.test(s);
 
 function ancestors(tasks) {

@@ -125,6 +125,11 @@ export function fitContext({ system, messages, tools, budgetTokens }) {
           trimmed += 1;
           return { ...b, content: clip(b.content, keep) };
         }
+        // Narration (and code pasted in a reply) from earlier turns: the model's own words, not requirements or results.
+        if (b.type === 'text' && m.role === 'assistant' && b.text.length > keep) {
+          trimmed += 1;
+          return { ...b, text: clip(b.text, keep) };
+        }
         if (b.type === 'tool_use' && b.name === 'write_file' && typeof b.input?.content === 'string' && b.input.content.length > keep) {
           trimmed += 1;
           return { ...b, input: { ...b.input, content: `[${b.input.content.length} chars written to ${b.input.path}; the file is on disk]` } };
@@ -142,6 +147,15 @@ export function fitContext({ system, messages, tools, budgetTokens }) {
     const m = out[out.length - 1];
     if (Array.isArray(m?.content)) {
       m.content = m.content.map((b) => (b.type === 'tool_result' && typeof b.content === 'string' && b.content.length > keep ? (trimmed += 1, { ...b, content: clip(b.content, keep) }) : b));
+    }
+    const prev = out[out.length - 2];
+    if (prev?.role === 'assistant' && Array.isArray(prev.content)) {
+      prev.content = prev.content.map((b) => {
+        if (b.type === 'text' && b.text.length > keep) return (trimmed += 1, { ...b, text: clip(b.text, keep) });
+        // The call has already run (its result is the newest message); the file is on disk, so its body need not be resent.
+        if (b.type === 'tool_use' && b.name === 'write_file' && typeof b.input?.content === 'string' && b.input.content.length > keep) return (trimmed += 1, { ...b, input: { ...b.input, content: `[${b.input.content.length} chars written to ${b.input.path}; the file is on disk]` } });
+        return b;
+      });
     }
     if (tokens() <= budgetTokens) return { messages: out, trimmed, tokens: tokens() };
   }

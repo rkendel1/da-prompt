@@ -57,6 +57,11 @@ export const AGENT_TOOLS = [
     input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string', description: 'Full file content' } }, required: ['path', 'content'] },
   },
   {
+    name: 'save_reply_code',
+    description: 'Save a fenced code block from YOUR EARLIER reply into a file (use it when you already wrote the file\'s content in a reply: only the path is needed). Returns the path and confirmed size, or an error. Equivalent to write_file with that code block as content.',
+    input_schema: { type: 'object', properties: { path: { type: 'string' }, block: { type: 'integer', minimum: 1, description: 'Which code block of that reply (1 = first); required when it has several' } }, required: ['path'] },
+  },
+  {
     name: 'run_command',
     description: 'Run a shell command in the workspace root (sh -c, non-interactive). Returns exit code, stdout and stderr; a non-zero exit is reported as an error. Use it to install, build, run and test.',
     input_schema: {
@@ -378,16 +383,29 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
     const uses = res.content.filter((c) => c.type === 'tool_use');
     if (uses.length === 0) {
       textOnly += 1;
+      // Tell the model what is actually still missing, from the disk, so the nudge is about facts rather than another request to "continue".
+      const missingOutputs = [];
+      for (const o of (task.outputs || []).filter((x) => !/[*?]/.test(x) && !x.endsWith('/'))) if (!(await validateArtifact(ws, o)).ok) missingOutputs.push(o);
+      const progress = (task.outputs || []).length ? (missingOutputs.length ? ` Required outputs still missing or invalid: ${missingOutputs.join(', ')}.` : ` Every required output now exists on disk. ${(task.verify || [])[0] ? `To check it, call run_command {"command": ${JSON.stringify(task.verify[0])}}. ` : ''}If the task is done, call complete_task {"summary": "<what you did>", "files": ${JSON.stringify((task.outputs || []).filter((x) => !/[*?]/.test(x)))}}.`) : '';
+      if (textOnly >= MAX_TEXT_ONLY_TURNS && (stats.writes > 0 || stats.commandsOk > 0)) {
+        // The agent did real work and then only talks. Its silence is not a claim either way: hand the workspace to verification, which
+        // decides from the files and commands. If the checks fail the task fails exactly as it would after a complete_task.
+        return { ok: true, result: { ...completionFields({ summary: 'The agent stopped calling tools after doing work; the factory verified the workspace without a completion report.' }, filesTouched), commandsRun, turns: turn, implicitCompletion: true }, tools: stats, ops: ops.slice(-60), workDigest: digest() };
+      }
       if (textOnly >= MAX_TEXT_ONLY_TURNS) return fail(`the model answered with text ${textOnly} times in a row without calling any tool; nothing was created by describing it`, { category: 'execution', kind: 'no_tool_calls', transient: false });
       if (res.stop_reason === 'max_tokens') {
         messages.push({ role: 'user', content: 'Your reply was cut off. Continue, writing large files in smaller pieces if needed.' });
       } else if (!res.content.some((b) => b.type === 'text' && b.text.trim())) {
-        messages.push({ role: 'user', content: 'Continue the task using the tools, and call complete_task when it is done and verified.' });
-      } else if (pastedFile(res.content, task)) {
-        const target = pastedFile(res.content, task);
-        messages.push({ role: 'user', content: `You wrote the content of ${target} in your reply, but a reply is not a file: nothing was saved. Call the write_file tool now with path "${target}" and the complete content as the "content" argument.` });
+        messages.push({ role: 'user', content: `Continue the task using the tools, and call complete_task when it is done and verified.${progress}` });
+      } else if (replyCodeBlocks([{ role: 'assistant', content: res.content }]).length) {
+        const blocks = replyCodeBlocks([{ role: 'assistant', content: res.content }]);
+        // Each block's own first-line comment ("// test/a.test.js") says where it belongs; otherwise fall back to what is missing.
+        const hints = blocks.map((bl) => /^\s*(?:\/\/|#|<!--|\/\*)\s*([\w./@-]+\.\w+)/.exec(bl)?.[1] || null);
+        const fallback = pastedFile(res.content, task) || missingOutputs[0] || (task.outputs || []).find((o) => !/[*?/]$/.test(o)) || 'the file';
+        const calls = blocks.map((_, i) => `save_reply_code {"path": "${hints[i] || fallback}"${blocks.length > 1 ? `, "block": ${i + 1}` : ''}}`);
+        messages.push({ role: 'user', content: `You wrote code in your reply, but a reply is not a file: nothing was saved. Call ${calls.length > 1 ? 'these tools, one per code block' : 'this tool'} now: ${calls.join(' ; ')} (or write_file with the content). Do not explain; call the tool.${progress}` });
       } else {
-        messages.push({ role: 'user', content: 'You did not call any tool, so nothing happened. Describing a file or a result does not create it. Call write_file / run_command / another tool to do the work, or complete_task if it is done and verified.' });
+        messages.push({ role: 'user', content: 'You did not call any tool, so nothing happened. Describing a file or a result does not create it. Call write_file / run_command / another tool to do the work, or complete_task if it is done and verified.' + progress });
       }
       continue;
     }
@@ -423,7 +441,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
         dup = true;
         out = { text: `unchanged: ${use.input.path} already contains exactly this content (written earlier in this attempt); nothing was re-executed. Writing it again will not change the result — do something different.`, preview: 'unchanged', status: 'executed', path: use.input.path };
       } else {
-        out = await execTool(ws, use, { settings, signal, caps, cfg });
+        out = await execTool(ws, use, { settings, signal, caps, cfg, codeBlocks: use.name === 'save_reply_code' ? replyCodeBlocks(messages) : undefined });
         byId.set(use.id, out);
       }
       if (dup) stats.duplicates += 1;
@@ -431,10 +449,10 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
       else if (out.status === 'unavailable') stats.unavailable += 1;
       else if (out.status === 'rejected') stats.rejected += 1;
       else stats.failed += 1;
-      if (!out.isError && out.path && !dup && ['write_file', 'render_screenshot', 'generate_image'].includes(use.name)) {
+      if (!out.isError && out.path && !dup && ['write_file', 'save_reply_code', 'render_screenshot', 'generate_image'].includes(use.name)) {
         filesTouched.add(out.path);
         stats.writes += 1;
-        written.set(out.path, use.name === 'write_file' ? sha(String(use.input.content)) : sha(`${out.path}:${out.bytes}`));
+        written.set(out.path, use.name === 'write_file' ? sha(String(use.input.content)) : sha(`${out.path}:${out.bytes}:${out.digest || ''}`));
       }
       if (use.name === 'run_command' && !dup) {
         commandsRun.push({ command: use.input?.command, exitCode: out.exitCode });
@@ -464,6 +482,18 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
   return fail(`agent did not finish within ${settings.maxAgentTurns} turns`, { category: 'execution', kind: 'turn_limit', transient: false });
 }
 
+/** Fenced code blocks of the most recent assistant message that has any, in order. */
+export function replyCodeBlocks(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'assistant') continue;
+    const text = typeof m.content === 'string' ? m.content : (m.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    const blocks = [...text.matchAll(/```[^\n`]*\n([\s\S]*?)```/g)].map((x) => x[1]);
+    if (blocks.length) return blocks;
+  }
+  return [];
+}
+
 /** The declared output a reply pasted as a code block instead of writing it (so the next prompt can say exactly what to do). */
 function pastedFile(content, task) {
   const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
@@ -480,7 +510,7 @@ const clipText = (t, n) => (String(t).length <= n ? String(t) : `${String(t).sli
  *   status 'rejected'    the call never ran: unknown tool or arguments that do not satisfy the tool's schema
  *   status 'unavailable' the tool needs a capability this machine does not have (`capability` names it)
  */
-export async function execTool(ws, use, { settings, signal, caps, cfg } = {}) {
+export async function execTool(ws, use, { settings, signal, caps, cfg, codeBlocks } = {}) {
   const input = use.input ?? {};
   const schema = toolSchema(use.name);
   const reject = (text, status = 'rejected', extra = {}) => ({ text, preview: text.slice(0, 200), isError: true, status, ...extra });
@@ -501,6 +531,15 @@ export async function execTool(ws, use, { settings, signal, caps, cfg } = {}) {
       case 'write_file': {
         const r = await ws.writeFile(input.path, input.content);
         return { text: `wrote ${r.path} (${r.bytes} bytes, confirmed on disk)${r.bytes === 0 ? ' — WARNING: the file is empty' : ''}`, preview: `${r.bytes} bytes`, path: r.path, bytes: r.bytes, status: 'executed' };
+      }
+      case 'save_reply_code': {
+        const blocks = codeBlocks || [];
+        if (!blocks.length) return reject('error: none of your earlier replies contains a fenced code block, so there is nothing to save. Use write_file with the content.', 'failed');
+        if (input.block == null && blocks.length > 1) return reject(`error: your reply has ${blocks.length} code blocks; pass block (1-${blocks.length}) to say which one belongs in ${input.path}. Nothing was saved.`);
+        const idx = (input.block ?? 1) - 1;
+        if (!blocks[idx]) return reject(`error: block ${input.block} does not exist (the reply has ${blocks.length}). Nothing was saved.`);
+        const r = await ws.writeFile(input.path, blocks[idx]);
+        return { text: `saved code block ${idx + 1} of your reply to ${r.path} (${r.bytes} bytes, confirmed on disk)${r.bytes === 0 ? ' — WARNING: the file is empty' : ''}`, preview: `${r.bytes} bytes`, path: r.path, bytes: r.bytes, digest: sha(blocks[idx]), status: 'executed' };
       }
       case 'run_command': {
         const timeoutMs = Math.min((input.timeout_seconds || settings.commandTimeoutMs / 1000) * 1000, 600_000);
@@ -530,6 +569,7 @@ export async function execTool(ws, use, { settings, signal, caps, cfg } = {}) {
 export function summarizeInput(use) {
   const i = use.input || {};
   if (use.name === 'write_file') return { path: i.path, bytes: Buffer.byteLength(String(i.content ?? '')) };
+  if (use.name === 'save_reply_code') return { path: i.path, block: i.block };
   if (use.name === 'run_command') return { command: redact(String(i.command || '')).slice(0, 500) };
   if (use.name === 'render_screenshot') return { path: i.output_path, html: i.html_path };
   if (use.name === 'generate_image') return { path: i.output_path };
