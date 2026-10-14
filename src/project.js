@@ -585,6 +585,11 @@ export async function inspectProject(ws) {
     if (scripts.lint) add('lint', run('lint'), 'package.json scripts.lint');
     for (const s of ['typecheck', 'type-check', 'tsc']) if (scripts[s]) add('typecheck', run(s), `package.json scripts.${s}`);
     if (scripts.build) add('build', run('build'), 'package.json scripts.build');
+    // Conventions a model gets wrong when it has not read package.json: derived from the manifest, never guessed.
+    commands.conventions = [
+      ...(/node\s+--test|node:test/.test(String(scripts.test || '')) ? ["Tests run with Node's built-in runner: `import { test } from 'node:test'; import assert from 'node:assert/strict';`. Do not use jest or mocha globals (describe, it, expect)."] : []),
+      ...(pkg.type === 'module' ? ['package.json sets "type": "module": use import/export, not require().'] : []),
+    ];
     commands.nodeStart = scripts.start ? { command: `${pm} start`, source: 'package.json scripts.start' } : null;
     commands.packageManager = pm;
     commands.hasDependencies = Boolean(Object.keys(pkg.dependencies || {}).length || Object.keys(pkg.devDependencies || {}).length);
@@ -700,6 +705,7 @@ export async function inspectProject(ws) {
     manifests,
     nested,
     commands,
+    conventions: commands.conventions || [],
     baselineCommands,
     top,
     sample,
@@ -1050,6 +1056,7 @@ export function agentContext(run, task, maxChars = 5000) {
   });
   const L = ['Existing project: modify it in place, following its conventions. Keep the change minimal and do not refactor unrelated code.'];
   L.push(`Stack: ${i.ecosystems.join(', ') || 'unknown'}. Verify with the project's own commands: ${i.baselineCommands.map((c) => `\`${c.command}\``).join(', ') || 'none detected'}.`);
+  for (const c of i.conventions || []) L.push(c);
   const failing = (run.project.baseline || []).filter((b) => b.status === 'failed' || b.status === 'timeout');
   if (failing.length) L.push(`Pre-existing failures at baseline (not caused by you): ${failing.map((b) => `\`${b.command}\``).join(', ')}. Only new failures count against your task.`);
   if (relevant.length) {

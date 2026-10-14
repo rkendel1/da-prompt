@@ -928,3 +928,17 @@ test('an agent that did real work and then only narrates is verified, not truste
   assert.equal(attemptsOf(bad)[0].failure.category, 'acceptance');
   assert.match(attemptsOf(bad)[0].verification[0].output, /is empty/);
 });
+
+test('project conventions that small models get wrong are derived from the manifest and put in front of the agent', async () => {
+  const { inspectProject, agentContext } = await import('../src/project.js');
+  const ws = new Workspace(tmp());
+  await ws.writeFile('package.json', JSON.stringify({ name: 'x', type: 'module', scripts: { test: 'node --test test/a.test.js' } }));
+  const inspection = await inspectProject(ws);
+  assert.equal(inspection.conventions.length, 2);
+  const ctx = agentContext({ project: { inspection, baseline: [] }, source: { mode: 'local' } }, { files: [], outputs: [] });
+  assert.match(ctx, /built-in runner.*node:test.*Do not use jest or mocha globals/);
+  assert.match(ctx, /"type": "module": use import\/export/);
+  const jestWs = new Workspace(tmp());
+  await jestWs.writeFile('package.json', JSON.stringify({ name: 'y', scripts: { test: 'jest' } }));
+  assert.deepEqual((await inspectProject(jestWs)).conventions, [], 'nothing is asserted that the manifest does not show');
+});
