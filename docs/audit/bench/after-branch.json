@@ -1,0 +1,740 @@
+{
+  "schema": "da-prompt.bench/1",
+  "generatedAt": "2026-10-14T19:15:19.449Z",
+  "startedAt": "2026-10-14T19:07:30.756Z",
+  "mode": "live",
+  "notice": "LIVE RUN: a real provider was called. Results describe this provider, model, hardware and configuration on this date only.",
+  "repository": {
+    "revision": "8d1c7ffc73fa39ab900706a5b174bb84e6cfb39c",
+    "dirty": false
+  },
+  "node": "v24.9.0",
+  "config": {
+    "mode": "live",
+    "provider": "ollama",
+    "model": "qwen2.5-coder:7b",
+    "engine": "builtin",
+    "maxOutputTokens": 8192,
+    "settings": {
+      "maxParallel": 3,
+      "maxAttempts": 3,
+      "maxAgentTurns": 30,
+      "tokenBudget": 2000000,
+      "timeoutMinutes": 120,
+      "commandTimeoutMs": 180000
+    },
+    "providerOptions": {
+      "numCtx": 8192,
+      "temperature": 0,
+      "seed": 42
+    }
+  },
+  "configId": "ce1404393ea4",
+  "tasks": [
+    "r1-write-file-and-test",
+    "r2-design-artifact",
+    "r3-recover-after-failure",
+    "r4-multi-agent-shared"
+  ],
+  "repeat": 1,
+  "results": [
+    {
+      "taskId": "r1-write-file-and-test",
+      "kind": "small coding task: write a file, pass tests",
+      "repetition": 1,
+      "status": "failed",
+      "runId": "202610141907-b28673",
+      "runStatus": "failed",
+      "wallMs": 18464,
+      "error": "planner could not produce a valid plan after 3 attempts",
+      "phasesMs": {},
+      "calls": {
+        "count": 3,
+        "byPurpose": {
+          "plan": {
+            "count": 3,
+            "failed": 0,
+            "durationMs": 18183
+          }
+        },
+        "durationMs": 18183,
+        "failuresByKind": {}
+      },
+      "turns": 0,
+      "toolCalls": 0,
+      "toolFailures": 0,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 0
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 9801,
+        "output": 749,
+        "callsReporting": 3,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 0,
+        "checklistTotal": 0,
+        "finalChecks": [],
+        "tasks": {
+          "total": 0,
+          "completed": 0,
+          "escalated": 0,
+          "attempts": 0
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [
+          {
+            "name": "mean and median behave",
+            "command": "node accept.mjs",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 48,
+            "output": "oader.resolve (node:internal/modules/esm/loader:732:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)\n    at #link (node:internal/modules/esm/module_job:208:49) {\n  code: 'ERR_MODULE_NOT_FOUND',\n  url: 'file:///private/var/folders/53/0x2kphmx5gl2b9bh4h0y42600000gn/T/da-prompt-bench-n6fZK2/data/runs/202610141907-b28673/workspace/src/stats.js'\n}\n\nNode.js v24.9.0"
+          },
+          {
+            "name": "the project's own tests exist and pass",
+            "command": "test -s test/stats.test.js && npm test",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 6,
+            "output": ""
+          }
+        ]
+      },
+      "delivery": {
+        "produced": false,
+        "integrityOk": null
+      },
+      "changedFiles": [],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 0,
+      "falseSuccess": false,
+      "verdictMatchesAcceptance": true,
+      "metrics": {
+        "planningMs": null,
+        "tasks": {
+          "total": 0,
+          "completed": 0,
+          "skipped": 0,
+          "escalated": 0,
+          "blocked": 0,
+          "cancelled": 0,
+          "pending": 0,
+          "retries": 0,
+          "failed": []
+        },
+        "artifacts": {
+          "checked": 0,
+          "valid": 0,
+          "invalid": 0
+        },
+        "tools": {
+          "invoked": 0,
+          "executed": 0,
+          "failed": 0,
+          "rejected": 0,
+          "unavailable": 0,
+          "duplicates": 0
+        },
+        "inference": {
+          "calls": 3,
+          "failed": 0,
+          "medianCallMs": 3962,
+          "queuedMs": 0,
+          "generationMs": 18183,
+          "modelLoadMs": 1559,
+          "promptEvalMs": 5160,
+          "evalMs": 11379,
+          "tokensPerSecond": 65.8,
+          "basis": "timings are factory-measured; load/eval times and tokens/second are backend-reported (Ollama) and null when the backend does not say",
+          "limiters": [
+            {
+              "endpoint": "127.0.0.1:11434",
+              "max": 1,
+              "active": 0,
+              "queued": 0,
+              "acquired": 3,
+              "peakActive": 1,
+              "peakQueued": 0,
+              "queuedMs": 0,
+              "aborted": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "taskId": "r2-design-artifact",
+      "kind": "design task that must produce real artifacts",
+      "repetition": 1,
+      "status": "failed",
+      "runId": "202610141907-92ecce",
+      "runStatus": "needs_attention",
+      "wallMs": 78791,
+      "error": null,
+      "phasesMs": {
+        "plan": 21983,
+        "execution": 53283,
+        "feedback": 44742,
+        "verification": 5560,
+        "completion": 3316
+      },
+      "calls": {
+        "count": 20,
+        "byPurpose": {
+          "plan": {
+            "count": 2,
+            "failed": 0,
+            "durationMs": 21784
+          },
+          "agent_turn": {
+            "count": 17,
+            "failed": 0,
+            "durationMs": 42233
+          },
+          "summary": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 3171
+          }
+        },
+        "durationMs": 67188,
+        "failuresByKind": {}
+      },
+      "turns": 17,
+      "toolCalls": 6,
+      "toolFailures": 1,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 1
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 61389,
+        "output": 3348,
+        "callsReporting": 20,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 4,
+        "checklistTotal": 6,
+        "finalChecks": [
+          {
+            "command": "npm test",
+            "ok": true,
+            "state": "passed"
+          }
+        ],
+        "tasks": {
+          "total": 2,
+          "completed": 0,
+          "escalated": 1,
+          "attempts": 3
+        }
+      },
+      "acceptance": {
+        "ok": true,
+        "results": [
+          {
+            "name": "wireframe html has a form, an input, an Add button and three books",
+            "command": "node accept-html.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 32,
+            "output": ""
+          },
+          {
+            "name": "screenshot is a real, non-trivial PNG (needs a renderer)",
+            "command": "node accept-png.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 32,
+            "output": ""
+          }
+        ]
+      },
+      "delivery": {
+        "produced": true,
+        "integrityOk": true
+      },
+      "changedFiles": [
+        "docs/wireframe.html",
+        "docs/wireframe.png"
+      ],
+      "expectedFilesChanged": true,
+      "repeatedToolFailures": 0,
+      "falseSuccess": false,
+      "verdictMatchesAcceptance": false,
+      "metrics": {
+        "planningMs": 21786,
+        "tasks": {
+          "total": 2,
+          "completed": 0,
+          "skipped": 0,
+          "escalated": 1,
+          "blocked": 1,
+          "cancelled": 0,
+          "pending": 0,
+          "retries": 2,
+          "failed": [
+            {
+              "id": "create_wireframe",
+              "status": "escalated",
+              "category": "execution",
+              "kind": "no_tool_calls",
+              "reason": "the model answered with text 4 times in a row without calling any tool; nothing was created by describing it"
+            }
+          ]
+        },
+        "artifacts": {
+          "checked": 0,
+          "valid": 0,
+          "invalid": 0
+        },
+        "tools": {
+          "invoked": 7,
+          "executed": 5,
+          "failed": 1,
+          "rejected": 0,
+          "unavailable": 0,
+          "duplicates": 0
+        },
+        "inference": {
+          "calls": 20,
+          "failed": 0,
+          "medianCallMs": 1708,
+          "queuedMs": 0,
+          "generationMs": 67186,
+          "modelLoadMs": 25,
+          "promptEvalMs": 13320,
+          "evalMs": 53369,
+          "tokensPerSecond": 62.7,
+          "basis": "timings are factory-measured; load/eval times and tokens/second are backend-reported (Ollama) and null when the backend does not say",
+          "limiters": [
+            {
+              "endpoint": "127.0.0.1:11434",
+              "max": 1,
+              "active": 0,
+              "queued": 0,
+              "acquired": 20,
+              "peakActive": 1,
+              "peakQueued": 0,
+              "queuedMs": 0,
+              "aborted": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "taskId": "r3-recover-after-failure",
+      "kind": "task that meets a verification failure and must recover",
+      "repetition": 1,
+      "status": "failed",
+      "runId": "202610141909-316d2a",
+      "runStatus": "needs_attention",
+      "wallMs": 28393,
+      "error": null,
+      "phasesMs": {
+        "plan": 12087,
+        "execution": 11488,
+        "feedback": 6372,
+        "completion": 4478
+      },
+      "calls": {
+        "count": 13,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 11855
+          },
+          "agent_turn": {
+            "count": 11,
+            "failed": 0,
+            "durationMs": 11469
+          },
+          "summary": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 4292
+          }
+        },
+        "durationMs": 27616,
+        "failuresByKind": {}
+      },
+      "turns": 11,
+      "toolCalls": 3,
+      "toolFailures": 0,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 1
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 36528,
+        "output": 1046,
+        "callsReporting": 13,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 5,
+        "checklistTotal": 7,
+        "finalChecks": [
+          {
+            "command": "npm test",
+            "ok": true,
+            "state": "preexisting"
+          }
+        ],
+        "tasks": {
+          "total": 1,
+          "completed": 0,
+          "escalated": 1,
+          "attempts": 2
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [
+          {
+            "name": "the project's tests pass",
+            "command": "npm test",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 152,
+            "output": " Test.processPendingSubtests (node:internal/test_runner/test:788:18)\n      at Test.postRun (node:internal/test_runner/test:1235:19)\n      at Test.run (node:internal/test_runner/test:1163:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    operator: 'throws',\n    diff: 'simple'\n  }"
+          },
+          {
+            "name": "the tests were not weakened",
+            "command": "node accept.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 33,
+            "output": ""
+          },
+          {
+            "name": "extra cases",
+            "command": "node accept2.mjs",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 35,
+            "output": "mjs:3:8\n    at ModuleJob.run (node:internal/modules/esm/module_job:377:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:689:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 2000,\n  expected: 172800000,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v24.9.0"
+          }
+        ]
+      },
+      "delivery": {
+        "produced": true,
+        "integrityOk": true
+      },
+      "changedFiles": [],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 0,
+      "falseSuccess": false,
+      "verdictMatchesAcceptance": true,
+      "metrics": {
+        "planningMs": 11855,
+        "tasks": {
+          "total": 1,
+          "completed": 0,
+          "skipped": 0,
+          "escalated": 1,
+          "blocked": 0,
+          "cancelled": 0,
+          "pending": 0,
+          "retries": 1,
+          "failed": [
+            {
+              "id": "parseDurationImplementation",
+              "status": "escalated",
+              "category": "no_progress",
+              "kind": "no_tool_calls",
+              "reason": "the same failure repeated 2 times in a row without progress: the model answered with text 4 times in a row without calling any tool; nothing was created by describing it"
+            }
+          ]
+        },
+        "artifacts": {
+          "checked": 0,
+          "valid": 0,
+          "invalid": 0
+        },
+        "tools": {
+          "invoked": 3,
+          "executed": 3,
+          "failed": 0,
+          "rejected": 0,
+          "unavailable": 0,
+          "duplicates": 0
+        },
+        "inference": {
+          "calls": 13,
+          "failed": 0,
+          "medianCallMs": 1174,
+          "queuedMs": 0,
+          "generationMs": 27616,
+          "modelLoadMs": 14,
+          "promptEvalMs": 10948,
+          "evalMs": 16383,
+          "tokensPerSecond": 63.8,
+          "basis": "timings are factory-measured; load/eval times and tokens/second are backend-reported (Ollama) and null when the backend does not say",
+          "limiters": [
+            {
+              "endpoint": "127.0.0.1:11434",
+              "max": 1,
+              "active": 0,
+              "queued": 0,
+              "acquired": 13,
+              "peakActive": 1,
+              "peakQueued": 0,
+              "queuedMs": 0,
+              "aborted": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "taskId": "r4-multi-agent-shared",
+      "kind": "multi-agent: independent modules plus a shared dependency",
+      "repetition": 1,
+      "status": "failed",
+      "runId": "202610141909-4533a2",
+      "runStatus": "needs_attention",
+      "wallMs": 342991,
+      "error": null,
+      "phasesMs": {
+        "plan": 17833,
+        "execution": 316093,
+        "feedback": 197675,
+        "verification": 145952,
+        "completion": 8681
+      },
+      "calls": {
+        "count": 53,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 17651
+          },
+          "agent_turn": {
+            "count": 51,
+            "failed": 0,
+            "durationMs": 899712
+          },
+          "summary": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 8403
+          }
+        },
+        "durationMs": 925766,
+        "failuresByKind": {}
+      },
+      "turns": 51,
+      "toolCalls": 27,
+      "toolFailures": 11,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 4
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 167882,
+        "output": 7988,
+        "callsReporting": 53,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 5,
+        "checklistTotal": 7,
+        "finalChecks": [
+          {
+            "command": "npm test",
+            "ok": true,
+            "state": "preexisting"
+          }
+        ],
+        "tasks": {
+          "total": 5,
+          "completed": 3,
+          "escalated": 2,
+          "attempts": 9
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [
+          {
+            "name": "the three helpers and the index work",
+            "command": "node accept.mjs",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 72,
+            "output": "t file:///private/var/folders/53/0x2kphmx5gl2b9bh4h0y42600000gn/T/da-prompt-bench-8wwfgw/data/runs/202610141909-4533a2/workspace/src/index.js:1:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:377:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:689:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)\n\nNode.js v24.9.0"
+          },
+          {
+            "name": "each helper has its own test file and npm test passes",
+            "command": "test -s test/vowels.test.js && test -s test/reverse.test.js && test -s test/caps.test.js && npm test",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 9,
+            "output": ""
+          },
+          {
+            "name": "README names each helper",
+            "command": "node accept-readme.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 69,
+            "output": ""
+          }
+        ]
+      },
+      "delivery": {
+        "produced": true,
+        "integrityOk": true
+      },
+      "changedFiles": [
+        "README.md",
+        "src/index.js",
+        "src/reverse.js"
+      ],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 2,
+      "falseSuccess": false,
+      "verdictMatchesAcceptance": true,
+      "metrics": {
+        "planningMs": 17651,
+        "tasks": {
+          "total": 5,
+          "completed": 3,
+          "skipped": 0,
+          "escalated": 2,
+          "blocked": 0,
+          "cancelled": 0,
+          "pending": 0,
+          "retries": 4,
+          "failed": [
+            {
+              "id": "vowels",
+              "status": "escalated",
+              "category": "no_progress",
+              "kind": "no_tool_calls",
+              "reason": "the same failure repeated 2 times in a row without progress: the model answered with text 4 times in a row without calling any tool; nothing was created by describing it"
+            },
+            {
+              "id": "caps",
+              "status": "escalated",
+              "category": "execution",
+              "kind": "context_overflow",
+              "reason": "context overflow: retrying cannot help. the request needs about 5915 tokens but only 5644 fit in the context window after trimming older turns; raise the context window (numCtx) or split the task"
+            }
+          ]
+        },
+        "artifacts": {
+          "checked": 3,
+          "valid": 3,
+          "invalid": 0
+        },
+        "tools": {
+          "invoked": 30,
+          "executed": 14,
+          "failed": 9,
+          "rejected": 0,
+          "unavailable": 0,
+          "duplicates": 2
+        },
+        "inference": {
+          "calls": 53,
+          "failed": 0,
+          "medianCallMs": 19356,
+          "queuedMs": 583638,
+          "generationMs": 342111,
+          "modelLoadMs": 69,
+          "promptEvalMs": 130427,
+          "evalMs": 209814,
+          "tokensPerSecond": 38.1,
+          "basis": "timings are factory-measured; load/eval times and tokens/second are backend-reported (Ollama) and null when the backend does not say",
+          "limiters": [
+            {
+              "endpoint": "127.0.0.1:11434",
+              "max": 1,
+              "active": 0,
+              "queued": 0,
+              "acquired": 53,
+              "peakActive": 1,
+              "peakQueued": 2,
+              "queuedMs": 583636,
+              "aborted": 0
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "summary": {
+    "attempted": 4,
+    "passed": 0,
+    "failed": 4,
+    "incomplete": 0,
+    "error": 0,
+    "passRate": 0,
+    "byTask": {
+      "r1-write-file-and-test": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 1,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 18464
+      },
+      "r2-design-artifact": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 1,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 78791
+      },
+      "r3-recover-after-failure": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 1,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 28393
+      },
+      "r4-multi-agent-shared": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 1,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 342991
+      }
+    },
+    "totals": {
+      "wallMs": 468639,
+      "modelCalls": 89,
+      "toolCalls": 36,
+      "transportRetries": 0,
+      "taskRetries": 6,
+      "inputTokens": 275600,
+      "outputTokens": 13131,
+      "callsWithoutUsage": 0
+    },
+    "medianWallMs": 53592,
+    "falseSuccesses": 0,
+    "verificationAccuracy": 0.75
+  }
+}

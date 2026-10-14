@@ -1,0 +1,442 @@
+{
+  "schema": "da-prompt.bench/1",
+  "generatedAt": "2026-10-14T18:12:08.736Z",
+  "startedAt": "2026-10-14T17:28:20.798Z",
+  "mode": "live",
+  "notice": "LIVE RUN: a real provider was called. Results describe this provider, model, hardware and configuration on this date only.",
+  "repository": {
+    "revision": "574e74514334fc7376e7c169265470d8ef7158a9",
+    "dirty": true
+  },
+  "node": "v24.9.0",
+  "config": {
+    "mode": "live",
+    "provider": "ollama",
+    "model": "qwen2.5-coder:7b",
+    "engine": "builtin",
+    "maxOutputTokens": 8192,
+    "settings": {
+      "maxParallel": 3,
+      "maxAttempts": 3,
+      "maxAgentTurns": 30,
+      "tokenBudget": 2000000,
+      "timeoutMinutes": 120,
+      "commandTimeoutMs": 180000
+    },
+    "providerOptions": {
+      "numCtx": 8192,
+      "temperature": 0
+    }
+  },
+  "configId": "a5f930d2f701",
+  "tasks": [
+    "r1-write-file-and-test",
+    "r2-design-artifact",
+    "r3-recover-after-failure",
+    "r4-multi-agent-shared"
+  ],
+  "repeat": 1,
+  "results": [
+    {
+      "taskId": "r1-write-file-and-test",
+      "kind": "small coding task: write a file, pass tests",
+      "repetition": 1,
+      "status": "incomplete",
+      "runId": "202610141728-3311c9",
+      "runStatus": "cancelled",
+      "wallMs": 900048,
+      "error": "harness time limit (900 s) passed; the run was cancelled",
+      "phasesMs": {
+        "plan": 6791
+      },
+      "calls": {
+        "count": 69,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 6568
+          },
+          "agent_turn": {
+            "count": 68,
+            "failed": 0,
+            "durationMs": 2678735
+          }
+        },
+        "durationMs": 2685303,
+        "failuresByKind": {
+          "cancelled": 3
+        }
+      },
+      "turns": 68,
+      "toolCalls": 10,
+      "toolFailures": 4,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 0
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 276578,
+        "output": 21736,
+        "callsReporting": 66,
+        "callsUnavailable": 3
+      },
+      "verification": {
+        "checklistPassed": 0,
+        "checklistTotal": 0,
+        "finalChecks": [],
+        "tasks": {
+          "total": 3,
+          "completed": 0,
+          "escalated": 0,
+          "attempts": 3
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [],
+        "skipped": "the run did not finish"
+      },
+      "delivery": {
+        "produced": false,
+        "integrityOk": null
+      },
+      "changedFiles": [],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 1
+    },
+    {
+      "taskId": "r2-design-artifact",
+      "kind": "design task that must produce real artifacts",
+      "repetition": 1,
+      "status": "passed",
+      "runId": "202610141743-488295",
+      "runStatus": "completed",
+      "wallMs": 176898,
+      "error": null,
+      "phasesMs": {
+        "plan": 27772,
+        "execution": 141331,
+        "feedback": 91116,
+        "verification": 91142,
+        "completion": 7106
+      },
+      "calls": {
+        "count": 13,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 27546
+          },
+          "agent_turn": {
+            "count": 11,
+            "failed": 0,
+            "durationMs": 215745
+          },
+          "summary": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 6594
+          }
+        },
+        "durationMs": 249885,
+        "failuresByKind": {}
+      },
+      "turns": 11,
+      "toolCalls": 10,
+      "toolFailures": 2,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 2
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 30376,
+        "output": 4066,
+        "callsReporting": 13,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 6,
+        "checklistTotal": 6,
+        "finalChecks": [
+          {
+            "command": "npm test",
+            "ok": true,
+            "state": "passed"
+          }
+        ],
+        "tasks": {
+          "total": 2,
+          "completed": 2,
+          "escalated": 0,
+          "attempts": 4
+        }
+      },
+      "acceptance": {
+        "ok": true,
+        "results": [
+          {
+            "name": "wireframe html has a form, an input, an Add button and three books",
+            "command": "node accept-html.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 69,
+            "output": ""
+          },
+          {
+            "name": "screenshot is a real, non-trivial PNG (needs a renderer)",
+            "command": "node accept-png.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 71,
+            "output": ""
+          }
+        ]
+      },
+      "delivery": {
+        "produced": true,
+        "integrityOk": true
+      },
+      "changedFiles": [
+        "docs/wireframe.html",
+        "docs/wireframe.png"
+      ],
+      "expectedFilesChanged": true,
+      "repeatedToolFailures": 0
+    },
+    {
+      "taskId": "r3-recover-after-failure",
+      "kind": "task that meets a verification failure and must recover",
+      "repetition": 1,
+      "status": "failed",
+      "runId": "202610141746-36e803",
+      "runStatus": "needs_attention",
+      "wallMs": 650845,
+      "error": null,
+      "phasesMs": {
+        "plan": 22294,
+        "execution": 613427,
+        "feedback": 62797,
+        "completion": 14228
+      },
+      "calls": {
+        "count": 92,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 21868
+          },
+          "agent_turn": {
+            "count": 90,
+            "failed": 0,
+            "durationMs": 612532
+          },
+          "summary": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 13689
+          }
+        },
+        "durationMs": 648089,
+        "failuresByKind": {}
+      },
+      "turns": 90,
+      "toolCalls": 5,
+      "toolFailures": 2,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 2
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 405797,
+        "output": 10338,
+        "callsReporting": 92,
+        "callsUnavailable": 0
+      },
+      "verification": {
+        "checklistPassed": 5,
+        "checklistTotal": 7,
+        "finalChecks": [
+          {
+            "command": "npm test",
+            "ok": true,
+            "state": "preexisting"
+          }
+        ],
+        "tasks": {
+          "total": 1,
+          "completed": 0,
+          "escalated": 1,
+          "attempts": 3
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [
+          {
+            "name": "the project's tests pass",
+            "command": "npm test",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 432,
+            "output": " Test.processPendingSubtests (node:internal/test_runner/test:788:18)\n      at Test.postRun (node:internal/test_runner/test:1235:19)\n      at Test.run (node:internal/test_runner/test:1163:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    operator: 'throws',\n    diff: 'simple'\n  }"
+          },
+          {
+            "name": "the tests were not weakened",
+            "command": "node accept.mjs",
+            "ok": true,
+            "exitCode": 0,
+            "durationMs": 74,
+            "output": ""
+          },
+          {
+            "name": "extra cases",
+            "command": "node accept2.mjs",
+            "ok": false,
+            "exitCode": 1,
+            "durationMs": 72,
+            "output": "mjs:3:8\n    at ModuleJob.run (node:internal/modules/esm/module_job:377:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:689:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 2000,\n  expected: 172800000,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v24.9.0"
+          }
+        ]
+      },
+      "delivery": {
+        "produced": true,
+        "integrityOk": true
+      },
+      "changedFiles": [],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 1
+    },
+    {
+      "taskId": "r4-multi-agent-shared",
+      "kind": "multi-agent: independent modules plus a shared dependency",
+      "repetition": 1,
+      "status": "incomplete",
+      "runId": "202610141757-ad761d",
+      "runStatus": "cancelled",
+      "wallMs": 900087,
+      "error": "harness time limit (900 s) passed; the run was cancelled",
+      "phasesMs": {
+        "plan": 33663
+      },
+      "calls": {
+        "count": 85,
+        "byPurpose": {
+          "plan": {
+            "count": 1,
+            "failed": 0,
+            "durationMs": 33277
+          },
+          "agent_turn": {
+            "count": 84,
+            "failed": 0,
+            "durationMs": 2597481
+          }
+        },
+        "durationMs": 2630758,
+        "failuresByKind": {
+          "cancelled": 3
+        }
+      },
+      "turns": 84,
+      "toolCalls": 8,
+      "toolFailures": 6,
+      "retries": {
+        "transport": 0,
+        "taskAttempts": 0
+      },
+      "tokens": {
+        "basis": "provider-reported",
+        "input": 376626,
+        "output": 13819,
+        "callsReporting": 82,
+        "callsUnavailable": 3
+      },
+      "verification": {
+        "checklistPassed": 0,
+        "checklistTotal": 0,
+        "finalChecks": [],
+        "tasks": {
+          "total": 5,
+          "completed": 0,
+          "escalated": 0,
+          "attempts": 4
+        }
+      },
+      "acceptance": {
+        "ok": false,
+        "results": [],
+        "skipped": "the run did not finish"
+      },
+      "delivery": {
+        "produced": false,
+        "integrityOk": null
+      },
+      "changedFiles": [],
+      "expectedFilesChanged": false,
+      "repeatedToolFailures": 1
+    }
+  ],
+  "summary": {
+    "attempted": 4,
+    "passed": 1,
+    "failed": 1,
+    "incomplete": 2,
+    "error": 0,
+    "passRate": 0.25,
+    "byTask": {
+      "r1-write-file-and-test": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 0,
+        "incomplete": 1,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 900048
+      },
+      "r2-design-artifact": {
+        "attempted": 1,
+        "passed": 1,
+        "failed": 0,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 1,
+        "medianWallMs": 176898
+      },
+      "r3-recover-after-failure": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 1,
+        "incomplete": 0,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 650845
+      },
+      "r4-multi-agent-shared": {
+        "attempted": 1,
+        "passed": 0,
+        "failed": 0,
+        "incomplete": 1,
+        "error": 0,
+        "passRate": 0,
+        "medianWallMs": 900087
+      }
+    },
+    "totals": {
+      "wallMs": 2627878,
+      "modelCalls": 259,
+      "toolCalls": 33,
+      "transportRetries": 0,
+      "taskRetries": 4,
+      "inputTokens": 1089377,
+      "outputTokens": 49959,
+      "callsWithoutUsage": 6
+    },
+    "medianWallMs": 775447
+  }
+}
