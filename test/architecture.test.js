@@ -92,7 +92,7 @@ test('the test helper really reads code, not comments or strings', () => {
 
 test('provider adapters stay adapters: no run, store, delivery, verification, sandbox or engine knowledge', () => {
   const providers = list('src/providers');
-  only(providers, ['node:http', 'node:https', 'node:fs', 'node:path', 'node:url', 'src/diagnostics.js', 'src/security.js', ...providers.map((f) => f.replace(/\.js$/, '.js'))], 'a provider adapter may talk to a model and nothing else');
+  only(providers, ['node:http', 'node:https', 'node:crypto', 'node:fs', 'node:path', 'node:url', 'src/diagnostics.js', 'src/security.js', ...providers.map((f) => f.replace(/\.js$/, '.js'))], 'a provider adapter may talk to a model and nothing else');
   for (const f of providers) {
     const c = code(f);
     assert.ok(!/\brun\.(status|delivery|checklist|finalVerification|plan|layers)\s*=[^=]|verdictOf/.test(c), `${f} must not write run state or compute a verdict`);
@@ -101,7 +101,7 @@ test('provider adapters stay adapters: no run, store, delivery, verification, sa
 
 test('diagnostics and the contract are observers: no store, factory, sandbox, tools, delivery, network or process access', () => {
   only(['src/diagnostics.js'], ['node:async_hooks', 'node:fs', 'node:path', 'src/security.js'], 'diagnostics only record');
-  only(['src/contract.js'], ['src/engines/index.js', 'src/engines/fx.js', 'src/providers/openai.js', 'src/providers/anthropic.js', 'src/providers/http.js'], 'the preflight only reads configuration');
+  only(['src/contract.js'], ['src/engines/index.js', 'src/engines/fx.js', 'src/providers/openai.js', 'src/providers/anthropic.js', 'src/providers/http.js', 'src/providers/bridge.js'], 'the preflight only reads configuration');
   for (const f of ['src/diagnostics.js', 'src/contract.js']) {
     const c = code(f);
     assert.ok(!/\bfetch\s*\(|\bXMLHttpRequest\b|\bspawn\w*\s*\(|\bexec\w*\s*\(/.test(c), `${f} must not make requests or start processes`);
@@ -111,7 +111,11 @@ test('diagnostics and the contract are observers: no store, factory, sandbox, to
 });
 
 test('the fx engine reaches the world only through da-prompt\'s tools: no file system, process or network of its own', () => {
-  only(['src/engines/fx.js'], ['node:crypto', 'src/security.js', 'src/agents.js', 'src/engines/index.js'], 'every effect of an fx task goes through execTool/Workspace');
+  // Its one other door is the provider bridge: a loopback endpoint that answers fx's model requests with the run's own provider.
+  only(['src/engines/fx.js'], ['node:crypto', 'src/security.js', 'src/agents.js', 'src/engines/index.js', 'src/providers/bridge.js'], 'every effect of an fx task goes through execTool/Workspace');
+  const bridge = code('src/providers/bridge.js');
+  assert.ok(/\.listen\(0,/.test(bridge), 'the bridge listens on an ephemeral loopback port');
+  assert.ok(/\bprovider\.chat\s*\(/.test(bridge) && !/requestJson|requestStream|\bfetch\s*\(|https?\.request\s*\(/.test(bridge), 'the bridge answers only through provider.chat(), never with its own outbound request');
   const c = code('src/engines/fx.js');
   assert.ok(/\bexecTool\s*\(/.test(c), 'the fx tools are execTool');
   assert.ok(!/\.(runCommand|writeFile|readFile)\s*\(/.test(c), 'fx.js does not call the workspace directly');

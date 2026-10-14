@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 export const ENGINES = [
   { id: 'builtin', label: 'Built-in agents', description: 'da-prompt\'s own tool loop. Works with every provider.', package: null },
-  { id: 'fx', label: 'FX (@appport/fx)', description: 'The fx agent kernel drives the task with da-prompt\'s sandboxed tools. OpenAI-compatible endpoints and Ollama only; the model must start answering within about 120 s and fx has no num_ctx, timeout or retry settings, so prefer the built-in engine for slow local models.', package: '@appport/fx', experimental: true },
+  { id: 'fx', label: 'FX (@appport/fx)', description: 'The fx agent kernel drives the task with da-prompt\'s sandboxed tools. Its model requests go through da-prompt\'s own provider adapter (a loopback bridge), so every provider works, Ollama with its context window, retries and text tool-call recovery.', package: '@appport/fx', experimental: true },
 ];
 export const ENGINE_IDS = ENGINES.map((e) => e.id);
 
@@ -53,12 +53,13 @@ export function checkProvider(id, provider) {
   return null;
 }
 
-/** FX talks to OpenAI-compatible chat endpoints; Ollama is reached through its /v1 API. */
+/**
+ * What FX needs from a provider: a real model. fx never contacts the provider itself; it talks to a loopback bridge that
+ * answers through the provider's own adapter (src/providers/bridge.js), so every provider type works, Anthropic included.
+ */
 export function fxEndpoint(provider) {
-  if (provider?.describe?.().dialect === 'anthropic') throw new EngineError('The FX engine talks to OpenAI-compatible endpoints (including Ollama), not the Anthropic API. Pick another provider or use the built-in engine.');
-  const base = String(provider?.baseUrl || '').replace(/\/+$/, '');
-  if (!base || !provider?.model) throw new EngineError('The FX engine needs a provider with a base URL and a model (an OpenAI-compatible API or Ollama). Use the built-in engine for this provider.');
-  return { baseUrl: provider.dialect === 'ollama' ? `${base}/v1` : base, model: provider.model, apiKey: provider.apiKey || '' };
+  if (typeof provider?.chat !== 'function' || !provider?.model || (provider.describe?.() || provider).name === 'offline') throw new EngineError('The FX engine needs a model provider (the offline demo agents have no model). Pick a provider and model, or use the built-in engine.');
+  return { model: provider.model };
 }
 
 /** For the UI and `GET /api/engines`: which engines can be used right now, and why not. */

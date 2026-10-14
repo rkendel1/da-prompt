@@ -246,25 +246,28 @@ class Endpoint extends Scripted {
   describe() { return { name: 'ep', label: 'ep', model: this.model, dialect: this.dialect }; }
 }
 
-test('the fx engine receives every setting the contract says it honours and nothing the contract says it cannot take', async () => {
+test('the fx engine receives every setting the contract says it honours, and the provider options reach the provider behind the bridge, not fx', async () => {
   const fx = fakeFx();
   const { factory } = setup({ provider: new Endpoint({ plan: () => plan([task('t')], { finalVerify: [] }), task: () => [done('x')] }), cfg: { maxOutputTokens: 4321, engineModules: { fx } } });
   const created = await factory.createRun({ idea: 'x', provider: 'fxfake', model: 'qwen3-coder', engine: 'fx', providerOptions: { numCtx: 16384, temperature: 0.2, toolMode: 'json' }, settings: { deploy: false, maxAgentTurns: 17 } });
   await factory.start(created.id);
   const agent = fx.log.agents[0];
   const model = fx.log.models[0];
-  // Honoured, as the contract claims.
+  // Honoured by fx itself, as the contract claims.
   assert.equal(agent.maxOutputTokens, 4321);
   assert.equal(agent.maxSteps, 17);
   const d = await describeInference(factory.cfg, factory.providers, { provider: 'ollama', engine: 'fx' });
   for (const key of ['maxOutputTokens', 'maxAgentTurns']) assert.equal(d.settings.find((s) => s.key === key).fx.status, 'supported', key);
-  // Not honoured, as the contract also says: none of it is passed on, and it was said so in the run log.
-  for (const key of ['numCtx', 'temperature', 'toolMode', 'firstResponseTimeout', 'transportRetries']) assert.notEqual(d.settings.find((s) => s.key === key).fx.status, 'supported', key);
+  // Honoured by the provider adapter that answers fx through the bridge (test/local-inference.test.js shows num_ctx arriving
+  // at Ollama); fx's 120 s header deadline is answered by the bridge at once.
+  for (const key of ['numCtx', 'temperature', 'toolMode']) assert.equal(d.settings.find((s) => s.key === key).fx.status, 'supported', key);
+  assert.equal(d.settings.find((s) => s.key === 'transportRetries').fx.status, 'fixed');
+  assert.equal(d.settings.find((s) => s.key === 'firstResponseTimeout').fx.status, 'not-applicable');
+  // fx itself still gets only an allow-list, and none of the provider options.
   assert.deepEqual(Object.keys(agent).sort(), ['instructions', 'maxOutputTokens', 'maxSteps', 'model', 'onEvent', 'tools'], 'an allow-list: a new option must be added to the contract before it can be passed');
-  assert.deepEqual(Object.keys(model).sort(), ['apiKeyEnv', 'baseUrl', 'model'], 'the credential travels only as an env var name');
+  assert.deepEqual(Object.keys(model).sort(), ['apiKeyEnv', 'baseUrl', 'model'], 'the bridge token travels only as an env var name');
+  assert.match(model.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
   assert.ok(!JSON.stringify(model).includes(KEY));
   const warnings = (await factory.store.events(created.id)).filter((e) => e.type === 'log' && e.level === 'warn').map((e) => e.text).join('\n');
-  assert.match(warnings, /numCtx 16384 is not applied/);
-  assert.match(warnings, /temperature is not applied/);
-  assert.match(warnings, /toolMode "json" is not applied/);
+  assert.doesNotMatch(warnings, /not applied/);
 });

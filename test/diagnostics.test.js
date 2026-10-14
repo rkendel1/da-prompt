@@ -269,7 +269,7 @@ test('the preflight resolves provider, model and engine from configuration alone
     assert.equal(by.maxOutputTokens.fx.status, 'supported');
     assert.equal(by.maxParallel.value, 3);
     assert.equal(by.numCtx.builtin.status, 'not-applicable', 'a hosted provider has no context option');
-    assert.equal(by.firstResponseTimeout.fx.status, 'fixed');
+    assert.equal(by.firstResponseTimeout.fx.status, 'not-applicable', 'the bridge answers fx with headers at once');
     assert.equal(by.requestTimeout.builtin.status, 'fixed');
     assert.deepEqual(d.notPerformed.map((n) => n.check), ['provider reachable', 'model is offered by the provider', 'tool calling works with this model', 'latency, throughput, memory or CPU use']);
     assert.equal(api.log.length, 0, 'no request of any kind reached the provider');
@@ -278,7 +278,7 @@ test('the preflight resolves provider, model and engine from configuration alone
     const text = await cli(['diagnostics', '--provider', 'ollama', '--engine', 'fx', '--num-ctx', '8192'], { backend: be });
     assert.equal(text.code, 1); // fx is not installed in this data dir
     assert.match(text.out, /offline: nothing was contacted/);
-    assert.match(text.out, /numCtx .* ✗ unsupported/s);
+    assert.match(text.out, /numCtx\s.*✓ supported/, 'fx gets num_ctx through the bridge');
     assert.match(text.out, /@appport\/fx is not installed/);
     assert.match(text.out, /providers test ollama/);
     assert.ok(!text.out.includes(SENTINEL) && !r.out.includes(SENTINEL));
@@ -307,7 +307,9 @@ test('the preflight distinguishes a configuration error from a check that needs 
     const unknown = await cli(['diagnostics', '--provider', 'nope', '--json'], { backend: be });
     assert.match(unknown.json.inference.problems[0].message, /Unknown provider/);
     const fxAnthropic = (await cli(['diagnostics', '--provider', 'anthropic', '--engine', 'fx', '--json'], { backend: be })).json.inference;
-    assert.ok(fxAnthropic.problems.some((p) => /not the Anthropic API/.test(p.message)));
+    assert.ok(!fxAnthropic.problems.some((p) => /not the Anthropic API|OpenAI-compatible/.test(p.message)), 'fx works with every provider through the bridge');
+    const fxOffline = (await cli(['diagnostics', '--provider', 'offline', '--engine', 'fx', '--json'], { backend: be })).json.inference;
+    assert.ok(fxOffline.problems.some((p) => /offline demo agents have no model/.test(p.message)));
   } finally {
     await be.close();
   }
@@ -317,12 +319,13 @@ test('options an engine cannot honour are surfaced, in the run log and in the co
   const cfg = loadConfig({ dataDir: tmpDir(), env: {} });
   const reg = new ProviderRegistry(cfg);
   const run = (engine, provider, providerOptions) => ({ engine, provider, providerOptions });
-  const fx = contractWarnings(run('fx', 'ollama', { numCtx: 16384, temperature: 0.2, toolMode: 'json' }), reg);
-  assert.equal(fx.length, 3);
-  assert.match(fx.join('\n'), /numCtx 16384 is not applied/);
-  assert.match(fx.join('\n'), /temperature is not applied/);
-  assert.match(fx.join('\n'), /toolMode "json" is not applied/);
-  assert.match(contractWarnings(run('fx', 'ollama', {}), reg)[0], /server default, not the 32768/);
+  // fx's requests go through the provider adapter (the bridge), so it honours the same options as the built-in engine.
+  assert.deepEqual(contractWarnings(run('fx', 'ollama', { numCtx: 16384, temperature: 0.2, toolMode: 'json' }), reg), []);
+  assert.deepEqual(contractWarnings(run('fx', 'ollama', {}), reg), []);
+  assert.match(contractWarnings(run('fx', 'openai', { numCtx: 8192 }), reg)[0], /ignored: only Ollama/);
+  const dfx = await describeInference(cfg, reg, { provider: 'ollama', engine: 'fx', providerOptions: { numCtx: 4096, temperature: 0.1 } });
+  for (const k of ['numCtx', 'temperature', 'toolMode']) assert.equal(dfx.settings.find((s) => s.key === k).fx.status, 'supported', k);
+  assert.ok(!dfx.problems.some((p) => p.level === 'warn'), 'no option is reported as unsupported');
   assert.deepEqual(contractWarnings(run('builtin', 'ollama', { numCtx: 8192 }), reg), []);
   assert.match(contractWarnings(run('builtin', 'openai', { numCtx: 8192 }), reg)[0], /ignored: only Ollama/);
   assert.deepEqual(contractWarnings(run('builtin', 'openai', {}), reg), []);

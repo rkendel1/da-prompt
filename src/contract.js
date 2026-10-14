@@ -5,7 +5,8 @@
 // providers.json) and the constants the adapters export. Secrets are reported as present/absent plus the NAME of the
 // environment variable or "saved", never the value.
 import { ENGINES, loadEngineModule, enginesDir } from './engines/index.js';
-import { FX_FIRST_RESPONSE_SECONDS, FX_MAX_ROUNDS, FX_MAX_MALFORMED_RETRIES } from './engines/fx.js';
+import { FX_FIRST_RESPONSE_SECONDS, FX_MAX_MALFORMED_RETRIES } from './engines/fx.js';
+import { BRIDGE_KEEPALIVE_MS } from './providers/bridge.js';
 import { REQUEST_TIMEOUT_MS as OPENAI_TIMEOUT_MS, OLLAMA_HTTP_RETRIES } from './providers/openai.js';
 import { REQUEST_TIMEOUT_MS as ANTHROPIC_TIMEOUT_MS } from './providers/anthropic.js';
 import { DEFAULT_HTTP_RETRIES } from './providers/http.js';
@@ -29,20 +30,20 @@ function settingsTable(cfg, spec, options) {
     row({ key: 'tokenBudget', label: 'Token budget per run', value: cfg.defaults.tokenBudget, default: 2_000_000, source: src('tokenBudget'), env: 'FACTORY_TOKEN_BUDGET', perRun: true, runOption: '--budget', precedence: 'run option > startup > saved > environment > default', builtin: { status: 'supported', how: 'checked before every model call' }, fx: { status: 'supported', how: 'checked before every tool call and added after every prompt (coarser than builtin)' } }),
     row({ key: 'timeoutMinutes', label: 'Run time limit', value: 120, default: 120, source: 'default', env: null, perRun: true, precedence: 'run setting > default', builtin: { status: 'supported' }, fx: { status: 'supported' }, note: 'The run is aborted (and not marked completed) when the limit passes.' }),
     row({ key: 'commandTimeoutMs', label: 'Shell command timeout', value: cfg.defaults.commandTimeoutMs, default: 180_000, source: src('commandTimeoutMs'), env: 'FACTORY_COMMAND_TIMEOUT_MS', perRun: false, precedence: 'startup > saved > environment > default', builtin: { status: 'supported' }, fx: { status: 'supported' } }),
-    row({ key: 'numCtx', label: 'Context window (Ollama num_ctx)', value: ollama ? spec.numCtx || null : null, default: ollama ? 32768 : null, source: ollama ? ('provider setting or default') : null, env: null, perRun: true, runOption: 'New Run form, API providerOptions.numCtx, or the headless runner (npm run factory -- --num-ctx)', precedence: 'run option > provider setting (Providers page) > 32768', builtin: { status: ollama ? 'supported' : 'not-applicable', how: ollama ? 'options.num_ctx on /api/chat' : 'only Ollama accepts a context-window option; other providers ignore it' }, fx: { status: 'unsupported', how: 'fx talks to Ollama\'s OpenAI-compatible /v1 API, which has no such field: the server\'s own default applies' } }),
-    row({ key: 'temperature', label: 'Temperature', value: options?.temperature ?? null, default: null, source: options?.temperature != null ? 'run option' : null, env: null, perRun: true, precedence: 'run option > provider default', builtin: { status: 'supported' }, fx: { status: 'unsupported', how: 'not sent by fx' } }),
-    row({ key: 'toolMode', label: 'Tool-call mode (auto | native | json)', value: options?.toolMode || spec?.toolMode || 'auto', default: 'auto', source: options?.toolMode ? 'run option' : 'provider setting', env: null, perRun: true, precedence: 'run option > provider setting > auto', builtin: { status: spec?.type === 'anthropic' ? 'not-applicable' : 'supported', how: 'falls back to JSON tool calls for models without native tools' }, fx: { status: 'unsupported', how: 'fx executes only structured tool calls; text-written calls are refused and retried' } }),
-    row({ key: 'requestTimeout', label: 'Request timeout (total)', value: timeoutNote, default: timeoutNote, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'fixed', how: `${timeoutNote} per request (constructor constant)` }, fx: { status: 'fixed', how: 'no total body deadline was found in the fx source; see first-response timeout' } }),
-    row({ key: 'firstResponseTimeout', label: 'First-response timeout', value: null, default: null, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'unsupported', how: 'non-streaming requests: only the total timeout applies' }, fx: { status: 'fixed', how: `about ${FX_FIRST_RESPONSE_SECONDS} s before the first response byte (from the @appport/fx 0.1.2 source; fails the call with LIBFX_MODEL_TIMEOUT)` } }),
-    row({ key: 'transportRetries', label: 'Transport retries', value: ollama ? OLLAMA_HTTP_RETRIES : DEFAULT_HTTP_RETRIES, default: DEFAULT_HTTP_RETRIES, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'fixed', how: `${ollama ? OLLAMA_HTTP_RETRIES : DEFAULT_HTTP_RETRIES} retries on 408/409/425/429/5xx and transient network errors, with backoff (a timeout is retried too)` }, fx: { status: 'unsupported', how: `none inside fx; the factory re-runs the whole attempt, and retries a model that wrote a tool call as text up to ${FX_MAX_MALFORMED_RETRIES} times (${FX_MAX_ROUNDS} rounds per attempt)` } }),
+    row({ key: 'numCtx', label: 'Context window (Ollama num_ctx)', value: ollama ? spec.numCtx || null : null, default: ollama ? 32768 : null, source: ollama ? ('provider setting or default') : null, env: null, perRun: true, runOption: 'New Run form, API providerOptions.numCtx, or the headless runner (npm run factory -- --num-ctx)', precedence: 'run option > provider setting (Providers page) > 32768', builtin: { status: ollama ? 'supported' : 'not-applicable', how: ollama ? 'options.num_ctx on /api/chat' : 'only Ollama accepts a context-window option; other providers ignore it' }, fx: { status: ollama ? 'supported' : 'not-applicable', how: ollama ? 'fx\'s requests go through the da-prompt bridge to options.num_ctx on /api/chat' : 'only Ollama accepts a context-window option; other providers ignore it' } }),
+    row({ key: 'temperature', label: 'Temperature', value: options?.temperature ?? null, default: null, source: options?.temperature != null ? 'run option' : null, env: null, perRun: true, precedence: 'run option > provider default', builtin: { status: 'supported' }, fx: { status: 'supported', how: 'applied by the provider adapter behind the bridge' } }),
+    row({ key: 'toolMode', label: 'Tool-call mode (auto | native | json)', value: options?.toolMode || spec?.toolMode || 'auto', default: 'auto', source: options?.toolMode ? 'run option' : 'provider setting', env: null, perRun: true, precedence: 'run option > provider setting > auto', builtin: { status: spec?.type === 'anthropic' ? 'not-applicable' : 'supported', how: 'falls back to JSON tool calls for models without native tools' }, fx: { status: spec?.type === 'anthropic' ? 'not-applicable' : 'supported', how: 'the bridge answers through the provider adapter, which handles JSON tool calls and recovers calls written as text before fx sees them' } }),
+    row({ key: 'requestTimeout', label: 'Request timeout (total)', value: timeoutNote, default: timeoutNote, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'fixed', how: `${timeoutNote} per request (constructor constant)` }, fx: { status: 'fixed', how: `${timeoutNote} per model request, enforced by the provider adapter behind the bridge` } }),
+    row({ key: 'firstResponseTimeout', label: 'First-response timeout', value: null, default: null, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'unsupported', how: 'non-streaming requests: only the total timeout applies' }, fx: { status: 'not-applicable', how: `fx waits about ${FX_FIRST_RESPONSE_SECONDS} s for response headers (@appport/fx 0.1.2); the bridge sends them at once and a keepalive every ${BRIDGE_KEEPALIVE_MS / 1000} s, so only the request timeout applies` } }),
+    row({ key: 'transportRetries', label: 'Transport retries', value: ollama ? OLLAMA_HTTP_RETRIES : DEFAULT_HTTP_RETRIES, default: DEFAULT_HTTP_RETRIES, source: 'fixed', env: null, perRun: false, precedence: 'not configurable', builtin: { status: 'fixed', how: `${ollama ? OLLAMA_HTTP_RETRIES : DEFAULT_HTTP_RETRIES} retries on 408/409/425/429/5xx and transient network errors, with backoff (a timeout is retried too)` }, fx: { status: 'fixed', how: `the same retries, applied by the provider adapter behind the bridge; a model that still writes an unusable tool call is re-prompted up to ${FX_MAX_MALFORMED_RETRIES} times` } }),
   ];
 }
 
 const LIMITATIONS = [
   'builtin: requests are not streamed, so a first-response time cannot be measured; only the total duration is recorded.',
-  'builtin: every model turn resends the whole message history (it grows with every tool result, each bounded to 12 000 characters).',
+  'builtin: every model turn resends the message history (it grows with every tool result, each bounded to 12 000 characters); when it would exceed a known small context window (Ollama num_ctx), older rounds are shortened first, keeping the task brief and the latest three rounds whole.',
   'fx: runs the model loop itself; the factory records one diagnostics entry per prompt (with the number of model requests), not one per request, and token usage only as a per-prompt total.',
-  'fx: first-response timeout, Ollama num_ctx, temperature, tool mode and transport retries cannot be set from da-prompt.',
+  'fx: its model requests reach the provider through a loopback bridge in da-prompt, so Ollama num_ctx, temperature, tool mode, timeouts and retries are the built-in engine\'s. Per-request diagnostics are recorded for the bridged calls as well.',
   'Token counts are the provider\'s own; when a provider omits them the diagnostics say "unavailable" instead of zero.',
   'Character counts of requests are a factory-side size indicator, not tokens.',
 ];
@@ -122,9 +123,7 @@ export async function describeInference(cfg, registry, opts = {}) {
       engine.installed = false;
       problem('error', e.message, `npm run engine:install -- fx   (installs under ${enginesDir(cfg)})`);
     }
-    if (spec?.type === 'anthropic') problem('error', 'The fx engine talks to OpenAI-compatible endpoints (including Ollama), not the Anthropic API.', 'Use --engine builtin, or pick another provider.');
     if (spec?.type === 'offline') problem('error', 'The offline demo agents have no model, so they cannot use the fx engine.', 'Use the built-in engine.');
-    if (spec && spec.type !== 'anthropic' && spec.type !== 'offline' && /^http:/.test(spec.baseUrl || '') && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])/.test(spec.baseUrl)) problem('error', 'fx accepts plain http only for localhost; this provider\'s URL is http:// on another host.', 'Use https, or the built-in engine.');
   }
 
   const settings = settingsTable(cfg, spec, opts.providerOptions);
@@ -160,13 +159,8 @@ export function contractWarnings(run, registry) {
   } catch {
     /* injected provider */
   }
-  const engine = run.engine || 'builtin';
-  if (engine === 'fx') {
-    if (o.numCtx) out.push(`numCtx ${o.numCtx} is not applied: the fx engine cannot set Ollama's context window (the server's default applies).`);
-    if (o.temperature != null) out.push('temperature is not applied: the fx engine does not send it.');
-    if (o.toolMode && o.toolMode !== 'auto') out.push(`toolMode "${o.toolMode}" is not applied: the fx engine executes only structured tool calls.`);
-    if (spec?.type === 'ollama' && !o.numCtx) out.push('The fx engine reaches Ollama through its OpenAI-compatible API, so the context window is Ollama\'s server default, not the 32768 the built-in engine requests.');
-  } else if (o.numCtx && spec && spec.type !== 'ollama') {
+  // Both engines reach the model through the same provider adapter (fx through the bridge), so they honour the same options.
+  if (o.numCtx && spec && spec.type !== 'ollama') {
     out.push(`numCtx ${o.numCtx} is ignored: only Ollama accepts a context-window option.`);
   }
   return out;

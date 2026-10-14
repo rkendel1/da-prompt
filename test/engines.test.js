@@ -92,8 +92,10 @@ test('the FX engine runs a task through the sandboxed tools, and verification st
   assert.equal(t.status, 'completed');
   assert.equal(t.result.summary, 'made hello');
   assert.deepEqual(t.result.files, ['src/hello.txt']);
-  // The model handle points at the provider's endpoint; Ollama is reached through its OpenAI-compatible /v1 API.
-  assert.deepEqual(fx.log.models[0], { baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen3-coder' });
+  // The model handle points at da-prompt's loopback bridge (which answers through the run's provider), never at the provider.
+  assert.match(fx.log.models[0].baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
+  assert.notEqual(fx.log.models[0].baseUrl, 'http://127.0.0.1:11434/v1');
+  assert.equal(fx.log.models[0].model, 'qwen3-coder');
   assert.equal(fx.log.agents[0].maxSteps, run.settings.maxAgentTurns);
   assert.match(fx.log.agents[0].instructions, /LAYER 3|executing ONE task/);
   assert.match(fx.log.prompts[0], /# Task t:/);
@@ -137,7 +139,7 @@ test('sandbox rules are unchanged under FX: a path escape is refused and reporte
   assert.equal(run.plan.tasks[0].status, 'completed');
 });
 
-test('credentials reach fx only as an environment variable name, are not visible to agent shells, and are removed afterwards', async () => {
+test('the provider credential never reaches fx; fx gets a one-off bridge token as an environment variable name, hidden from agent shells and removed afterwards', async () => {
   const SECRET = 'sk-test-engine-secret-123456';
   let seenByShell = null;
   const fx = fakeFx(() => [
@@ -149,10 +151,11 @@ test('credentials reach fx only as an environment variable name, are not visible
   const run = await factory.start((await create(factory, { engine: 'fx' })).id);
   assert.equal(run.plan.tasks[0].status, 'completed', run.error);
   const opts = fx.log.models[0];
-  assert.equal(opts.baseUrl, 'https://api.example.com/v1');
+  assert.match(opts.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/, 'fx talks to the bridge, not to api.example.com');
   assert.match(opts.apiKeyEnv, /^DA_PROMPT_FX_KEY_/);
   assert.equal(JSON.stringify(opts).includes(SECRET), false, 'the key itself is never handed to fx');
-  assert.equal(fx.log.envAtCall[0], SECRET, 'the variable holds the key while the model is in use');
+  assert.match(fx.log.envAtCall[0], /^[0-9a-f]{48}$/, 'the variable holds a one-off bridge token while the model is in use');
+  assert.notEqual(fx.log.envAtCall[0], SECRET, 'not the provider key');
   assert.deepEqual(Object.keys(process.env).filter((k) => k.startsWith('DA_PROMPT_FX_KEY')), before, 'and is gone afterwards');
   const shell = (await store.events(run.id)).find((e) => e.type === 'tool' && e.tool === 'run_command');
   assert.match(shell.output, /^0\b/, 'the agent\'s shell cannot see it');
@@ -233,9 +236,11 @@ test('an engine is checked before the run starts, with a reason you can act on',
   const ok = makeEnv({ fx, provider });
   await assert.rejects(create(ok.factory, { engine: 'chip' }), /unknown agent engine "chip"/);
   await assert.rejects(ok.factory.createRun({ idea: 'x', provider: 'offline', engine: 'fx' }), /offline demo agents/);
-  const anthropicLike = makeEnv({ fx, provider: Object.assign(new EndpointProvider({ plan: planOneFile, task: noTask }), { describe: () => ({ dialect: 'anthropic' }) }) });
-  await assert.rejects(create(anthropicLike.factory, { engine: 'fx' }), /not the Anthropic API/);
-  assert.throws(() => fxEndpoint({ model: 'm', describe: () => ({}) }), /needs a provider with a base URL/);
+  // Every provider type works through the bridge, Anthropic included; only a provider without a model is refused.
+  const anthropicLike = makeEnv({ fx, provider: Object.assign(new EndpointProvider({ plan: planOneFile, task: noTask }), { describe: () => ({ name: 'claude', dialect: 'anthropic' }) }) });
+  assert.equal((await create(anthropicLike.factory, { engine: 'fx' })).engine, 'fx');
+  assert.throws(() => fxEndpoint({ chat() {}, describe: () => ({}) }), /needs a model provider/);
+  assert.deepEqual(fxEndpoint({ chat() {}, model: 'm', describe: () => ({ name: 'x' }) }), { model: 'm' });
   // Nothing was created for any of the refusals.
   assert.deepEqual(await missing.store.list(), []);
 });
@@ -303,8 +308,8 @@ test('FX prompts are recorded as diagnostics: requests, first event, per-prompt 
   const failed = readRecords(b.store.runDir(rb.id)).find((x) => x.purpose === 'agent_prompt');
   assert.deepEqual([failed.outcome, failed.failure.kind, failed.usage.source], ['error', 'first_response_timeout', 'unavailable']);
   assert.notEqual(rb.status, 'completed');
-  // Unsupported options are said so in the run log.
+  // Options reach the provider behind the bridge, so none is reported as dropped.
   const c = makeEnv({ fx: fakeFx(() => [{ tool: 'complete_task', input: { summary: 'x', files: [] } }]), provider: new EndpointProvider({ plan: planOneFile, task: noTask }) });
   const rc = await c.factory.start((await create(c.factory, { engine: 'fx', providerOptions: { numCtx: 16384 }, settings: { deploy: false } })).id);
-  assert.ok((await c.store.events(rc.id)).some((e) => e.type === 'log' && e.level === 'warn' && /numCtx 16384 is not applied/.test(e.text)));
+  assert.ok(!(await c.store.events(rc.id)).some((e) => e.type === 'log' && e.level === 'warn' && /not applied/.test(e.text)));
 });

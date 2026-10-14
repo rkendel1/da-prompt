@@ -1,9 +1,13 @@
-// The FX engine: one task attempt run by @appport/fx. fx supplies the agent loop and the model connection; every effect still
-// goes through da-prompt's own tools (`execTool` over the sandboxed Workspace), so file, command and policy rules are exactly
-// the built-in engine's. The result has the same shape as runAgent(), so verification and feedback do not change.
+// The FX engine: one task attempt run by @appport/fx. fx supplies the agent loop; every effect still goes through da-prompt's
+// own tools (`execTool` over the sandboxed Workspace), so file, command and policy rules are exactly the built-in engine's.
+// fx's model client talks to a loopback bridge (src/providers/bridge.js) that answers with the run's own provider, so fx gets
+// the same model handling as the built-in engine: Ollama num_ctx, retries, JSON tool mode, recovery of tool calls written as
+// text, any provider type, and no 120-second first-response cutoff. The result has the same shape as runAgent(), so
+// verification and feedback do not change.
 import crypto from 'node:crypto';
 import { redact } from '../security.js';
-import { AGENT_TOOLS, BudgetError, agentSystem, completionFields, taskBrief, execTool, summarizeInput } from '../agents.js';
+import { AGENT_TOOLS, BudgetError, agentSystem, completionFields, taskBrief, execTool, summarizeInput, normalizeToolInput } from '../agents.js';
+import { startBridge } from '../providers/bridge.js';
 import { loadEngineModule, fxEndpoint, EngineError } from './index.js';
 
 // Limits of this engine that da-prompt cannot change (see README "Agent engines"): fx's own first-response window comes from
@@ -17,17 +21,19 @@ const MAX_ROUNDS = FX_MAX_ROUNDS;
 // in the workspace, so the retry says so.
 export const FX_MAX_MALFORMED_RETRIES = 4;
 const MAX_MALFORMED_RETRIES = FX_MAX_MALFORMED_RETRIES;
-export const FX_TIMEOUT_MESSAGE = `FX model error (LIBFX_MODEL_TIMEOUT): the model did not start answering in time. The FX engine allows about ${FX_FIRST_RESPONSE_SECONDS} seconds for the first response byte (@appport/fx 0.1.2) and offers no setting to change that, so a slow local model (a long prompt on CPU) can exceed it even though the built-in engine would wait. Switch this run to the built-in engine (--engine builtin; it waits up to 30 minutes per request), use a smaller or faster model, or use a hosted provider.`;
+export const FX_TIMEOUT_MESSAGE = `FX model error (LIBFX_MODEL_TIMEOUT): fx received no response headers within about ${FX_FIRST_RESPONSE_SECONDS} seconds (@appport/fx 0.1.2). da-prompt's bridge sends headers at once and keeps the stream alive while the model works, so this means the bridge itself did not answer (an overloaded machine?). Retry, or switch this run to the built-in engine (--engine builtin).`;
 const RECOVER = 'NOTE: your previous reply in this attempt wrote a tool call as plain text instead of using the tool-calling interface, so it could not run. Files you already wrote are still in the workspace — inspect it first (list_files / read_file) instead of redoing finished work. Always call tools through the structured tool-calling interface, and finish by calling complete_task.';
 
 export function makeFxRunner(cfg) {
   return async function runAgentFx({ provider, ws, run, task, attempt, maxAttempts, feedback, upstream, lessons, settings, signal, emit, track, diag }) {
     const fx = await loadEngineModule(cfg, 'fx');
     const ep = fxEndpoint(provider);
-    // fx reads the credential from a named environment variable on every request (it never passes through JS). The name
-    // matches the secret filter in safeEnv(), so agent shells never see it.
-    const envName = ep.apiKey ? `DA_PROMPT_FX_KEY_${crypto.randomBytes(6).toString('hex')}` : '';
-    if (envName) process.env[envName] = ep.apiKey;
+    // fx authenticates to the bridge with a one-off token read from a named environment variable (the provider's real key
+    // never reaches fx). The name matches the secret filter in safeEnv(), so agent shells never see it.
+    const token = crypto.randomBytes(24).toString('hex');
+    const envName = `DA_PROMPT_FX_KEY_${crypto.randomBytes(6).toString('hex')}`;
+    process.env[envName] = token;
+    let bridge;
     // FACTORY_MAX_OUTPUT_TOKENS, like the built-in adapters (fx's own default is "unset", i.e. the server's).
     const outputTokens = Number.isSafeInteger(provider?.maxTokens) && provider.maxTokens > 0 ? provider.maxTokens : cfg.maxOutputTokens;
     const state = { completion: null, files: new Set(), commands: [], budget: null, turn: null, steps: 0 };
@@ -45,7 +51,8 @@ export function makeFxRunner(cfg) {
       }
     };
     try {
-      const model = await fx.createFxModel({ baseUrl: ep.baseUrl, model: ep.model, ...(envName ? { apiKeyEnv: envName } : {}) });
+      bridge = await startBridge(provider, { token, meta: { task, attempt, inputs: run.inputs } });
+      const model = await fx.createFxModel({ baseUrl: bridge.baseUrl, model: ep.model, apiKeyEnv: envName });
       const stop = () => queueMicrotask(() => state.turn?.cancel());
       const tools = AGENT_TOOLS.map((t) => ({
         name: t.name,
@@ -64,6 +71,7 @@ export function makeFxRunner(cfg) {
             stop();
             return 'The token budget is exhausted. Stop.';
           }
+          input = normalizeToolInput(t.name, input);
           const out = await execTool(ws, { name: t.name, input }, { settings, signal: ctx.signal || signal });
           if (t.name === 'write_file' && !out.isError) state.files.add(out.path);
           if (t.name === 'run_command') state.commands.push({ command: input?.command, exitCode: out.exitCode });
@@ -109,6 +117,9 @@ export function makeFxRunner(cfg) {
             continue;
           }
           if (e.code === 'LIBFX_MODEL_TIMEOUT') return { ok: false, error: FX_TIMEOUT_MESSAGE };
+          // fx reports a provider failure as a bare "ProviderError"; the bridge kept the provider's own message.
+          const cause = bridge?.lastError();
+          if (cause) return { ok: false, error: redact(`Model error: ${cause.split('\n')[0]}`).slice(0, 600) };
           return { ok: false, error: redact(`FX model error${e.kind || e.code ? ` (${e.kind || e.code})` : ''}: ${String(e.message || e).split('\n')[0]}`).slice(0, 600) };
         }
         record(cur, { result, retries: malformed });
@@ -124,8 +135,9 @@ export function makeFxRunner(cfg) {
       if (e instanceof BudgetError || e instanceof EngineError) throw e;
       throw new EngineError(redact(String(e.message || e)));
     } finally {
-      if (envName) delete process.env[envName];
+      delete process.env[envName];
       await agent?.close?.().catch(() => {});
+      await bridge?.close().catch(() => {});
     }
   };
 }

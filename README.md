@@ -620,7 +620,7 @@ task attempt, so you can try another agent loop and switch back without losing a
 | Engine | What it is | Providers |
 | --- | --- | --- |
 | `builtin` (default) | da-prompt's own tool loop. | all |
-| `fx` | [`@appport/fx`](https://www.npmjs.com/package/@appport/fx) runs the loop and the model connection; every tool is still da-prompt's sandboxed one (same file, command and secret rules, same events and token budget). | OpenAI-compatible APIs and Ollama (not Anthropic) |
+| `fx` | [`@appport/fx`](https://www.npmjs.com/package/@appport/fx) runs the agent loop; its model requests go to a loopback bridge that answers through da-prompt's own provider adapter, and every tool is still da-prompt's sandboxed one (same file, command and secret rules, same events and token budget). | all, including Anthropic |
 
 ```bash
 npm run engine:install -- fx          # installs @appport/fx under <data dir>/engines (da-prompt itself stays dependency-free)
@@ -634,22 +634,22 @@ chosen provider are greyed out with the reason (`GET /api/engines`). The run pag
 
 | | `builtin` (default) | `fx` (experimental, optional) |
 | --- | --- | --- |
-| Providers | all, including Anthropic | OpenAI-compatible endpoints and Ollama's `/v1` API only |
-| Wait for a model's first response | up to 30 minutes per request | **about 120 seconds** (`@appport/fx` 0.1.2); not configurable from da-prompt |
-| Ollama `num_ctx` (context window) | set by da-prompt (32k default, per run) | not available: Ollama's server default applies |
-| Request timeout and transport retries | configurable in da-prompt; transient errors retried | no setting; a failure fails the attempt and the factory's attempt retries apply |
-| Text-written tool calls | recovered | refused (retried up to four times) |
+| Providers | all, including Anthropic | all, including Anthropic (through the bridge) |
+| Wait for a model's first response | up to 30 minutes per request | the same: the bridge sends response headers at once and a keepalive every 5 s, so fx's own 120 s header deadline (`@appport/fx` 0.1.2) never fires |
+| Ollama `num_ctx` (context window) | set by da-prompt (32k default, per run) | the same (fx's requests reach Ollama's native `/api/chat` through the bridge) |
+| Request timeout and transport retries | the provider adapter's | the same |
+| Text-written tool calls | recovered (JSON, qwen3-coder `<function=…>` XML, `<invoke>`) | the same: recovered by the adapter before fx sees the reply; anything still unusable is re-prompted up to four times |
 | Output-token limit | `FACTORY_MAX_OUTPUT_TOKENS` | `FACTORY_MAX_OUTPUT_TOKENS`, passed to the agent as `maxOutputTokens` |
 | Tools, sandbox, verification, token budget | da-prompt's | the same: da-prompt's |
 
-Prefer the **built-in engine for slow local models**: a long prompt processed on CPU can exceed fx's first-response window, which
-fails the attempt with a `LIBFX_MODEL_TIMEOUT` message that says so. Keep fx for hosted or fast OpenAI-compatible endpoints where
-you want to try the fx loop. fx's real-model tool quality is not certified by its own report (scripted tests only).
+**How fx reaches the model.** For each task attempt da-prompt starts a bridge on `127.0.0.1:<random port>` that speaks the
+OpenAI Chat Completions API (streaming and not). fx is pointed at it with a one-off token; every request is translated to the
+factory's message format and answered by `provider.chat()` of the run's own provider, then translated back. So fx gets exactly
+the model handling of the built-in engine, the provider's real key never reaches fx, and a provider error is reported with the
+provider's own message (fx itself only says `ProviderError`). The bridge is closed when the attempt ends.
 
-Things to know: fx executes only structured tool calls. Local models that write a call as plain text (qwen3-coder does this
-often) are retried by the adapter up to four times, but the built-in engine's text-call fallback is more forgiving, so compare
-on your model. `http://` endpoints are accepted by fx only on localhost. The model credential reaches fx as an environment
-variable *name* (never the key) that agent shells cannot see, and is removed when the task attempt ends.
+The model credential is not given to fx at all; the bridge token reaches fx as an environment variable *name* that agent shells
+cannot see, and is removed when the task attempt ends.
 
 **`@appport/chip` is not an engine yet.** It is the eve framework (a durable agent *service* you author as a directory, build
 and serve, on Node ≥ 24 with its own sandbox backends: Docker, microsandbox or a JS shell at `/workspace`). Its tools would not
@@ -673,13 +673,28 @@ Notes for local models:
   adjustable per run). Use a value your RAM/VRAM can hold.
 - **Tool calling.** Models with native tool support use it. Models without it (or that
   reject the `tools` field) automatically switch to **JSON tool calls in text**, and tool
-  calls that a model writes into its reply instead of the structured field are recovered.
-  You can force either mode per run or per provider.
+  calls that a model writes into its reply instead of the structured field are recovered:
+  JSON (also with raw newlines inside strings or trailing commas), qwen3-coder's
+  `<function=…><parameter=…>` XML and `<invoke name=…>` blocks. Tool and argument names from
+  other agents' tool sets (`bash`, `create_file`, `file_path`, `cmd`, …) are mapped to the
+  factory's. You can force either mode per run or per provider.
+- **Planning.** A plan written as JSON in the reply instead of a `submit_plan` call is used,
+  and loose shapes are repaired before validation: a string where a list is expected,
+  `"Task 1"` ids, dependencies by title, invented roles (`backend` → engineer, `frontend` →
+  design, `tester` → qa …). Real problems (a dependency cycle, no tasks) are still sent back
+  to the model.
+- **History within the context window.** Ollama silently drops the oldest messages when a
+  prompt exceeds `num_ctx`, which loses the task brief first. When an agent's history would
+  not fit (about 3 characters per token, minus room for the reply, the system prompt and the
+  tools), the factory shortens it itself: the brief and the latest three tool rounds stay
+  whole, older tool output and written file contents are shortened, and the oldest rounds are
+  left out if needed (with a note to re-read the workspace). Providers without a known small
+  window are not affected.
 - **Model choice matters.** Agents write and fix real code over many turns. Coding models of
   roughly 14B parameters and up do much better than small chat models. You can use a larger
   model for planning only (the *Planner model* setting).
-- **No timeouts on slow hardware (built-in engine).** Requests to local models may take as long as they need
-  (up to 30 minutes per call). The experimental `fx` engine does not: it gives a model about 120 seconds to start answering.
+- **No timeouts on slow hardware (either engine).** Requests to local models may take as long as they need
+  (up to 30 minutes per call), on the `fx` engine too (see *Agent engines*).
 - **Too slow or too heavy on your machine?** Use a hosted provider (see *Using a hosted provider*), or a hosted planner with local
   agents. Ollama is the automatic default only while nothing else is ready or remembered.
 
@@ -704,11 +719,11 @@ treated by each engine, and what is misconfigured. It makes no network request a
 | Parallel agents | `FACTORY_MAX_PARALLEL` / Settings; per run `--parallel` (1–8) | 3 | tasks executing at once | same |
 | Attempts per task, tool turns, token budget | `FACTORY_MAX_ATTEMPTS`, `FACTORY_MAX_AGENT_TURNS`, `FACTORY_TOKEN_BUDGET`; per run `--attempts --turns --budget` | 3 · 40 · 2 000 000 | yes | yes (budget checked less often) |
 | Run time limit, command timeout | run setting (120 min) · `FACTORY_COMMAND_TIMEOUT_MS` (3 min) | | yes | yes |
-| Context window (Ollama `num_ctx`) | per run (New Run form, API `providerOptions.numCtx`, headless `--num-ctx`) > Providers page > 32 768 | 32 768 | Ollama only | **not supported** (server default) |
-| Temperature, tool mode | per run | provider default · auto | yes | **not supported** |
-| Total request timeout | fixed | 30 min (15 min Anthropic) | fixed | none found in fx |
-| First-response timeout | fixed | — | not applicable (not streamed) | about 120 s, **fixed** |
-| Transport retries | fixed | 4 (Ollama: 2) | yes, incl. timeouts | none; the factory re-runs the attempt |
+| Context window (Ollama `num_ctx`) | per run (New Run form, API `providerOptions.numCtx`, headless `--num-ctx`) > Providers page > 32 768 | 32 768 | Ollama only | Ollama only (through the bridge) |
+| Temperature, tool mode | per run | provider default · auto | yes | yes (through the bridge) |
+| Total request timeout | fixed | 30 min (15 min Anthropic) | fixed | the same (through the bridge) |
+| First-response timeout | fixed | — | not applicable (not streamed) | not applicable: the bridge answers fx's 120 s header deadline at once |
+| Transport retries | fixed | 4 (Ollama: 2) | yes, incl. timeouts | the same (through the bridge) |
 
 Precedence for numbers is *run option > startup option > saved setting > environment > default* (see *Persistent settings*). An option
 the chosen engine cannot honour is reported by the preflight and logged as a warning at the start of the run; it is never silently
@@ -758,9 +773,8 @@ declare a winner. Change one setting per comparison. A mock report is not eviden
 
 **Not yet validated (needs real local inference):** which model and quantisation to use; whether `--parallel 1` is faster than the
 default on a given machine; what context size is enough or too much; how large prompts get per turn on real tasks; whether Ollama's
-`/v1` API sends response headers before prompt evaluation (decides whether fx's 120 s first-response limit bites on CPU); how often
-local models need retries or malformed-tool-call re-prompts; and whether any prompt or history trimming is safe. No default was changed
-for any of these.
+how often local models need retries or malformed-tool-call re-prompts; and how much history shortening costs in quality for a given
+window (it only starts when the history would otherwise be truncated by Ollama itself). No default was changed for any of these.
 
 ### Deterministic tests: replay, contracts and architecture guards
 

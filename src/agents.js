@@ -5,6 +5,8 @@ import { renderRunPrompt } from './prompt.js';
 import { plannerContext, agentContext, isExisting } from './project.js';
 import { ROLES, validatePlan } from './graph.js';
 import { redact } from './security.js';
+import { extractJsonValues } from './providers/tooltext.js';
+import { compactHistory, historyBudget } from './providers/history.js';
 
 export const ROLE_BRIEFS = {
   product: 'You are the Product agent. Refine requirements, user flows and the PRD. Write crisp, testable acceptance criteria and keep docs accurate to what was actually built.',
@@ -178,45 +180,114 @@ export async function runPlanner({ provider, run, signal, track, log }) {
     const res = await call(provider, { system: plannerSystem(run), messages, tools: [planToolFor(run)], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan', project: existing ? run.project : null, source: run.source } }, track);
     const use = res.content.find((c) => c.type === 'tool_use' && c.name === 'submit_plan');
     messages.push({ role: 'assistant', content: res.content });
-    if (!use) {
-      messages.push({ role: 'user', content: 'Call submit_plan with the plan.' });
+    // Local models often write the plan as JSON in their reply instead of calling the tool; take it from there.
+    const input = use ? use.input : planFromText(res.content);
+    if (!input) {
+      messages.push({ role: 'user', content: 'Call submit_plan with the plan (one JSON object with product, tasks, finalVerify and deploy).' });
       continue;
     }
-    const plan = normalizePlan(use.input);
+    const plan = normalizePlan(input, { idea: run.inputs.idea });
     const problems = validatePlan(plan);
     if (problems.length === 0) return plan;
     log?.(`Plan attempt ${attempt} rejected: ${problems.join('; ')}`);
-    messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: use.id, is_error: true, content: `The plan is invalid:\n- ${problems.join('\n- ')}\nFix these and call submit_plan again.` }] });
+    const fix = `The plan is invalid:\n- ${problems.join('\n- ')}\nFix these and call submit_plan again.`;
+    messages.push({ role: 'user', content: use ? [{ type: 'tool_result', tool_use_id: use.id, is_error: true, content: fix }] : fix });
   }
   throw new Error('planner could not produce a valid plan after 3 attempts');
 }
 
-export function normalizePlan(p = {}) {
-  const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : []);
+/** A plan object written as JSON in the model's text (bare, or wrapped as {"plan": …} / {"input": …}), or null. */
+export function planFromText(content = []) {
+  const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+  for (const { value } of extractJsonValues(text)) {
+    const p = unwrapPlan(value);
+    if (p) return p;
+  }
+  return null;
+}
+
+function unwrapPlan(v) {
+  for (let i = 0; i < 3 && v && typeof v === 'object' && !Array.isArray(v); i++) {
+    if (Array.isArray(v.tasks)) return v;
+    v = v.plan ?? v.input ?? v.arguments ?? v.parameters;
+  }
+  return null;
+}
+
+// Roles small models invent, mapped to the factory's six.
+const ROLE_ALIASES = {
+  engineer: ['engineering', 'engineers', 'developer', 'dev', 'backend', 'frontend_engineer', 'fullstack', 'full_stack', 'coder', 'programmer', 'implementation', 'implementer', 'software_engineer', 'architect', 'data'],
+  design: ['designer', 'ui', 'ux', 'ui_ux', 'uiux', 'frontend', 'front_end', 'web', 'copy'],
+  qa: ['test', 'tests', 'tester', 'testing', 'quality', 'quality_assurance', 'qa_engineer', 'verification'],
+  devops: ['ops', 'deploy', 'deployment', 'infra', 'infrastructure', 'sre', 'release', 'ci'],
+  product: ['pm', 'product_manager', 'product_owner', 'docs', 'documentation', 'writer', 'technical_writer', 'requirements', 'prd', 'readme'],
+  research: ['researcher', 'analysis', 'analyst', 'investigation'],
+};
+
+export function normalizeRole(r) {
+  const key = String(r || '').trim().toLowerCase().replace(/[\s/-]+/g, '_');
+  if (ROLES.includes(key)) return key;
+  for (const [role, aliases] of Object.entries(ROLE_ALIASES)) if (aliases.includes(key)) return role;
+  return 'engineer'; // missing or unknown: the generalist
+}
+
+const slugId = (v) => String(v ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+
+/**
+ * Coerce a plan into the factory's shape. Models (local ones especially) are loose with it: a string where a list is expected,
+ * "Task 1" ids, dependencies by title, roles like "backend". Only the shape is repaired; validatePlan still decides.
+ */
+export function normalizePlan(p = {}, { idea = '' } = {}) {
+  p = unwrapPlan(p) || (p && typeof p === 'object' ? p : {});
+  const arr = (v) => strings(v).map((x) => x.trim());
+  const product = p.product && typeof p.product === 'object' ? p.product : {};
+  const raw = (Array.isArray(p.tasks) ? p.tasks : []).filter((t) => t && typeof t === 'object');
+  // ids: slugs, unique; remember what each task could be referred to by (its raw id, slug, title, 1-based index).
+  const refs = new Map();
+  const seen = new Set();
+  const tasks = raw.map((t, i) => {
+    const given = String(t.id ?? '').trim();
+    let id = /^[a-z0-9][a-z0-9_-]{0,30}$/i.test(given) ? given : slugId(t.id ?? t.name).slice(0, 30) || `t${i + 1}`;
+    if (!/^[a-z0-9]/i.test(id)) id = `t${id}`;
+    while (seen.has(id)) id = `${id.slice(0, 30)}-${i + 1}`;
+    seen.add(id);
+    for (const k of [t.id, slugId(t.id), t.title, slugId(t.title), String(i + 1)]) if (k != null && k !== '' && !refs.has(String(k).toLowerCase())) refs.set(String(k).toLowerCase(), id);
+    const title = String(t.title || t.name || '').trim();
+    const description = String(t.description || t.spec || t.details || '').trim();
+    const verify = arr(t.verify ?? t.verification ?? t.commands);
+    return {
+      id,
+      role: normalizeRole(t.role ?? t.owner ?? t.agent),
+      title: title || description.split('\n')[0].slice(0, 80),
+      description: description || title,
+      dependsOn: arr(t.dependsOn ?? t.depends_on ?? t.dependencies ?? t.deps),
+      acceptance: arr(t.acceptance ?? t.acceptanceCriteria ?? t.acceptance_criteria ?? t.criteria),
+      outputs: arr(t.outputs),
+      files: arr(t.files),
+      verify,
+    };
+  });
+  for (const t of tasks) {
+    // A dependency on something that is not a task (or on itself) carries no ordering; drop it rather than fail the plan.
+    t.dependsOn = [...new Set(t.dependsOn.map((d) => refs.get(d.toLowerCase()) || refs.get(slugId(d))).filter((d) => d && d !== t.id))];
+    if (!t.acceptance.length) t.acceptance = t.verify.length ? t.verify.map((v) => `\`${v}\` exits 0`) : t.title ? [t.title] : [];
+  }
+  const deploy = typeof p.deploy === 'string' ? { start: p.deploy } : p.deploy;
+  const successCriteria = arr(product.successCriteria ?? product.success_criteria ?? p.successCriteria);
   return {
     product: {
-      name: String(p.product?.name || 'App').slice(0, 80),
-      summary: String(p.product?.summary || ''),
-      users: arr(p.product?.users),
-      successCriteria: arr(p.product?.successCriteria),
+      name: String(product.name || p.name || 'App').slice(0, 80),
+      summary: String(product.summary || product.description || p.summary || idea || ''),
+      users: arr(product.users),
+      successCriteria: successCriteria.length ? successCriteria : tasks.flatMap((t) => t.acceptance.slice(0, 1)).slice(0, 6),
     },
-    tasks: (Array.isArray(p.tasks) ? p.tasks : []).map((t) => ({
-      id: String(t?.id || '').trim(),
-      role: String(t?.role || '').trim().toLowerCase(),
-      title: String(t?.title || '').trim(),
-      description: String(t?.description || '').trim(),
-      dependsOn: arr(t?.dependsOn),
-      acceptance: arr(t?.acceptance),
-      outputs: arr(t?.outputs),
-      files: arr(t?.files),
-      verify: arr(t?.verify),
-    })),
+    tasks,
     architecture: typeof p.architecture === 'string' ? p.architecture.slice(0, 2000) : '',
     affectedFiles: arr(p.affectedFiles).slice(0, 60),
     risks: arr(p.risks),
     openQuestions: arr(p.openQuestions),
-    finalVerify: arr(p.finalVerify),
-    deploy: p.deploy && typeof p.deploy.start === 'string' ? { start: p.deploy.start, healthPath: p.deploy.healthPath || '/' } : null,
+    finalVerify: arr(p.finalVerify ?? p.final_verify),
+    deploy: deploy && typeof deploy.start === 'string' && deploy.start.trim() ? { start: deploy.start, healthPath: deploy.healthPath || deploy.health_path || '/' } : null,
   };
 }
 
@@ -278,9 +349,11 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
   const filesTouched = new Set();
   const commandsRun = [];
 
+  const budget = historyBudget(provider, system, AGENT_TOOLS);
+
   for (let turn = 1; turn <= settings.maxAgentTurns; turn++) {
     if (signal?.aborted) return { ok: false, error: 'cancelled' };
-    const res = await call(provider, { system, messages, tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run) } }, track);
+    const res = await call(provider, { system, messages: compactHistory(messages, budget), tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run) } }, track);
     messages.push({ role: 'assistant', content: res.content });
 
     for (const block of res.content) {
@@ -299,6 +372,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
     const results = [];
     let completion = null;
     for (const use of uses) {
+      use.input = normalizeToolInput(use.name, use.input);
       if (use.name === 'complete_task') {
         completion = use.input || {};
         results.push({ type: 'tool_result', tool_use_id: use.id, content: 'Recorded. The factory will now verify your work.' });
@@ -328,7 +402,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
 }
 
 export async function execTool(ws, use, { settings, signal }) {
-  const input = use.input || {};
+  const input = normalizeToolInput(use.name, use.input);
   try {
     switch (use.name) {
       case 'list_files': {
@@ -356,6 +430,39 @@ export async function execTool(ws, use, { settings, signal }) {
   } catch (err) {
     return { text: `error: ${err.message}`, preview: err.message, isError: true };
   }
+}
+
+const pick = (o, keys) => {
+  for (const k of keys) if (o[k] != null && o[k] !== '') return o[k];
+  return undefined;
+};
+
+/**
+ * Tool arguments under the names models actually use (file_path, contents, cmd, …), mapped to the factory's. Content given as
+ * an object (a model writing package.json as JSON) is serialized. Idempotent; the tools themselves still validate.
+ */
+export function normalizeToolInput(name, input) {
+  const i = input && typeof input === 'object' && !Array.isArray(input) ? { ...input } : {};
+  const raw = typeof input === 'string' ? input : typeof i._raw === 'string' ? i._raw : undefined;
+  const PATH = ['path', 'file_path', 'filepath', 'filename', 'file', 'target_file', 'file_name', 'dir', 'directory', 'relative_path'];
+  if (name === 'write_file') {
+    const path = pick(i, PATH);
+    let content = pick(i, ['content', 'contents', 'text', 'code', 'data', 'file_text', 'body', 'file_content']);
+    if (content == null && typeof i.content === 'string') content = i.content; // an empty file
+    if (content != null && typeof content !== 'string') content = typeof content === 'object' ? `${JSON.stringify(content, null, 2)}\n` : String(content);
+    return { ...i, ...(path != null ? { path: String(path).trim() } : {}), ...(content != null ? { content } : {}) };
+  }
+  if (name === 'read_file' || name === 'list_files') {
+    const path = pick(i, PATH);
+    return path != null ? { ...i, path: String(path).trim() } : i;
+  }
+  if (name === 'run_command') {
+    let command = pick(i, ['command', 'cmd', 'commands', 'script', 'shell', 'bash', 'code']) ?? raw;
+    if (Array.isArray(command)) command = command.filter((c) => typeof c === 'string').join(' && ');
+    const timeout = Number(i.timeout_seconds ?? i.timeout);
+    return { ...i, ...(command != null ? { command: String(command) } : {}), ...(Number.isFinite(timeout) && timeout > 0 ? { timeout_seconds: Math.round(timeout) } : {}) };
+  }
+  return i;
 }
 
 export function summarizeInput(use) {
