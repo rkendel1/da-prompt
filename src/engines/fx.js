@@ -47,7 +47,8 @@ export function makeFxRunner(cfg) {
     try {
       const model = await fx.createFxModel({ baseUrl: ep.baseUrl, model: ep.model, ...(envName ? { apiKeyEnv: envName } : {}) });
       const stop = () => queueMicrotask(() => state.turn?.cancel());
-      const tools = AGENT_TOOLS.map((t) => ({
+      // save_reply_code works on the built-in loop's own previous reply, which fx does not have.
+      const tools = AGENT_TOOLS.filter((t) => t.name !== 'save_reply_code').map((t) => ({
         name: t.name,
         description: t.description,
         inputSchema: t.input_schema,

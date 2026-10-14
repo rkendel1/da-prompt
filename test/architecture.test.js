@@ -129,7 +129,7 @@ test('model-proposed operations have exactly one door: execTool is the only code
   for (let i = open; i < c.length; i++) { if (c[i] === '{') depth++; else if (c[i] === '}' && --depth === 0) { end = i; break; } }
   const outside = c.slice(0, start) + c.slice(end);
   assert.ok(!/\bws\.(runCommand|writeFile|readFile|listFiles)\s*\(/.test(outside), 'the sandbox is called only from execTool');
-  assert.equal((c.slice(start, end).match(/\bws\.(runCommand|writeFile|readFile|listFiles)\s*\(/g) || []).length, 4, 'one call per tool: list_files, read_file, write_file, run_command');
+  assert.equal((c.slice(start, end).match(/\bws\.(runCommand|writeFile|readFile|listFiles)\s*\(/g) || []).length, 5, 'one call per tool: list_files, read_file, write_file, save_reply_code, run_command');
   // No provider or engine module can call a workspace at all.
   for (const f of [...list('src/providers'), ...list('src/engines')]) assert.ok(!/\.(runCommand|writeFile)\s*\(/.test(code(f)), `${f} must not write files or run commands`);
 });
