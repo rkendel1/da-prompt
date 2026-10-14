@@ -2,6 +2,7 @@
 // Layer 1 plan → 2 agents → 3 execution (parallel, per-task subgraphs) → 4 artifacts →
 // 5 verification → 6 feedback (retry ×3, escalate, record lessons) → 7 completion → deliver.
 
+import { computeLauncher } from './compute.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Workspace } from './sandbox.js';
@@ -471,7 +472,7 @@ export class Factory {
     let run = await this.store.load(id);
     const existing = isExisting(run);
     // Existing projects: commands pass through the project command policy and .git is write-protected.
-    const ws = new Workspace(this.store.workspaceDir(id), existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {});
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     // Factory notes (plan, lessons) live beside the workspace for existing projects, never inside the project.
     const notes = existing ? new Workspace(this.store.notesDir(id)) : ws;
     const save = () => this.store.save(run);
@@ -962,7 +963,7 @@ export class Factory {
     if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
     if (run.projectId && (await this.registry.find(run.projectId).catch(() => null))) await this.registry.locate(run.projectId, { purpose: 'publish changes' });
     await this.assertApproved(run, 'publish them');
-    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true });
+    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true, launcher: computeLauncher(this.cfg) });
     run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
     await writeReport(run, this.store.deliveryDir(id));
     await this.store.save(run);
@@ -1060,7 +1061,7 @@ export class Factory {
     const chosen = (Array.isArray(steps) && steps.length ? steps : run.settings.paxSteps?.length ? run.settings.paxSteps : this.cfg.paxSteps).filter((x) => PAX_STEP_IDS.includes(x));
     if (!chosen.length) throw new ProjectError(400, 'choose at least one PAX step');
     if (chosen.includes('test') && confirmTests !== true) throw new ProjectError(400, 'the "test" step runs the project\'s native tests through PAX and can change files; confirm it explicitly ({"confirmTests": true})');
-    const ws = new Workspace(this.store.workspaceDir(id), isExisting(run) ? { protectGit: true } : {});
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(isExisting(run) ? { protectGit: true } : {}) });
     const emit = (t, d) => this.store.event(id, t, d);
     const controller = new AbortController();
     this.active.set(id, { controller, promise: Promise.resolve() });
@@ -1083,7 +1084,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!run.plan || !fs.existsSync(this.store.workspaceDir(id))) throw new ProjectError(409, 'the run has no workspace to check');
     const existing = isExisting(run);
-    const ws = new Workspace(this.store.workspaceDir(id), existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {});
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     const base = run.project?.baseline || [];
     const commands = [...new Set([...(run.plan.finalVerify || []), ...base.map((b) => b.command)])].filter(Boolean);
     if (!commands.length) throw new ProjectError(409, 'this run has no checks to run (no baseline or final verification commands)');

@@ -29,8 +29,9 @@ export class Workspace {
    * opts.protectGit refuses file writes into any .git directory (hooks and config are code-execution
    * vectors for the git commands the factory runs itself).
    */
-  constructor(root, { policy = null, protectGit = false } = {}) {
+  constructor(root, { policy = null, protectGit = false, launcher = null } = {}) {
     this.policy = policy;
+    this.launcher = launcher; // optional: launch commands elsewhere (a Compute environment); see src/compute.js
     this.protectGit = protectGit;
     this.root = path.resolve(root);
     fs.mkdirSync(this.root, { recursive: true });
@@ -127,9 +128,11 @@ export class Workspace {
       const started = Date.now();
       const home = path.join(this.root, '.home');
       fs.mkdirSync(home, { recursive: true });
-      const child = spawn('sh', ['-c', command], {
+      const childEnv = { ...safeEnv(), HOME: home, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...(this.protectGit ? GIT_IDENTITY : {}), ...env };
+      const launch = this.launcher ? this.launcher({ command, cwd: this.root, env: childEnv }) : { file: 'sh', args: ['-c', command], env: childEnv };
+      const child = spawn(launch.file, launch.args, {
         cwd: this.root,
-        env: { ...safeEnv(), HOME: home, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...(this.protectGit ? GIT_IDENTITY : {}), ...env },
+        env: launch.env,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
