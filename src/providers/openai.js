@@ -11,7 +11,7 @@ import { requestWithRetry, requestStream, lineSplitter, HttpError, describeError
 // Fixed limits (not configurable): a request may take this long in total; the Ollama dialect retries transient errors this often.
 export const REQUEST_TIMEOUT_MS = 30 * 60_000;
 export const OLLAMA_HTTP_RETRIES = 2;
-import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking } from './tooltext.js';
+import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking, resolveToolName } from './tooltext.js';
 
 // Remember models that rejected native tools so we don't pay for the failure every call.
 const JSON_MODE_MODELS = new Set();
@@ -247,7 +247,7 @@ export function fromOpenAIMessage(message = {}, { toolNames = new Set() } = {}) 
   let text = typeof message.content === 'string' ? message.content : asText(message.content);
   const native = Array.isArray(message.tool_calls) ? message.tool_calls : [];
   const uses = native
-    .map((c) => ({ name: c.function?.name, input: parseArgs(c.function?.arguments), id: c.id }))
+    .map((c) => ({ name: (toolNames.size && resolveToolName(c.function?.name, toolNames)) || c.function?.name, input: parseArgs(c.function?.arguments), id: c.id }))
     .filter((c) => c.name);
   if (uses.length === 0 && text && toolNames.size) {
     // JSON mode, or a model that wrote its tool call into the text.

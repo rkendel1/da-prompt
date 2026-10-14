@@ -66,7 +66,7 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
     const row = list.find((e) => e.id === want);
     return row && usableEngine(row, p).ok ? want : 'builtin';
   };
-  const usableEngine = (e, p) => (!e.available ? { ok: false, why: e.reason } : e.id === 'fx' && p?.type === 'anthropic' ? { ok: false, why: 'FX talks to OpenAI-compatible endpoints and Ollama, not the Anthropic API.' } : { ok: true });
+  const usableEngine = (e, p) => (!e.available ? { ok: false, why: e.reason } : e.id === 'fx' && p?.type === 'offline' ? { ok: false, why: 'The offline demo agents have no model for FX to drive.' } : { ok: true });
   const engineBlock = (p) => {
     const list = state.engines?.engines || [];
     if (list.length < 2) return '';
