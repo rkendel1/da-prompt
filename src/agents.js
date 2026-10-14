@@ -6,7 +6,7 @@ import { plannerContext, agentContext, isExisting } from './project.js';
 import { ROLES, validatePlan } from './graph.js';
 import { redact } from './security.js';
 import crypto from 'node:crypto';
-import { OPTIONAL_TOOLS, optionalTools, validateArgs, validateArtifact, renderScreenshot, generateImage, checkTaskContracts, repairOrdering, CapabilityError } from './capabilities.js';
+import { OPTIONAL_TOOLS, optionalTools, validateArgs, validateArtifact, renderScreenshot, generateImage, checkTaskContracts, repairPlan, CapabilityError } from './capabilities.js';
 import { fitContext, outputReserve, ContextOverflowError } from './inference.js';
 
 export const ROLE_BRIEFS = {
@@ -217,7 +217,7 @@ export async function runPlanner({ provider, run, signal, track, log, caps }) {
     let warnings = [];
     let adjustments = [];
     if (problems.length === 0) {
-      adjustments = repairOrdering(plan); // only adds missing dependency edges; see capabilities.js
+      adjustments = repairPlan(plan); // intent-preserving repairs only, each reported; see capabilities.js
       const contract = checkTaskContracts(plan, caps);
       for (const t of plan.tasks) for (const c of t.capabilities || []) if (!KNOWN_TOOLS.has(c)) contract.problems.push(`task "${t.id}" lists unknown capability "${c}" (known: ${[...KNOWN_TOOLS].join(', ')})`);
       for (const t of plan.tasks) for (const c of t.capabilities || []) {

@@ -203,6 +203,30 @@ function ancestors(tasks) {
  * (checkTaskContracts then reports it to the planner). Weak planners get these wrong constantly; sending the plan back three
  * times for a missing edge fails the whole run for nothing.
  */
+const BARE_TEST = /^[\w./@-]+\.(test|spec)\.(m?js|cjs)$/;
+const BARE_FILE = /^[\w./@-]+\.(m?js|cjs|ts|json|md|html|css|txt|py)$/i;
+
+/**
+ * Repair what has one obvious, intent-preserving fix, and report each repair:
+ *   - a verify command that is only the path of a JavaScript test file ("test/a.test.js") becomes `node --test <path>`;
+ *   - missing ordering (see repairOrdering).
+ * Anything else stays as written and is reported by checkTaskContracts with a specific message.
+ */
+export function repairPlan(plan) {
+  const adjustments = [];
+  for (const t of plan?.tasks || []) {
+    t.verify = (t.verify || []).map((v) => {
+      const c = String(v).trim();
+      if (BARE_TEST.test(c) && !c.startsWith('./')) {
+        adjustments.push(`task "${t.id}" verify "${c}" is a file path, not a command; it now runs \`node --test ${c}\``);
+        return `node --test ${c}`;
+      }
+      return v;
+    });
+  }
+  return [...adjustments, ...repairOrdering(plan)];
+}
+
 export function repairOrdering(plan) {
   const tasks = plan?.tasks || [];
   const adjustments = [];
@@ -221,7 +245,18 @@ export function repairOrdering(plan) {
       for (const [o, ps] of producers) {
         if ((t.outputs || []).includes(o)) continue;
         if (!(t.verify || []).some((v) => v.includes(o))) continue;
-        for (const p of ps) if (!ancestors(tasks)(t.id).has(p.id)) changed = addEdge(t, p, `its verify command reads ${o}, which "${p.id}" produces`) || changed;
+        for (const p of ps) {
+          if (ancestors(tasks)(t.id).has(p.id)) continue;
+          if (reaches(p.id, t.id)) {
+            // "t" cannot wait for "p" ("p" already depends on "t"), so the check can only pass once "p" is done: it moves there.
+            // The check is kept, not dropped; "t" is still held to its own outputs and its other checks.
+            const cmds = (t.verify || []).filter((v) => v.includes(o));
+            t.verify = (t.verify || []).filter((v) => !v.includes(o));
+            p.verify = [...(p.verify || []), ...cmds.filter((c) => !(p.verify || []).includes(c))];
+            adjustments.push(`verify command ${cmds.map((c) => `"${c}"`).join(', ')} moved from "${t.id}" to "${p.id}": it reads ${o}, which "${p.id}" produces after "${t.id}" has finished`);
+            changed = true;
+          } else changed = addEdge(t, p, `its verify command reads ${o}, which "${p.id}" produces`) || changed;
+        }
       }
     }
     for (const [o, ps] of producers) {
@@ -258,6 +293,8 @@ export function checkTaskContracts(plan, caps) {
     const verify = t.verify || [];
     if (!outs.length && !verify.length) warnings.push(`task "${t.id}" has no outputs and no verify command, so the factory can only check that it executed some work (a file written or a command that succeeded), not that the work is right`);
     for (const v of verify) {
+      const bare = String(v).trim();
+      if (BARE_FILE.test(bare) && !bare.startsWith('./') && !bare.startsWith('/')) problems.push(`task "${t.id}" verify "${bare}" is a file path, not a shell command, so it cannot exit 0. To check that the file exists use \`test -s ${bare}\`; to run it use \`node ${bare}\`; to run tests use \`npm test\``);
       const first = String(v).trim().split(/\s+/)[0];
       if (AGENT_TOOL_NAMES.has(first)) problems.push(`task "${t.id}" verify command "${v}" starts with the tool name ${first}; verify commands are shell commands the factory runs after the agent finishes. Put files in outputs, or use a shell command (for example test -s <file>)`);
     }

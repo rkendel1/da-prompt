@@ -13,7 +13,7 @@ import { blockNetwork, blocked } from './offline-guard.js';
 import { runReplay, runInvariants } from './replay-helpers.js';
 import { w, finish, tool } from './replay/fixtures.js';
 import { Workspace } from '../src/sandbox.js';
-import { validateArtifact, validateArgs, checkTaskContracts, repairOrdering, detectCapabilities, checkOutput } from '../src/capabilities.js';
+import { validateArtifact, validateArgs, checkTaskContracts, repairOrdering, repairPlan, detectCapabilities, checkOutput } from '../src/capabilities.js';
 import { AGENT_TOOLS, execTool, toolsFor } from '../src/agents.js';
 import { InferenceLimiter, fitContext, ContextOverflowError, outputReserve } from '../src/inference.js';
 import { failureFingerprint, normalizeFailureText, buildFeedback } from '../src/recovery.js';
@@ -262,10 +262,10 @@ test('missing ordering is repaired (only edges are added); an unsafe plan is sen
   assert.equal(notes.length, 2);
   assert.match(notes[0], /task "code" now depends on "tests".*reads test\/a\.test\.js/);
   assert.deepEqual(checkTaskContracts(plan, detectCapabilities({ browserPath: '/nonexistent/browser' }, { env: {} })).problems, []);
-  // An edge that would close a cycle is not added; the contradiction is reported instead.
+  // An edge that would close a cycle is never added; the check moves to the task that produces the file instead (kept, not dropped).
   const cyc = { tasks: [t('a', { outputs: ['a.md'], dependsOn: ['b'] }), t('b', { outputs: ['b.md'], verify: ['cat a.md'] })] };
-  assert.deepEqual(repairOrdering(cyc), []);
-  assert.match(checkTaskContracts(cyc, {}).problems.join(), /task "b" verifies a\.md/);
+  assert.match(repairOrdering(cyc)[0], /moved from "b" to "a"/);
+  assert.deepEqual([cyc.tasks[0].verify, cyc.tasks[1].verify, cyc.tasks[1].dependsOn], [['cat a.md'], [], []]);
 
   const r = await runReplay({
     idea: 'repair and reject',
@@ -749,4 +749,76 @@ test('bench-report restates two reports side by side and counts a "completed" ru
   const text = table(before, after);
   assert.match(text, /False successes.*1 → 0/);
   assert.match(text, /peak simultaneous generations 1/);
+});
+
+// ── the r1 planning regression ────────────────────────────────────────────────────────────────────
+
+// The plan qwen2.5-coder:7b actually submitted for scenario r1 (captured from a live run), three times in a row.
+const R1_PLAN = {
+  tasks: [
+    { id: 'create-stats-js', role: 'engineer', title: 'Create src/stats.js', description: 'Create src/stats.js with functions mean(xs) and median(xs) that throw a RangeError for empty arrays.', dependsOn: [], acceptance: ['src/stats.js exists'], files: ['src/stats.js'], outputs: ['src/stats.js'], verify: ['test/stats.test.js'] },
+    { id: 'write-tests', role: 'engineer', title: 'Write tests in test/stats.test.js', description: 'Write tests for mean(xs) and median(xs) in test/stats.test.js.', dependsOn: ['create-stats-js'], acceptance: ['test/stats.test.js exists'], files: ['test/stats.test.js'], outputs: ['test/stats.test.js'], verify: ['npm test'] },
+  ],
+  finalVerify: ['npm test'],
+};
+
+test('r1: the real 7B plan is repaired once (a bare test path becomes a command; the check that needs a later task moves to it) and the run completes', async () => {
+  const r = await runReplay({
+    idea: 'r1', planResponses: [{ plan: R1_PLAN }],
+    taskAttempts: {
+      'create-stats-js': [[[w('src/stats.js', 'export const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;\n')], [finish('stats', ['src/stats.js'])]]],
+      'write-tests': [[[w('test/stats.test.js', "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { mean } from '../src/stats.js';\ntest('mean', () => assert.equal(mean([1, 3]), 2));\n")], [finish('tests', ['test/stats.test.js'])]]],
+    },
+  });
+  assert.equal(r.provider.planCalls, 1, 'no regeneration was needed');
+  const [a, b] = r.run.plan.tasks;
+  assert.deepEqual(a.verify, [], 'the check left create-stats-js...');
+  assert.deepEqual(b.verify, ['npm test', 'node --test test/stats.test.js'], '...and runs once the test file exists');
+  assert.equal(r.run.plan.adjustments.length, 2);
+  assert.match(r.run.plan.adjustments[0], /"test\/stats\.test\.js" is a file path, not a command; it now runs `node --test test\/stats\.test\.js`/);
+  assert.match(r.run.plan.adjustments[1], /moved from "create-stats-js" to "write-tests"/);
+  assert.equal(r.run.status, 'completed', JSON.stringify(r.run.checklist));
+});
+
+test('r1 repair does not weaken anything: the moved check still fails the task that now owns it', async () => {
+  const r = await runReplay({
+    idea: 'r1 broken tests', planResponses: [{ plan: R1_PLAN }],
+    taskAttempts: {
+      'create-stats-js': [[[w('src/stats.js', 'export const mean = () => 0;\n')], [finish('stats', ['src/stats.js'])]]],
+      'write-tests': [[[w('test/stats.test.js', "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails', () => assert.equal(1, 2));\n")], [finish('tests', ['test/stats.test.js'])]]],
+    },
+    maxAttempts: 1,
+  });
+  assert.equal(taskOf(r, 'write-tests').status, 'escalated');
+  assert.notEqual(r.run.status, 'completed');
+});
+
+test('plans that are genuinely invalid still fail closed, with a message the model can act on', async () => {
+  const bad = { tasks: [{ id: 'a', outputs: ['a.md'], verify: ['README.md'] }], finalVerify: ['npm test'] };
+  const r = await runReplay({ idea: 'bad verify', planResponses: [{ plan: bad }, { plan: bad }, { plan: bad }], attempts: [[]] });
+  assert.equal(r.run.status, 'failed');
+  assert.match(r.run.error, /valid plan after 3 attempts/);
+  assert.equal(r.provider.requests.filter((q) => q.kind === 'task').length, 0, 'nothing ran');
+  const msg = r.provider.requests.filter((q) => q.kind === 'plan')[1].messages.at(-1).content[0].content;
+  assert.match(msg, /verify "README\.md" is a file path, not a shell command.*test -s README\.md/s);
+  // a true cycle between two tasks is still reported, not silently "fixed"
+  const cyc = { tasks: [{ id: 'a', outputs: ['a.md'], dependsOn: ['b'] }, { id: 'b', outputs: ['b.md'], dependsOn: ['a'] }], finalVerify: ['npm test'] };
+  const c = await runReplay({ idea: 'cycle', planResponses: [{ plan: cyc }, { plan: cyc }, { plan: cyc }], attempts: [[]] });
+  assert.equal(c.run.status, 'failed');
+});
+
+test('representative valid plans from small models pass untouched', async () => {
+  const caps = detectCapabilities({ browserPath: '/nonexistent/browser' }, { env: {} });
+  const plans = [
+    { tasks: [{ id: 'a', outputs: ['src/a.js'], verify: ['node --test test/a.test.js'], dependsOn: ['b'] }, { id: 'b', outputs: ['test/a.test.js'] }] },
+    { tasks: [{ id: 'one', outputs: ['docs/x.md'], verify: ['test -s docs/x.md', 'grep -q Heading docs/x.md'] }] },
+    { tasks: [{ id: 'm', outputs: ['src/m.js'], verify: ['npm test'] }, { id: 'n', outputs: ['src/n.js'], verify: ['./check.sh'], dependsOn: ['m'] }] },
+  ];
+  for (const p of plans) {
+    const tasks = p.tasks.map((t) => ({ dependsOn: [], acceptance: ['ok'], verify: [], outputs: [], ...t }));
+    const copy = JSON.stringify(tasks);
+    assert.deepEqual(repairPlan({ tasks }), [], 'nothing to repair');
+    assert.equal(JSON.stringify(tasks), copy);
+    assert.deepEqual(checkTaskContracts({ tasks }, caps).problems, []);
+  }
 });
