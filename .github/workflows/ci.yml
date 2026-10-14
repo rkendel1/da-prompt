@@ -13,8 +13,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # The standard suite is offline by design: no Ollama, no provider keys, no off-machine connections (test/offline-guard.js).
-  # Nothing below supplies a credential; the tests use mock servers on loopback and scripted providers.
+  # The standard suite needs no model: no Ollama, no provider keys, no off-machine connections from the test process
+  # (test/offline-guard.js). Nothing below supplies a credential; the tests use mock servers on loopback and scripted providers.
+  # The one exception is the npm registry: apps the factory generates install the pinned, published @appport/* packages
+  # (templates/appport-packages.json; the AppPort conformance gate in test/appport.test.js runs them), cached per run.
   CI: "true"
 
 jobs:

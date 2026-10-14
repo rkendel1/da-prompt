@@ -20,6 +20,8 @@
 - A user can add, complete, filter and delete items in the browser with no errors.
 - The JSON API (`/api/items`, `/api/health`) behaves as documented and rejects invalid input with `400`.
 - Automated tests cover every endpoint and pass with `npm test`.
+- Agents can discover and use the application through its AppPort capabilities (`/.well-known/appport`): reads and writes
+  go through the same store and validation as the UI, and writes need an authorized token.
 - The app starts with `npm start`, honours `PORT`, and passes a health check once deployed.
 
 ## Out of scope for v1

@@ -385,3 +385,18 @@ test('pax status/verify: found on the backend PATH, via an explicit path, missin
   assert.equal((await cli(['runs', 'evidence', id, '--json'], { backend: be })).json.evidence.factory.verdict, 'verified', 'a failing PAX does not change the factory verdict');
   await cli(['config', 'unset', 'paxPath'], { backend: be });
 });
+
+test('run --new --appport-exception records an explicit reason; it needs a reason and a new application', async () => {
+  const be = await backend();
+  const r = await cli(['run', 'An internal batch job', '--new', '--appport-exception', 'batch job with no callers', '--detach', '--json'], { backend: be });
+  assert.equal(r.code, 0, r.err + r.out);
+  const stored = await (await fetch(`${be.url}/api/runs/${r.json.id}`)).json();
+  assert.equal((stored.run || stored).settings.appportException, 'batch job with no callers');
+  const blank = await cli(['run', 'An app', '--new', '--appport-exception', '  ', '--json'], { backend: be });
+  assert.equal(blank.code, EXIT.USAGE);
+  assert.match(blank.err + blank.out, /needs a reason/);
+  const existing = await cli(['run', 'Add a farewell helper', '--project', 'app', '--appport-exception', 'n/a', '--json'], { backend: be });
+  assert.equal(existing.code, EXIT.USAGE);
+  assert.match(existing.err + existing.out, /only applies to new applications/);
+  await idle(be, r.json.id);
+});

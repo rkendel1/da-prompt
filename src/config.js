@@ -86,6 +86,9 @@ export function loadConfig(overrides = {}) {
     gitConfig: [],
   };
   const merged = { ...cfg, ...overrides, defaults: { ...cfg.defaults, ...(overrides.defaults || {}) } };
+  // npm's cache for the dependencies of generated apps (the pinned @appport/* packages): shared by every run of this data dir,
+  // so after the first download installs are local. Not a secret, so it is passed to agent commands as npm_config_cache.
+  merged.npmCache = path.resolve(overrides.npmCache || process.env.FACTORY_NPM_CACHE || path.join(merged.dataDir, 'cache', 'npm'));
   // Settings saved from the UI (<data dir>/settings.json) are layered on top of the environment; see src/settings.js.
   merged.settings = new SettingsStore(merged, overrides);
   return merged;

@@ -46,6 +46,7 @@ export const RUN_OPTIONS = {
   'no-pax': { type: 'boolean', description: 'Do not collect PAX observations.' },
   'pax-steps': { type: 'string', valueName: 'LIST', description: 'Comma-separated PAX steps (info,doctor,reality,drift,graph,test-plan,test).' },
   deploy: { type: 'boolean', description: 'Authorize a local preview of the result.' },
+  'appport-exception': { type: 'string', valueName: 'REASON', description: 'New apps only: do not require an AppPort capability boundary, for the stated reason (recorded in the run).' },
   'allow-install': { type: 'boolean', description: 'Allow dependency installs (they run project scripts).' },
   'auto-apply': { type: 'boolean', description: 'Local directory runs: apply the result to your directory automatically when it is verified and ready.' },
   publish: { type: 'boolean', description: 'GitHub: push the run branch and open a PR when done (explicit authorization).' },
@@ -79,6 +80,11 @@ export async function startRun(ctx, { forceNew = false } = {}) {
   if (opts['no-pax']) settings.pax = false;
   if (opts['pax-steps']) settings.paxSteps = opts['pax-steps'].split(',').map((s) => s.trim()).filter(Boolean);
   if (opts.deploy) settings.deploy = true;
+  if (opts['appport-exception'] !== undefined) {
+    if (source) throw usageError('--appport-exception only applies to new applications (--new).');
+    if (!opts['appport-exception'].trim()) throw usageError('--appport-exception needs a reason.');
+    settings.appportException = opts['appport-exception'];
+  }
   const body = {
     idea: task,
     requirements: opts.requirements,

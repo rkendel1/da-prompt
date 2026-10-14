@@ -8,6 +8,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TEMPLATE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'offline-app');
+// The pinned AppPort packages (shared with src/appport.js): every generated app is AppPort-native.
+const APPPORT = JSON.parse(fs.readFileSync(path.join(TEMPLATE_DIR, '..', 'appport-packages.json'), 'utf8'));
+
+/**
+ * The two kinds of app the offline agents can build. A catalog is read-oriented (a searchable, read-only reference); everything
+ * else becomes a tracker (items with a create/update workflow). Files under templates/offline-app/variants/<kind>/ replace the
+ * shared ones for that kind.
+ */
+export function appKind(inputs = {}) {
+  return /\b(catalog(ue)?|directory|glossary|reference|lookup|encyclop(a)?edia|knowledge ?base|handbook)\b/i.test(`${inputs.idea || ''}`) ? 'catalog' : 'tracker';
+}
 
 const STATS_OK = `
   stats() {
@@ -23,6 +34,18 @@ const STATS_FAULTY = `
     return { total: all.length, done: all.filter((i) => i.done).length ;
   }
 `;
+const CATALOG_STATS_OK = `
+  stats() {
+    const all = [...this.items.values()];
+    return { total: all.length, categories: new Set(all.map((e) => e.category)).size };
+  }
+`;
+const CATALOG_STATS_FAULTY = `
+  stats() {
+    const all = [...this.items.values()];
+    return { total: all.length, categories: new Set(all.map((e) => e.category)).size ;
+  }
+`;
 
 const TASK_FILES = {
   prd: [['PRD.md', 'PRD.md.tpl']],
@@ -30,6 +53,8 @@ const TASK_FILES = {
     ['package.json', 'package.json.tpl'],
     ['.gitignore', 'gitignore.tpl'],
     ['src/store.js', 'src/store.js.tpl'],
+    ['src/auth.js', 'src/auth.js.tpl'],
+    ['src/appport.js', 'src/appport.js.tpl'],
     ['src/app.js', 'src/app.js.tpl'],
   ],
   ui: [
@@ -37,7 +62,10 @@ const TASK_FILES = {
     ['public/style.css', 'public/style.css.tpl'],
     ['public/app.js', 'public/app.js.tpl'],
   ],
-  tests: [['test/app.test.js', 'test/app.test.js.tpl']],
+  tests: [
+    ['test/app.test.js', 'test/app.test.js.tpl'],
+    ['test/appport.test.js', 'test/appport.test.js.tpl'],
+  ],
   deploy: [
     ['Dockerfile', 'Dockerfile.tpl'],
     ['DEPLOY.md', 'DEPLOY.md.tpl'],
@@ -46,12 +74,24 @@ const TASK_FILES = {
 };
 
 const SUMMARIES = {
-  prd: 'Wrote PRD.md: users, four core flows, success criteria, scope and risks.',
-  core: 'Implemented the in-memory ItemStore with validation and a zero-dependency HTTP API (health, list, create, get, update, delete) that also serves the UI.',
-  ui: 'Built an accessible, responsive web UI (add, complete, filter, delete) with light/dark themes using relative API URLs.',
-  tests: 'Added a node:test suite covering every endpoint, validation errors, 404/405 handling and static path safety; npm test passes.',
-  deploy: 'Added a non-root Dockerfile with a HEALTHCHECK and DEPLOY.md covering local, Docker and PaaS deployment.',
-  docs: 'Wrote README.md with quick start, features, API reference, layout and next steps.',
+  tracker: {
+    prd: 'Wrote PRD.md: users, four core flows, success criteria, scope and risks.',
+    core: 'Implemented the in-memory ItemStore with validation, an HTTP API (health, list, create, get, update, delete) that also serves the UI, and the AppPort capability boundary (items.list/get/create/update, token-authorized) over the same store; installed the pinned @appport packages.',
+    ui: 'Built an accessible, responsive web UI (add, complete, filter, delete) with light/dark themes using relative API URLs.',
+    tests: 'Added node:test suites for every endpoint, validation errors, 404/405 handling and static path safety, and for the AppPort boundary (discovery, invocation, authorization, state checked against the store); npm test passes.',
+    deploy: 'Added a non-root Dockerfile with a HEALTHCHECK and DEPLOY.md covering local, Docker and PaaS deployment.',
+    docs: 'Wrote README.md with quick start, features, API reference, AppPort capabilities, layout and next steps.',
+    fix: 'Fixed: closed the unterminated object literal in ItemStore.stats().',
+  },
+  catalog: {
+    prd: 'Wrote PRD.md: users, browse/search/filter flows, success criteria, scope and risks.',
+    core: 'Implemented the read-only EntryStore with search rules, a GET-only HTTP API (health, entries, entry, categories) that also serves the UI, and the AppPort capability boundary (entries.search/get/categories, token-authorized reads, no writes) over the same store; installed the pinned @appport packages.',
+    ui: 'Built an accessible, responsive search UI (text and category filter) with light/dark themes using relative API URLs.',
+    tests: 'Added node:test suites for every endpoint, read-only enforcement and static path safety, and for the AppPort boundary (discovery, invocation, authorization, results checked against the store); npm test passes.',
+    deploy: 'Added a non-root Dockerfile with a HEALTHCHECK and DEPLOY.md covering local, Docker and PaaS deployment.',
+    docs: 'Wrote README.md with quick start, features, API reference, AppPort capabilities, layout and next steps.',
+    fix: 'Fixed: closed the unterminated object literal in EntryStore.stats().',
+  },
 };
 
 export class OfflineProvider {
@@ -86,19 +126,22 @@ export class OfflineProvider {
       // Unknown task (e.g. a plan edited by a human): do nothing harmful, just report.
       return [toolUse('complete_task', { summary: `No offline template for task "${task.id}".`, files: [], commands: [], nextSteps: ['Run with the Anthropic provider for custom tasks.'] })];
     }
+    const kind = appKind(inputs);
     if (turn === 0) {
       const faulty = task.id === 'core' && ((this.faults === 'on' && attempt === 1) || (this.faults === 'persistent' && totalAttempts <= 3));
-      const vars = templateVars(inputs, { faulty });
+      const vars = templateVars(inputs, { faulty, kind });
       const calls = [
         { type: 'text', text: attempt > 1 ? `Reading the verifier output and fixing the root cause (attempt ${attempt}).` : `Working on "${task.title}".` },
-        ...files.map(([dest, tpl]) => toolUse('write_file', { path: dest, content: render(tpl, vars) })),
+        ...files.map(([dest, tpl]) => toolUse('write_file', { path: dest, content: render(tpl, vars, kind) })),
       ];
+      // The package manifest lists the pinned AppPort packages: install them like any agent would.
+      if (task.id === 'core') calls.push(toolUse('run_command', { command: APPPORT.install }));
       if (task.verify?.[0]) calls.push(toolUse('run_command', { command: task.verify[0] }));
       return calls;
     }
     return [
       toolUse('complete_task', {
-        summary: attempt > 1 || totalAttempts > 1 ? `${SUMMARIES[task.id]} Fixed: closed the unterminated object literal in ItemStore.stats().` : SUMMARIES[task.id],
+        summary: attempt > 1 || totalAttempts > 1 ? `${SUMMARIES[kind][task.id]} ${SUMMARIES[kind].fix}` : SUMMARIES[kind][task.id],
         files: files.map(([dest]) => dest),
         commands: task.verify || [],
         nextSteps: [],
@@ -110,28 +153,40 @@ export class OfflineProvider {
 export function buildPlan(inputs = {}) {
   const title = appTitle(inputs.idea || 'New app');
   const check = (f) => `node --check ${f}`;
+  const catalog = appKind(inputs) === 'catalog';
+  const k = catalog
+    ? {
+        summary: `A small, fast, read-only catalog with a search UI, a JSON API and AppPort capabilities for agents, for: ${inputs.idea}`,
+        users: ['People who need to look things up quickly', 'Agents answering questions from the catalog through AppPort'],
+        criteria: ['Users can search and filter entries in the browser', 'Every API endpoint and AppPort capability is covered by passing automated tests', 'The catalog is read-only: writes are refused and no write capability exists', 'The app deploys as one process and passes a health check'],
+        core: 'Read-only EntryStore with search rules, a GET-only HTTP API (health, entries, entry, categories), static file serving, and the AppPort boundary in src/appport.js (token-authorized read capabilities over the same store). Install the pinned @appport packages. Reads PORT.',
+        ui: 'Accessible, responsive search UI (text query and category filter) using relative API URLs.',
+        tests: 'node:test suites covering every endpoint, read-only enforcement and static path safety, plus the AppPort boundary through @appport/client: discovery, invocation, authorization and results checked against the store.',
+        risks: ['The catalog content is a seed in code; plan a data source before relying on it', 'The HTTP API and UI are public and read-only; AppPort capabilities require APP_API_TOKEN'],
+        open: ['Where should entries come from in production?', 'Should editors be able to change entries?'],
+      }
+    : {
+        summary: `A small, fast web app with a JSON API, a browser UI and AppPort capabilities for agents, for capturing, tracking and completing items for: ${inputs.idea}`,
+        users: ['Individuals who want a no-signup tracker for this idea', 'Small teams sharing one internal deployment', 'Agents operating the tracker through AppPort'],
+        criteria: ['Users can add, complete, filter and delete items in the browser', 'Every API endpoint and AppPort capability is covered by passing automated tests', 'Invalid input is rejected with clear 400 errors (INVALID_INPUT through AppPort)', 'The app deploys as one process and passes a health check'],
+        core: 'Node HTTP server with validated CRUD over items, health endpoint, static file serving, and the AppPort boundary in src/appport.js (token-authorized read and write capabilities over the same store, delete not exposed). Install the pinned @appport packages. Reads PORT.',
+        ui: 'Accessible, responsive single-page UI for add / complete / filter / delete using relative API URLs.',
+        tests: 'node:test suites covering every endpoint, validation, 404/405 and static path safety, plus the AppPort boundary through @appport/client: discovery, invocation, authorization and state checked against the store.',
+        risks: ['In-memory storage resets on restart (acceptable for v1)', 'The HTTP API and UI have no authentication (deploy on trusted networks only); AppPort capabilities require APP_API_TOKEN'],
+        open: ['Which database should back v2?', 'Is multi-user access needed?'],
+      };
   return {
-    product: {
-      name: title,
-      summary: `A small, fast web app with a JSON API and a browser UI for capturing, tracking and completing items for: ${inputs.idea}`,
-      users: ['Individuals who want a no-signup tracker for this idea', 'Small teams sharing one internal deployment'],
-      successCriteria: [
-        'Users can add, complete, filter and delete items in the browser',
-        'Every API endpoint is covered by passing automated tests',
-        'Invalid input is rejected with clear 400 errors',
-        'The app deploys as one process and passes a health check',
-      ],
-    },
+    product: { name: title, summary: k.summary, users: k.users, successCriteria: k.criteria },
     tasks: [
       { id: 'prd', role: 'product', title: 'Write the product requirements', description: 'Turn the idea and requirements into PRD.md: users, flows, success criteria, scope, risks.', dependsOn: [], acceptance: ['PRD.md exists', 'Lists success criteria and out-of-scope items'], outputs: ['PRD.md'], verify: ['test -s PRD.md && grep -q "Success criteria" PRD.md'] },
-      { id: 'core', role: 'engineer', title: 'Implement the store and HTTP API', description: 'Zero-dependency Node HTTP server with validated CRUD over items, health endpoint, static file serving. Reads PORT.', dependsOn: ['prd'], acceptance: ['src/app.js exports createApp()', 'All routes return JSON with correct status codes'], outputs: ['package.json', 'src/app.js', 'src/store.js'], verify: [`${check('src/store.js')} && ${check('src/app.js')} && node -e "import('./src/app.js').then(m => { if (typeof m.createApp !== 'function') process.exit(1) })"`] },
-      { id: 'ui', role: 'design', title: 'Design and build the web UI', description: 'Accessible, responsive single-page UI for add / complete / filter / delete using relative API URLs.', dependsOn: ['prd'], acceptance: ['Works at any mount path', 'Keyboard accessible, light and dark themes'], outputs: ['public/index.html', 'public/style.css', 'public/app.js'], verify: [`test -s public/index.html && ${check('public/app.js')}`] },
-      { id: 'tests', role: 'qa', title: 'Write and run the test suite', description: 'node:test suite covering every endpoint, validation, 404/405 and static path safety.', dependsOn: ['core', 'ui'], acceptance: ['npm test passes', 'Covers create/read/update/delete and error paths'], outputs: ['test/app.test.js'], verify: ['npm test'] },
-      { id: 'deploy', role: 'devops', title: 'Containerise and document deployment', description: 'Dockerfile (non-root, health check) and DEPLOY.md for local, Docker and PaaS hosts.', dependsOn: ['core'], acceptance: ['Dockerfile runs as non-root', 'DEPLOY.md gives start command and health path'], outputs: ['Dockerfile', 'DEPLOY.md'], verify: ['test -s Dockerfile && grep -q HEALTHCHECK Dockerfile && test -s DEPLOY.md'] },
-      { id: 'docs', role: 'product', title: 'Write the README', description: 'README with quick start, features, API reference, layout and next steps.', dependsOn: ['tests', 'deploy'], acceptance: ['README documents every endpoint'], outputs: ['README.md'], verify: ['grep -q "## API" README.md'] },
+      { id: 'core', role: 'engineer', title: 'Implement the store, HTTP API and AppPort boundary', description: k.core, dependsOn: ['prd'], acceptance: ['src/app.js exports createApp()', 'All routes return JSON with correct status codes', 'src/appport.js exposes only the opted-in capabilities, each with an effect and a permission'], outputs: ['package.json', 'src/app.js', 'src/store.js', 'src/auth.js', 'src/appport.js'], verify: [`${check('src/store.js')} && ${check('src/app.js')} && ${check('src/appport.js')} && node -e "import('./src/app.js').then(m => { if (typeof m.createApp !== 'function') process.exit(1) })"`] },
+      { id: 'ui', role: 'design', title: 'Design and build the web UI', description: k.ui, dependsOn: ['prd'], acceptance: ['Works at any mount path', 'Keyboard accessible, light and dark themes', 'No credentials in browser code'], outputs: ['public/index.html', 'public/style.css', 'public/app.js'], verify: [`test -s public/index.html && ${check('public/app.js')}`] },
+      { id: 'tests', role: 'qa', title: 'Write and run the test suite', description: k.tests, dependsOn: ['core', 'ui'], acceptance: ['npm test passes', 'Covers the HTTP API and every AppPort capability, including refused callers'], outputs: ['test/app.test.js', 'test/appport.test.js'], verify: ['npm test'] },
+      { id: 'deploy', role: 'devops', title: 'Containerise and document deployment', description: 'Dockerfile (non-root, health check, installs the pinned packages) and DEPLOY.md for local, Docker and PaaS hosts.', dependsOn: ['core'], acceptance: ['Dockerfile runs as non-root', 'DEPLOY.md gives start command, health path and the AppPort token variable'], outputs: ['Dockerfile', 'DEPLOY.md'], verify: ['test -s Dockerfile && grep -q HEALTHCHECK Dockerfile && test -s DEPLOY.md'] },
+      { id: 'docs', role: 'product', title: 'Write the README', description: 'README with quick start, features, API reference, AppPort capabilities (discovery, invocation, permissions), layout and next steps.', dependsOn: ['tests', 'deploy'], acceptance: ['README documents every endpoint and capability'], outputs: ['README.md'], verify: ['grep -q "## API" README.md && grep -q "## AppPort capabilities" README.md'] },
     ],
-    risks: ['In-memory storage resets on restart (acceptable for v1)', 'No authentication — deploy on trusted networks only'],
-    openQuestions: ['Which database should back v2?', 'Is multi-user access needed?'],
+    risks: k.risks,
+    openQuestions: k.open,
     finalVerify: ['npm test'],
     deploy: { start: 'node src/app.js', healthPath: '/api/health' },
   };
@@ -211,8 +266,13 @@ function summaryText({ run }) {
     lines.push(`Not done yet: ${failing.map((c) => `${c.label.toLowerCase()} (${c.detail})`).join('; ')}.`);
   }
   if (fixed.length) lines.push('', `The feedback loop caught and fixed failures in: ${fixed.join(', ')} (see Lessons in CLAUDE.md).`);
-  lines.push('', '**What is left:** items are stored in memory and there is no authentication yet.');
-  lines.push('', '**Recommendations:**', '- Add a SQLite or Postgres adapter behind ItemStore', '- Add accounts and per-user data', '- Ship the Docker image to a host and add uptime monitoring', '- Add due dates and sorting based on user feedback');
+  if (appKind(run.inputs) === 'catalog') {
+    lines.push('', '**What is left:** the catalog content is a seed in code. Agents can query it through its AppPort capabilities with APP_API_TOKEN.');
+    lines.push('', '**Recommendations:**', '- Load entries from a data file or database behind EntryStore', '- Add an editor role, and write capabilities only once there are write operations', '- Ship the Docker image to a host and add uptime monitoring', '- Add ranking to search');
+  } else {
+    lines.push('', '**What is left:** items are stored in memory and the HTTP API and UI have no authentication yet (AppPort capabilities require APP_API_TOKEN).');
+    lines.push('', '**Recommendations:**', '- Add a SQLite or Postgres adapter behind ItemStore', '- Add accounts and per-user data', '- Ship the Docker image to a host and add uptime monitoring', '- Add due dates and sorting based on user feedback');
+  }
   return lines.join('\n');
 }
 
@@ -234,8 +294,11 @@ function slugify(s) {
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-function templateVars(inputs = {}, { faulty }) {
+const deps = (o) => JSON.stringify(o, null, 2).replace(/\n/g, '\n  ');
+
+function templateVars(inputs = {}, { faulty, kind = appKind(inputs) }) {
   const title = appTitle(inputs.idea || 'New app');
+  const stats = kind === 'catalog' ? (faulty ? CATALOG_STATS_FAULTY : CATALOG_STATS_OK) : faulty ? STATS_FAULTY : STATS_OK;
   return {
     APP_TITLE: title,
     APP_TITLE_HTML: esc(title),
@@ -245,12 +308,16 @@ function templateVars(inputs = {}, { faulty }) {
     IDEA_JSON: JSON.stringify(inputs.idea || ''),
     REQUIREMENTS: inputs.requirements || '',
     SLUG: slugify(title),
-    STATS_METHOD: faulty ? STATS_FAULTY : STATS_OK,
+    SLUG_ID: slugify(title),
+    STATS_METHOD: stats,
+    APPPORT_DEPENDENCIES: deps(APPPORT.dependencies),
+    APPPORT_DEV_DEPENDENCIES: deps(APPPORT.devDependencies),
   };
 }
 
-function render(tpl, vars) {
-  const raw = fs.readFileSync(path.join(TEMPLATE_DIR, tpl), 'utf8');
+function render(tpl, vars, kind = 'tracker') {
+  const variant = path.join(TEMPLATE_DIR, 'variants', kind, tpl);
+  const raw = fs.readFileSync(fs.existsSync(variant) ? variant : path.join(TEMPLATE_DIR, tpl), 'utf8');
   return raw.replace(/\{\{([A-Z_]+)\}\}/g, (m, k) => (k in vars ? vars[k] : m));
 }
 

@@ -864,6 +864,35 @@ docker run -p 4747:4747 -v da-prompt-data:/data --add-host=host.docker.internal:
 ```
 (Ollama must listen on more than localhost for this: `OLLAMA_HOST=0.0.0.0 ollama serve`.)
 
+## Generated applications are AppPort-native
+
+Every **new** application the factory builds exposes an explicit [AppPort](https://www.npmjs.com/package/@appport/core)
+capability boundary over its own state and rules, so an agent can discover what the app can do (`/.well-known/appport` →
+manifest with JSON Schemas, read/write effects and required permissions) and call it, instead of reverse-engineering its HTTP
+API. Details, design notes and the measured footprint: [docs/appport-native.md](docs/appport-native.md).
+
+- **Packages:** the published `@appport/*` packages at the exact versions in `templates/appport-packages.json` (core, schema,
+  authorization, protocol, server; client and transport-http for the app's tests). They have no third-party dependencies. Agents
+  install them with `npm install --no-audit --no-fund --ignore-scripts --prefer-offline`; npm's cache is shared by every run
+  of a data dir (`FACTORY_NPM_CACHE`, default `<data dir>/cache/npm`), so after the first download installs are local.
+- **The contract** (what agents are told, `APPPORT_RULES` in `src/appport.js`): capabilities live in `src/appport.js` and call
+  the same store/service functions as the HTTP API (no second copy of data, no direct database access); each declares a
+  description, schemas, an effect (`observation` or `consequential`) and a permission (writes always); only the opted-in
+  capabilities are registered and served (`allowedCapabilities`); the app authenticates callers itself (`Authorization: Bearer`,
+  tokens from `APP_API_TOKEN` / `APP_READ_TOKEN`; none configured means every protected capability is refused); writes are not
+  marked idempotent or retried; `test/appport.test.js` drives the boundary with the published client.
+- **The gate:** a new run's checklist has an *AppPort* item. The factory starts the finished app (its own start command, a
+  one-off `APP_API_TOKEN`) and checks, over the AppPort wire protocol, that the packages are published and compatible, the
+  boundary is discoverable, every capability declares its effect, every write needs a permission, anonymous callers are
+  refused, authorized reads answer, undeclared capabilities are refused, no credential is published, and the app's own tests
+  exercise the boundary. It never mutates the app. A failing gate leaves the run *needs attention*, like a failing test suite.
+- **Exceptions are explicit:** `da-prompt run "…" --new --appport-exception "<reason>"` (API: `settings.appportException`) —
+  the reason is recorded in the run and the checklist, and the agents are not asked for a boundary. There is no other bypass.
+  Existing projects are out of scope: their architecture is the user's.
+- **Offline agents** build two kinds of app with the same contract: a *tracker* (items with a create/update workflow; delete is
+  deliberately not exposed) and, for ideas such as a catalog, directory or glossary, a read-only *catalog* (search/get/categories,
+  no write capability). `test/appport.test.js` generates both through the normal workflow and drives them with the client.
+
 ## Existing projects
 
 > Connect a project. Describe what you want changed. Get tested, reviewable engineering work against your existing codebase.

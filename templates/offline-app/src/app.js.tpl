@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ItemStore, ValidationError } from './store.js';
+import { createAppPort } from './appport.js';
 
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const MAX_BODY = 64 * 1024;
@@ -45,10 +46,13 @@ async function serveStatic(res, urlPath) {
   }
 }
 
-export function createApp({ store = new ItemStore() } = {}) {
+export function createApp({ store = new ItemStore(), tokens } = {}) {
+  // The AppPort capability boundary (src/appport.js) over the same store: /appport, /appport/manifest, /.well-known/appport.
+  const appport = createAppPort({ store, ...(tokens ? { tokens } : {}) });
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean);
+    if (appport.handles(url.pathname)) return appport.handle(req, res);
     try {
       if (parts[0] !== 'api') {
         if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'method not allowed' });
