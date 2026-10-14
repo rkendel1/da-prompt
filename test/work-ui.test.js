@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { cleanMachineEnv } from './cli-helpers.js';
 import { startWorkBackend, ChatFake, initRepo } from './work-helpers.js';
+import { startMockLLM } from './mock-llm.js';
 
 cleanMachineEnv();
 async function loadPlaywright() {
@@ -19,6 +20,7 @@ let browser;
 let skip = '';
 const backends = [];
 const contexts = [];
+const llms = [];
 before(async () => {
   const pw = await loadPlaywright();
   if (!pw) return void (skip = 'Playwright is not installed');
@@ -28,6 +30,7 @@ after(async () => {
   for (const c of contexts) await c.close().catch(() => {});
   await browser?.close();
   for (const b of backends) await b.close().catch(() => {});
+  for (const l of llms) await l.close().catch(() => {});
 });
 const T = (name, fn) => test(name, async (t) => (skip ? t.skip(skip) : fn(t)));
 const repoA = (d) => initRepo(d, { files: { 'README.md': '# Alpha\n', 'package.json': '{"name":"alpha","scripts":{"test":"node -e 0"}}' } });
@@ -37,6 +40,12 @@ const REPLY = 'First answer line.\n```js\nconst one = 1;\n```\nMiddle text.\n```
 async function boot(opts = {}) {
   const be = await startWorkBackend({ roots: { alpha: repoA, beta: repoB }, fake: new ChatFake({ reply: () => REPLY, delayMs: 5 }), ...opts });
   backends.push(be);
+  // The chat page offers whatever the provider registry says is the default. With nothing ready that is the offline demo agents,
+  // which are not the test's fake model; on a developer machine a running Ollama used to be what made this test pass. Give every
+  // backend one ready provider of its own (a loopback mock) so the default no longer depends on the machine.
+  const llm = await startMockLLM({ flavor: 'openai', models: ['fake-model'] });
+  llms.push(llm);
+  be.factory.providers.addCustom({ label: 'Test provider', type: 'openai', baseUrl: llm.url });
   be.a = await be.register('alpha', { name: 'Alpha', product: 'Payments' });
   be.b = await be.register('beta', { name: 'Beta', product: 'Payroll' });
   return be;

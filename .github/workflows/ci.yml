@@ -3,24 +3,83 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The standard suite is offline by design: no Ollama, no provider keys, no off-machine connections (test/offline-guard.js).
+  # Nothing below supplies a credential; the tests use mock servers on loopback and scripted providers.
+  CI: "true"
+
 jobs:
   test:
+    name: test (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      # Both Node versions must report their own result: a failure on one must not cancel the other and hide a second problem.
+      fail-fast: false
       matrix:
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm run check
-      - run: npm run build
-      - run: npm test
-      - name: Headless factory run (offline agents)
+
+      - name: "[setup] install from the lockfile"
+        run: npm ci
+
+      - name: "[setup] Playwright + Chromium for the browser tests"
+        # Installed globally on purpose: this repository has no dependencies and keeps it that way. The UI tests find it with
+        # `npm root -g`. Without it 44 tests skip, which the summary step below treats as a failure.
+        run: |
+          npm install --global playwright@1.56.1
+          playwright install --with-deps chromium
+
+      - name: "[check] static checks"
+        run: npm run check
+
+      - name: "[build] package, entry points and module imports"
+        run: npm run build
+
+      - name: "[test] offline contracts (diagnostics, replay, provider, architecture, security, engines, bench)"
+        run: npm run test:contracts
+
+      - name: "[test] full suite"
+        shell: bash # explicit, so `pipefail` is on and tee cannot hide a failing exit status
+        run: npm test 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: "[test] summary"
+        if: always()
+        run: node scripts/ci-summary.mjs "$RUNNER_TEMP/test.log" --forbid-skip "Playwright is not installed" --forbid-skip "no browser available" | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
+
+      - name: "[headless] factory run with the offline agents"
         run: FACTORY_OFFLINE_DELAY_MS=0 FACTORY_DATA_DIR=$RUNNER_TEMP/data node src/cli.js "A habit tracker with daily check-ins"
+
+      - name: Keep the test log of a failed run
+        if: failure()
+        shell: bash
+        run: tail -c 2000000 "$RUNNER_TEMP/test.log" > "$RUNNER_TEMP/test-tail.log" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-log-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/test-tail.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t da-prompt .

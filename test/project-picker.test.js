@@ -93,9 +93,17 @@ test('a proxied (non-local) request cannot browse or pick', async () => {
 });
 
 test('a folder in a system location is refused with the reason', async () => {
-  const r = await call('POST', '/api/projects/pick', { path: os.tmpdir(), authorize: true });
+  // /usr is a system location on Linux and macOS. (os.tmpdir() is not a good example: the test data directory lives inside it, so
+  // the "overlaps the data directory" refusal rightly comes first on Linux.)
+  const r = await call('POST', '/api/projects/pick', { path: '/usr', authorize: true });
   assert.equal(r.status, 400);
   assert.match(r.data.error, /system location|too broad/);
+});
+
+test('a folder that contains the factory data directory is refused as an overlap, before anything is authorized', async () => {
+  const r = await call('POST', '/api/projects/pick', { path: os.tmpdir(), authorize: true });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /overlaps the factory data directory/);
 });
 
 test('a folder that holds the data directory (e.g. ~/Developer containing da-prompt) can be authorized; the data directory itself is never offered', async () => {

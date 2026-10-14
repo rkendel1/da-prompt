@@ -18,7 +18,8 @@
     "test": "node --require ./test/setup-env.cjs --test --test-concurrency=1 test/*.test.js",
     "validate": "node scripts/check.mjs && node scripts/build.mjs && npm test",
     "engine:install": "node scripts/install-engine.mjs",
-    "bench": "node scripts/bench.mjs"
+    "bench": "node scripts/bench.mjs",
+    "test:contracts": "node --require ./test/setup-env.cjs --test --test-concurrency=1 test/diagnostics.test.js test/replay.test.js test/provider-contract.test.js test/architecture.test.js test/security-contract.test.js test/engines.test.js test/bench.test.js"
   },
   "engines": {
     "node": ">=20"

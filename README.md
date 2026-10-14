@@ -793,6 +793,23 @@ its own verification decide, bounds retries, and reports failed, cancelled and u
 any model would produce such a sequence, how good or fast any model is, or that a real provider behaves like the stubs. Real-model
 certification still needs a live run (see *Local tuning* for the opt-in benchmark and *Using a hosted provider* for the smoke test).
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main` (and by hand: *Run workflow*). Steps are named by what
+failed: **[setup]** `npm ci` (this repository has no dependencies, so it only verifies the lockfile) and a global Playwright + Chromium for
+the browser tests; **[check]** `npm run check`; **[build]** `npm run build`; **[test]** `npm run test:contracts` (the offline diagnostics,
+replay, provider-contract, architecture, security, engine and benchmark suites, first, so their failures are not buried) and then the full
+`npm test`; **[headless]** a factory run with the offline agents. It runs on Node 20 and 22 with `fail-fast: false`, so one version's
+failure never hides the other's. Nothing in it needs Ollama, a hosted provider or a credential; the tests use loopback mock servers and
+scripted providers, and `test/offline-guard.js` fails any off-machine connection.
+
+A failing check fails the job: the suite runs under `bash -eo pipefail` so `tee` cannot turn a red suite green, nothing uses
+`continue-on-error` or `|| true`, and `test/ci-workflow.test.js` checks this. `scripts/ci-summary.mjs` writes the failing tests and the
+skipped tests (by reason) to the job summary and **fails the job if browser tests were skipped because Playwright is missing**: tests must
+run, not quietly disappear. The tail of the test log is kept as an artifact for 7 days only when a job fails. Locally the same sequence is
+`npm run validate` (check, build, full suite) plus `npm run test:contracts`; the browser tests skip locally if Playwright is not installed
+(`npm install -g playwright && playwright install chromium`).
+
 ### Protect the server
 
 ```bash

@@ -12,7 +12,11 @@ import { Factory } from '../src/factory.js';
 import { authorizedRoots } from '../src/project.js';
 
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@t' };
-export const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
+// Fixture repositories are copied right after they are committed. Recent git runs maintenance (gc) in the background after a commit,
+// which repacks and deletes loose objects while fs.cpSync is walking them (seen on GitHub runners as ENOENT under .git/objects).
+// A fixture repo has nothing to maintain, so switch it off for every git call a test makes through this helper.
+const NO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
+export const git = (cwd, ...args) => execFileSync('git', [...NO_MAINTENANCE, ...args], { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
 
 export function writeFiles(dir, files) {
   for (const [rel, content] of Object.entries(files)) {
