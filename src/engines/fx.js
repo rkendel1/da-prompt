@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import { redact } from '../security.js';
 import { AGENT_TOOLS, BudgetError, agentSystem, completionFields, taskBrief, execTool, summarizeInput, normalizeToolInput } from '../agents.js';
+import { sealedWriteGuard } from '../testfirst.js';
 import { startBridge } from '../providers/bridge.js';
 import { loadEngineModule, fxEndpoint, EngineError } from './index.js';
 
@@ -72,7 +73,7 @@ export function makeFxRunner(cfg) {
             return 'The token budget is exhausted. Stop.';
           }
           input = normalizeToolInput(t.name, input);
-          const out = await execTool(ws, { name: t.name, input }, { settings, signal: ctx.signal || signal });
+          const out = await execTool(ws, { name: t.name, input }, { settings, signal: ctx.signal || signal, deny: sealedWriteGuard(run, task) });
           if (t.name === 'write_file' && !out.isError) state.files.add(out.path);
           if (t.name === 'run_command') state.commands.push({ command: input?.command, exitCode: out.exitCode });
           emit('tool', { taskId: task.id, role: task.role, tool: t.name, input: summarizeInput({ name: t.name, input }), ok: !out.isError, output: redact(out.preview || '').slice(0, 4000), exitCode: out.exitCode, durationMs: out.durationMs });

@@ -28,6 +28,7 @@ import { appportException, cleanException, checkAppPortConformance } from './app
 import { resolveStack, checkStackConformance, stackLabel } from './stack.js';
 import { SPEC_VERSION, SpecError, normalizeSpec, specFromStack, assertValid, stackOf, planReconciliation, observeApplication, validateSpec, specEvidence, verifyCommands, specSummary, MET } from './appspec.js';
 import { launchApp, stopProcess } from './deploy.js';
+import { enforceTestFirst, checkTestFirst, classifyBaseline, BASELINE_OK, sealTests, enforceSeals, workspaceState, reusableEvidence, recordEvidence, qaChecklistItem, upstreamImplementation, KIND_TEST_DEFINITION, KIND_INDEPENDENT_QA, MAX_QA_REPAIR_ROUNDS } from './testfirst.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
 
@@ -139,6 +140,10 @@ export class Factory {
       // New apps: when the planner model cannot produce a valid plan, carry on with the factory's standard plan (visible on
       // the run) instead of failing before any work is done. Existing projects always need a plan grounded in the project.
       standardPlanOnFailure: !existing && s.standardPlanOnFailure !== false,
+      // Test-first QA (src/testfirst.js): acceptance tests are defined and baselined before implementation, and independent QA
+      // verifies it after. On unless a run turns it off explicitly.
+      // The offline demo provider fills templates; it writes no tests from criteria, so it opts in explicitly or not at all.
+      testFirst: s.testFirst === true || (s.testFirst !== false && d.testFirst !== false && choice.provider !== 'offline'),
     };
     // The application specification (src/appspec.js): validated here, before anything runs. It decides the product stack
     // (templates/stack.json) a new app is generated on and its AppPort exception, if any.
@@ -352,7 +357,7 @@ export class Factory {
       roles: old.roleModels || {}, retryModel: old.retryModel || undefined,
       // The desired application carries over as asked (runs before specifications existed re-derive it from their stack).
       ...(old.spec?.desired ? { spec: old.spec.desired } : {}),
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, ...(old.spec?.desired ? {} : { appportException: s.appportException, stack: s.stack }), standardPlanOnFailure: s.standardPlanOnFailure },
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, ...(old.spec?.desired ? {} : { appportException: s.appportException, stack: s.stack }), standardPlanOnFailure: s.standardPlanOnFailure, testFirst: s.testFirst },
       source,
     });
   }
@@ -669,6 +674,14 @@ export class Factory {
           planning.durationMs = Date.now() - t0;
           run.planning = planning;
         }
+        if (run.settings.testFirst !== false) {
+          const tf = enforceTestFirst(plan, { existing });
+          plan = tf.plan;
+          planning.repairs = [...(planning.repairs || []), ...tf.repairs.map((r) => `test-first: ${r}`)];
+          for (const r of tf.repairs) emit('log', { level: 'warn', text: `Plan adjusted (test-first): ${r}` });
+          const problems = checkTestFirst(plan);
+          if (problems.length) throw new Error(`the plan does not satisfy the test-first contract: ${problems.join('; ')}`);
+        }
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));
         run.plan = plan;
@@ -783,12 +796,18 @@ export class Factory {
   async runTask(run, task, { ws, notes = ws, provider, providerFor = () => provider, signal, track, emit, save, layer, diag }) {
     const maxAttempts = run.settings.maxAttempts;
     const base = task.attemptBase || 0;
-    let feedback = task.attempts.length > base ? task.attempts.at(-1).feedback : null;
+    const testFirst = run.settings.testFirst !== false;
+    const sealDir = path.join(this.store.runDir(run.id), 'sealed');
+    // Findings that independent QA sent back for this implementation take the place of a failed attempt's feedback.
+    let feedback = task.repairFeedback || (task.attempts.length > base ? task.attempts.at(-1).feedback : null);
+    delete task.repairFeedback;
     const upstream = (task.dependsOn || [])
       .map((d) => run.plan.tasks.find((t) => t.id === d))
-      .filter((t) => t?.result)
+      // Independent QA works from the agreed behaviour, not from the engineer's account of what was built.
+      .filter((t) => t?.result && !(task.kind === KIND_INDEPENDENT_QA && t.role === 'engineer'))
       .map((t) => ({ id: t.id, role: t.role, summary: t.result.summary, files: t.result.files }));
 
+    let giveUp = false;
     for (let n = task.attempts.length - base + 1; n <= maxAttempts; n++) {
       if (signal.aborted) return;
       // Which model makes this attempt, recorded on the attempt so the run can show who did what and how it went.
@@ -813,9 +832,25 @@ export class Factory {
         feedback = `The agent did not complete the task: ${attempt.error}`;
       } else {
         attempt.result = out.result;
+        // A test the agent believes is wrong is reviewed, not edited and not silently argued around: stop here.
+        if (testFirst && task.kind !== KIND_TEST_DEFINITION && out.result.disputedTests?.length) {
+          const why = `${task.id} disputes QA-owned test(s): ${out.result.disputedTests.join(' | ')}`;
+          attempt.ok = false;
+          attempt.finishedAt = new Date().toISOString();
+          attempt.feedback = this.hideSecrets(redact(why));
+          task.status = 'escalated';
+          task.error = headline(why);
+          task.escalation = { ...escalationFor(task, why), kind: 'test-dispute', disputedTests: out.result.disputedTests };
+          await save();
+          emit('escalation', { taskId: task.id, reason: task.error, options: task.escalation.options });
+          return;
+        }
+        // QA-owned tests are sealed when they are defined; whatever an attempt did to them (a shell redirect included) is undone.
+        const tampered = testFirst && task.kind !== KIND_TEST_DEFINITION ? enforceSeals(run, task, ws, sealDir) : [];
         // ── Layer 5: verify before moving on ──
         await layer('verification', 'active');
-        const checks = await this.verifyTask(task, ws, run, signal);
+        const checks = task.kind === KIND_TEST_DEFINITION && testFirst ? await this.defineTests(run, task, ws, out.result, { signal, sealDir, attempt: n }) : await this.verifyTask(task, ws, run, signal);
+        if (tampered.length) checks.unshift({ command: 'sealed tests unchanged', exitCode: 1, ok: false, state: 'tampered', durationMs: 0, output: `QA-owned tests were changed and have been restored: ${tampered.join(', ')}. Make the implementation satisfy them; do not edit them. If one is wrong, list it in complete_task disputedTests.` });
         attempt.verification = checks;
         emit('verify', { taskId: task.id, attempt: n, results: checks.map(({ command, exitCode, ok, durationMs, output, state }) => ({ command, exitCode, ok, durationMs, output: redact(output).slice(-3000), ...(state ? { state } : {}) })) });
         const failed = checks.filter((c) => !c.ok);
@@ -824,10 +859,21 @@ export class Factory {
           attempt.finishedAt = new Date().toISOString();
           task.status = 'completed';
           task.result = out.result;
+          if (task.kind === KIND_INDEPENDENT_QA) task.qaState = workspaceState(ws.root).hash;
           if (task.attempts.length > 1) await this.recordLesson(run, notes, task, attempt, emit);
           await save();
           emit('task', { taskId: task.id, status: 'completed', attempt: n, summary: out.result.summary });
           return;
+        }
+        if (testFirst && task.kind === KIND_INDEPENDENT_QA && !tampered.length) {
+          const sent = await this.sendBack(run, task, failed, { emit, save });
+          if (sent === 'exhausted') giveUp = true;
+          if (sent === 'sent') {
+            attempt.finishedAt = new Date().toISOString();
+            attempt.feedback = this.hideSecrets(redact(`independent QA found defects; sent back to ${task.sentBackTo.join(', ')}`));
+            await save();
+            return;
+          }
         }
         feedback = failed.map((c) => `$ ${c.command}\nexit code ${c.exitCode}${c.state === 'regression' ? '\n(REGRESSION: this command passed or had different failures before your change)' : ''}${c.newFailures?.length ? `\nnew failures:\n${c.newFailures.map((x) => `  - ${x}`).join('\n')}` : ''}\n${c.output.slice(-3500)}`).join('\n\n');
       }
@@ -837,7 +883,8 @@ export class Factory {
       attempt.feedback = this.hideSecrets(redact(feedback));
       await layer('feedback', 'active');
       await save();
-      emit('feedback', { taskId: task.id, attempt: n, willRetry: n < maxAttempts, message: redact(feedback).slice(0, 3000), headline: headline(feedback) });
+      emit('feedback', { taskId: task.id, attempt: n, willRetry: n < maxAttempts && !giveUp, message: redact(feedback).slice(0, 3000), headline: headline(feedback) });
+      if (giveUp) break;
     }
 
     // Retries exhausted: escalate with options.
@@ -857,18 +904,104 @@ export class Factory {
       results.push({ command: `exists ${f}`, exitCode: ok ? 0 : 1, ok, durationMs: 0, output: ok ? '' : `expected output ${f} was not produced` });
     }
     const existing = isExisting(run);
-    for (const command of task.verify || []) {
+    const testFirst = run.settings.testFirst !== false;
+    // Independent QA runs the tests that were defined before the implementation, as well as its own checks.
+    let commands = task.verify || [];
+    if (testFirst && task.kind === KIND_INDEPENDENT_QA) commands = [...new Set([...commands, ...run.plan.tasks.filter((t) => t.kind === KIND_TEST_DEFINITION).flatMap((t) => t.baseline || [])])];
+    for (const command of commands) {
+      const before = testFirst ? workspaceState(ws.root) : null;
       const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
       const output = `${r.stdout}\n${r.stderr}`.trim();
+      // The result applies to the code it ran against. If the command left the files as they were, remember it as evidence.
+      const after = testFirst ? workspaceState(ws.root) : null;
+      const codeState = after && before.hash === after.hash ? after.hash : null;
+      if (codeState && !signal?.aborted) recordEvidence(run, { taskId: task.id, taskKind: task.kind || null, role: task.role, command, exitCode: r.exitCode, codeState, durationMs: r.durationMs, output: redact(output).slice(-6000) });
+      const tag = codeState ? { codeState } : {};
       if (existing) {
         // A command that already failed at baseline passes the task if it fails in no new way.
         const cls = classifyCheck(run.project.baseline?.find((b) => b.command === command), r);
-        results.push({ command, exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output });
+        results.push({ command, exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output, ...tag });
       } else {
-        results.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output });
+        results.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output, ...tag });
       }
     }
     return results;
+  }
+
+  /**
+   * The gate for a QA test-definition task: the tests it names exist and are sealed (QA-owned from here on), and the
+   * acceptance commands are run against the project as it is, before any implementation. Each result is classified (see
+   * classifyBaseline) and recorded in run.testContract.baseline with the exit status and the code state it applies to.
+   * Unlike a normal task, a failing command is the expected outcome here; what fails the gate is a result that proves
+   * nothing: tests that do not run, do not load, or do not exist.
+   */
+  async defineTests(run, task, ws, result, { signal, sealDir, attempt }) {
+    const results = [];
+    const isTestFile = (f) => /(^|\/)(tests?|__tests__|spec)(\/|$)|\.(test|spec)\.[a-z]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb)$/i.test(f);
+    const named = [...(result.testFiles || []), ...(result.files || []).filter(isTestFile)];
+    for (const f of task.outputs || []) if (isTestFile(f)) named.push(f);
+    const { sealed, missing } = sealTests(run, task, ws, named, sealDir);
+    const problems = [];
+    if (!named.length) problems.push('no test files were named: call complete_task with testFiles listing the tests (new or existing) that cover the acceptance criteria');
+    if (missing.length) problems.push(`named test files that do not exist: ${missing.join(', ')}`);
+    results.push({ command: `tests named and sealed (${sealed.length})`, exitCode: problems.length ? 1 : 0, ok: !problems.length, state: problems.length ? 'no-tests' : 'sealed', durationMs: 0, output: problems.length ? problems.join('\n') : sealed.join('\n') });
+    for (const f of task.outputs || []) {
+      if (/[*?]/.test(f)) continue;
+      const ok = ws.exists(f.replace(/\/$/, ''));
+      results.push({ command: `exists ${f}`, exitCode: ok ? 0 : 1, ok, durationMs: 0, output: ok ? '' : `expected output ${f} was not produced` });
+    }
+    const contract = (run.testContract ||= { sealed: {}, baseline: [], qaRounds: {} });
+    contract.baseline = contract.baseline.filter((b) => b.taskId !== task.id);
+    const commands = [...new Set(task.baseline || [])];
+    if (!commands.length) results.push({ command: '(no command runs the acceptance tests)', exitCode: 1, ok: false, state: 'cannot-execute', durationMs: 0, output: 'The project has no executable test command, so nothing can be baselined. Give the tests a command that runs them (for example a package.json "test" script that uses the platform\'s own test runner) and say which it is; without one no verification is claimed.' });
+    for (const command of commands) {
+      if (signal?.aborted) break;
+      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+      const output = `${r.stdout}\n${r.stderr}`.trim();
+      const cls = classifyBaseline(r, output, { projectBaseline: run.project?.baseline?.find((b) => b.command === command) });
+      const codeState = workspaceState(ws.root).hash;
+      contract.baseline.push({ taskId: task.id, attempt, command, exitCode: r.exitCode, classification: cls.classification, reason: cls.reason, durationMs: r.durationMs, codeState, at: new Date().toISOString(), output: redact(output).slice(-1500) });
+      results.push({ command, exitCode: r.exitCode, ok: BASELINE_OK.has(cls.classification), state: cls.classification, durationMs: r.durationMs, output: `[baseline: ${cls.classification}] ${cls.reason}\n${output}`, ...(codeState ? { codeState } : {}) });
+    }
+    return results;
+  }
+
+  /**
+   * Independent QA failed on the implementation: return the findings to the engineer task(s) it waits for, through the same
+   * pending → attempts → verification path any task takes, and make QA wait for the repaired code. At most
+   * MAX_QA_REPAIR_ROUNDS times; after that the QA task escalates (the defect is real and unresolved, which is the truth).
+   * Returns 'sent', 'exhausted' or 'none' (nothing to send it to).
+   */
+  async sendBack(run, qa, failed, { emit, save }) {
+    const impls = upstreamImplementation(run.plan.tasks, qa);
+    if (!impls.length) return 'none';
+    const contract = (run.testContract ||= { sealed: {}, baseline: [], qaRounds: {} });
+    const round = contract.qaRounds[qa.id] || 0;
+    if (round >= MAX_QA_REPAIR_ROUNDS) return 'exhausted';
+    contract.qaRounds[qa.id] = round + 1;
+    const findings = failed.map((c) => `$ ${c.command}\nexit code ${c.exitCode}\n${String(c.output || '').slice(-2500)}`).join('\n\n');
+    for (const e of impls) {
+      e.status = 'pending';
+      e.attemptBase = e.attempts.length;
+      e.repairFeedback = redact(`Independent QA (${qa.id}, round ${round + 1} of ${MAX_QA_REPAIR_ROUNDS}) ran the acceptance tests against your implementation and they fail. This is a defect in the implementation, not in the tests. Fix the implementation.\n\n${findings}`);
+      delete e.result;
+    }
+    qa.status = 'pending';
+    qa.attemptBase = qa.attempts.length;
+    qa.sentBackTo = impls.map((t) => t.id);
+    delete qa.result;
+    emit('qa.defects', { taskId: qa.id, sentBackTo: qa.sentBackTo, round: round + 1, failing: failed.map((c) => c.command) });
+    await save();
+    return 'sent';
+  }
+
+  /** A final check: reuse a result independent QA already produced on exactly this code, otherwise run it. */
+  async finalCheck(run, ws, command, signal) {
+    const state = run.settings.testFirst !== false ? workspaceState(ws.root).hash : null;
+    const hit = state ? reusableEvidence(run, command, state) : null;
+    if (hit) return { exitCode: hit.exitCode, durationMs: 0, stdout: hit.output, stderr: '', reused: { taskId: hit.taskId, at: hit.at }, codeState: state };
+    const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+    return { ...r, ...(state ? { codeState: state } : {}) };
   }
 
   async recordLesson(run, ws, task, attempt, emit, { unresolved = false } = {}) {
@@ -1011,9 +1144,9 @@ export class Factory {
     run.finalVerification = [];
     for (const command of commands) {
       if (signal.aborted) break;
-      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+      const r = await this.finalCheck(run, ws, command, signal);
       const cls = classifyCheck(base.find((b) => b.command === command), r);
-      run.finalVerification.push({ command, required: required.has(command), exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-6000) });
+      run.finalVerification.push({ command, required: required.has(command), exitCode: r.exitCode, ok: cls.ok, state: cls.state, newFailures: cls.newFailures, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-6000), ...(r.codeState ? { codeState: r.codeState } : {}), ...(r.reused ? { reused: r.reused } : {}) });
     }
     emit('verify', { taskId: '_final', results: run.finalVerification.map(({ command, exitCode, ok, state, durationMs, output, newFailures }) => ({ command, exitCode, ok, state, durationMs, newFailures, output: output.slice(-2000) })) });
 
@@ -1066,6 +1199,7 @@ export class Factory {
     const specItem = await this.specItem(run, ws, { checklist: items, commands: [] });
     if (specItem) items.push(specItem);
 
+    if (run.settings.testFirst !== false) items.push(qaChecklistItem(run, ws));
     run.checklist = items;
     run.summary = redact(await writeSummary({ provider, run, signal, track }));
     items.push({ id: 'summary', label: 'Final summary and next steps provided', ok: Boolean(run.summary) && !run.summary.startsWith('Summary unavailable'), state: run.summary && !run.summary.startsWith('Summary unavailable') ? 'pass' : 'fail', detail: 'FACTORY_REPORT.md' });
@@ -1421,8 +1555,8 @@ export class Factory {
     run.finalVerification = [];
     for (const command of run.plan.finalVerify) {
       if (signal.aborted) break;
-      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
-      run.finalVerification.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-6000) });
+      const r = await this.finalCheck(run, ws, command, signal);
+      run.finalVerification.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-6000), ...(r.codeState ? { codeState: r.codeState } : {}), ...(r.reused ? { reused: r.reused } : {}) });
     }
     const suiteOk = run.finalVerification.length > 0 && run.finalVerification.every((v) => v.ok);
     const suiteDetail = run.finalVerification.map((v) => `${v.command} → ${v.exitCode}`).join(', ') || 'no final verification commands';
@@ -1464,6 +1598,8 @@ export class Factory {
     // The application matches its specification: evidence per requested technology (src/appspec.js).
     const specItem = await this.specItem(run, ws, { checklist: items, commands: specCommands });
     if (specItem) items.push(specItem);
+
+    if (run.settings.testFirst !== false) items.push(qaChecklistItem(run, ws));
 
     // Final summary.
     run.checklist = items;
