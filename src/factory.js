@@ -7,8 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Workspace } from './sandbox.js';
 import { normalizeInputs } from './prompt.js';
-import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES } from './graph.js';
-import { runPlanner, runAgent, writeSummary, BudgetError } from './agents.js';
+import { readyTasks, propagateBlocked, dependentsOf, levels, DONE_STATES, ROLES } from './graph.js';
+import { runPlanner, runAgent, writeSummary, standardPlan, BudgetError } from './agents.js';
 import { scanWorkspace, redact, existingProjectPolicy, hideSecretValues } from './security.js';
 import { runGit, scrubPaths } from './gitutil.js';
 import {
@@ -135,6 +135,9 @@ export class Factory {
       // PAX evidence is opt-in per run (default from Settings). The steps are fixed at creation so a run is reproducible.
       pax: typeof s.pax === 'boolean' ? s.pax : Boolean(this.cfg.paxAutoRun),
       paxSteps: (Array.isArray(s.paxSteps) ? s.paxSteps : this.cfg.paxSteps || []).filter((x) => PAX_STEP_IDS.includes(x)),
+      // New apps: when the planner model cannot produce a valid plan, carry on with the factory's standard plan (visible on
+      // the run) instead of failing before any work is done. Existing projects always need a plan grounded in the project.
+      standardPlanOnFailure: !existing && s.standardPlanOnFailure !== false,
     };
     // New apps are AppPort-native (src/appport.js); a run may opt out only with a stated reason. Existing projects: not applicable.
     const appportException = existing ? '' : cleanException(s.appportException);
@@ -168,6 +171,8 @@ export class Factory {
       plannerModel: choice.plannerModel,
       plannerOptions: choice.plannerProvider === choice.provider ? null : choice.plannerOptions,
       providerOptions: choice.options,
+      roleModels: choice.roleModels,
+      retryModel: choice.retryModel,
       outputDir,
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
@@ -185,6 +190,8 @@ export class Factory {
     if (run.projectId) this.registry.touch(run.projectId);
     this.store.event(id, 'run.created', {
       title: run.title, provider: run.provider, model: run.model, engine, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, outputDir, settings,
+      ...(Object.keys(run.roleModels).length ? { roleModels: routeSummary(run.roleModels) } : {}),
+      ...(run.retryModel ? { retryModel: `${run.retryModel.provider} · ${run.retryModel.model}` } : {}),
       ...(existing ? { source: { mode: source.mode, label: source.label, ref: source.ref || null, workingMode: source.workingMode || null, publish: Boolean(source.publish), autoApply: Boolean(source.autoApply) } } : {}),
     });
     if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
@@ -251,6 +258,25 @@ export class Factory {
       planner = await this.resolveEndpoint({ provider: plannerProvider, model: plannerModel, providerOptions: pOptions });
       if ((planner.type === 'offline') !== (main.type === 'offline')) throw new Error('the built-in offline agents cannot be combined with a real LLM provider; use offline for both or neither');
     }
+    // Per-role models and the retry model. An entry that names the agents' own provider and model is no override and is
+    // dropped; a role on the agents' provider inherits their options (context window, tool mode).
+    const route = async (r, what) => {
+      if (!r || typeof r !== 'object') return null;
+      const provider = str(r.provider) || main.provider;
+      const model = str(r.model);
+      if (provider === main.provider && (!model || model === main.model)) return null;
+      const ep = await this.resolveEndpoint({ provider, model, providerOptions: r.providerOptions ?? (provider === main.provider ? main.options : undefined) });
+      if ((ep.type === 'offline') !== (main.type === 'offline')) throw new Error(`${what}: the built-in offline agents cannot be combined with a real LLM provider; use offline for everything or nothing`);
+      return { provider: ep.provider, providerLabel: ep.label, model: ep.model, providerOptions: ep.options };
+    };
+    const roleModels = {};
+    const rb = body.roles && typeof body.roles === 'object' ? body.roles : {};
+    for (const role of Object.keys(rb)) if (!ROLES.includes(role)) throw new Error(`unknown role "${role}" in roles (use ${ROLES.join(', ')})`);
+    for (const role of ROLES) {
+      const r = await route(rb[role], `the ${role} model`);
+      if (r) roleModels[role] = r;
+    }
+    const retryModel = await route(body.retryModel, 'the retry model');
     const choice = {
       provider: main.provider,
       label: main.label,
@@ -260,11 +286,26 @@ export class Factory {
       plannerLabel: planner.label,
       plannerModel: planner.model,
       plannerOptions: planner.options,
+      roleModels,
+      retryModel,
     };
     // fail fast: missing key, disabled provider, missing model
     this.makeProvider({ ...choice, providerOptions: choice.options });
     this.makePlannerProvider({ ...choice, providerOptions: choice.options });
+    for (const r of [...Object.values(roleModels), retryModel].filter(Boolean)) this.makeProvider({ ...choice, ...r });
     return choice;
+  }
+
+  /**
+   * The model that runs one attempt of a task: the retry model from a task's second attempt on (when one is set), else the
+   * model chosen for the task's role, else the run's agent model. Returns a route { provider, providerLabel, model,
+   * providerOptions, via } where via is 'retry' | 'role' | 'default'.
+   */
+  routeFor(run, task, n) {
+    if (n > 1 && run.retryModel) return { ...run.retryModel, via: 'retry' };
+    const r = run.roleModels?.[task.role];
+    if (r) return { ...r, via: 'role' };
+    return { provider: run.provider, providerLabel: run.providerLabel, model: run.model, providerOptions: run.providerOptions, via: 'default' };
   }
 
   /**
@@ -285,7 +326,8 @@ export class Factory {
       ...old.inputs,
       provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
       planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException, stack: s.stack },
+      roles: old.roleModels || {}, retryModel: old.retryModel || undefined,
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException, stack: s.stack, standardPlanOnFailure: s.standardPlanOnFailure },
       source,
     });
   }
@@ -311,7 +353,7 @@ export class Factory {
     };
 
     // Model: provider, model, planner and engine are validated exactly as when a run starts (ready provider, key, model).
-    const wantsModel = ['provider', 'model', 'providerOptions', 'planner', 'plannerProvider', 'plannerModel'].some((k) => body[k] !== undefined);
+    const wantsModel = ['provider', 'model', 'providerOptions', 'planner', 'plannerProvider', 'plannerModel', 'roles', 'retryModel'].some((k) => body[k] !== undefined);
     let choice = null;
     if (wantsModel) {
       const providerChanged = body.provider !== undefined && body.provider !== run.provider;
@@ -326,6 +368,9 @@ export class Factory {
         planner,
         plannerProvider: body.plannerProvider,
         plannerModel: body.plannerModel,
+        // Routing is kept unless given; `retryModel: null` clears it, `roles: {}` clears every role override.
+        roles: body.roles !== undefined ? body.roles || {} : run.roleModels || {},
+        retryModel: body.retryModel !== undefined ? body.retryModel : run.retryModel,
       });
       set('provider', choice.provider);
       set('providerLabel', choice.label);
@@ -335,6 +380,8 @@ export class Factory {
       set('plannerProviderLabel', choice.plannerLabel);
       set('plannerModel', choice.plannerModel);
       set('plannerOptions', choice.plannerProvider === choice.provider ? null : choice.plannerOptions);
+      set('roleModels', choice.roleModels);
+      set('retryModel', choice.retryModel);
     }
     if (body.engine !== undefined) {
       const engine = await this.resolveEngine(body.engine, choice || { provider: run.provider, model: run.model, label: run.providerLabel, options: run.providerOptions, plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, plannerOptions: run.plannerOptions });
@@ -354,6 +401,7 @@ export class Factory {
         tokenBudget: clamp(s.tokenBudget, 10_000, 50_000_000, cur.tokenBudget),
         timeoutMinutes: clamp(s.timeoutMinutes, 1, 24 * 60, cur.timeoutMinutes),
         ...(typeof s.deploy === 'boolean' ? { deploy: s.deploy } : {}),
+        ...(typeof s.standardPlanOnFailure === 'boolean' && !isExisting(run) ? { standardPlanOnFailure: s.standardPlanOnFailure } : {}),
       };
       if ('appportException' in s && !isExisting(run)) {
         const reason = cleanException(s.appportException);
@@ -382,7 +430,7 @@ export class Factory {
     if (!changed.length && body.resume !== true) throw new ProjectError(400, 'nothing to change');
     delete run.error;
     await this.store.save(run);
-    if (changed.length) this.store.event(id, 'run.updated', { fields: changed, provider: run.provider, model: run.model, engine: run.engine || 'builtin', plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, note: note || undefined });
+    if (changed.length) this.store.event(id, 'run.updated', { fields: changed, provider: run.provider, model: run.model, engine: run.engine || 'builtin', plannerProvider: run.plannerProvider, plannerModel: run.plannerModel, roleModels: routeSummary(run.roleModels), retryModel: run.retryModel ? `${run.retryModel.provider} · ${run.retryModel.model}` : undefined, note: note || undefined });
     if (body.resume === true) return this.resume(id);
     return run;
   }
@@ -501,10 +549,18 @@ export class Factory {
     };
     const rawProvider = this.makeProvider(run);
     const rawPlanner = this.makePlannerProvider(run);
+    const routed = new Map(); // provider|model -> instrumented provider, for role and retry models
     // Observation only (src/diagnostics.js): times each model call and run phase; it cannot change what the call returns.
-    const diag = new RunDiagnostics({ dir: this.store.runDir(id), runId: id, engine: run.engine || 'builtin', secrets: () => [rawProvider.apiKey, rawPlanner.apiKey, this.cfg.githubToken, this.cfg.password] });
+    const diag = new RunDiagnostics({ dir: this.store.runDir(id), runId: id, engine: run.engine || 'builtin', secrets: () => [rawProvider.apiKey, rawPlanner.apiKey, ...[...routed.values()].map((p) => p.apiKey), this.cfg.githubToken, this.cfg.password] });
     const provider = instrumentProvider(rawProvider, diag, 'agent');
     const plannerProvider = instrumentProvider(rawPlanner, diag, 'planner');
+    // One provider instance per distinct model a task is routed to (see routeFor); the run's agent model reuses `provider`.
+    const providerFor = (route) => {
+      if (route.via === 'default' || (route.provider === run.provider && route.model === run.model)) return provider;
+      const key = `${route.provider}|${route.model}`;
+      if (!routed.has(key)) routed.set(key, instrumentProvider(this.makeProvider({ ...run, provider: route.provider, model: route.model, plannerModel: route.model, providerOptions: route.providerOptions || {} }), diag, 'agent'));
+      return routed.get(key);
+    };
     const layer = async (name, state) => {
       if (run.layers[name] === state) return;
       run.layers[name] = state;
@@ -536,20 +592,42 @@ export class Factory {
         await layer('plan', 'active');
         await this.prepareExisting(run, { ws, signal, emit, save });
       }
+      // A new app's workspace sits inside the factory's data folder. Until it has a package.json, npm walks up and finds the
+      // first one above it, so an early `npm test` ran some other project's suite (this repository's, in a default install).
+      if (!existing && !ws.exists('package.json')) await ws.writeFile('package.json', `${JSON.stringify({ name: 'app', version: '0.0.0', private: true }, null, 2)}\n`);
       if (!run.plan) {
         if (run.status !== 'planning') await setStatus('planning');
         await layer('plan', 'active');
         const desc = plannerProvider.describe();
-        emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
+        const who = `${desc.label || desc.name} · ${desc.plannerModel || desc.model}`;
+        emit('log', { text: `Planning with ${who}…` });
         if (run.settings.stack) emit('log', { text: `Stack: ${stackLabel(run.settings.stack)}` });
-        const plan = await runPlanner({ provider: plannerProvider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
+        // How the planner model did, for the run's Models view: attempts, rejected attempts, repairs, standard plan used.
+        const planning = { provider: run.plannerProvider, providerLabel: run.plannerProviderLabel, model: run.plannerModel, startedAt: new Date().toISOString(), source: 'model' };
+        const t0 = Date.now();
+        // A local model can take minutes per plan; say so while it works, so a silent wait is not mistaken for a hang.
+        const heartbeat = setInterval(() => emit('log', { text: `Still waiting for ${who} to write the plan (${Math.round((Date.now() - t0) / 60_000)} min). Local models can take several minutes.` }), 60_000);
+        let plan;
+        try {
+          plan = await runPlanner({ provider: plannerProvider, run, signal, track, stats: planning, log: (text) => emit('log', { level: 'warn', text }) });
+        } catch (err) {
+          planning.error = this.hideSecrets(redact(String(err.message))).slice(0, 300);
+          if (err.code !== 'invalid_plan' || !run.settings.standardPlanOnFailure || signal.aborted) throw err;
+          plan = standardPlan(run);
+          planning.source = 'standard';
+          emit('log', { level: 'warn', text: `${who} did not produce a valid plan in ${planning.attempts} attempts; continuing with the factory's standard plan (settings.standardPlanOnFailure).` });
+        } finally {
+          clearInterval(heartbeat);
+          planning.durationMs = Date.now() - t0;
+          run.planning = planning;
+        }
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));
         run.plan = plan;
         run.title = plan.product.name || run.title;
         await save();
         await this.writePlanArtifacts(run, existing ? notes : ws);
-        emit('plan', { tasks: plan.tasks.length, levels: Math.max(...Object.values(depth)) + 1 });
+        emit('plan', { tasks: plan.tasks.length, levels: Math.max(...Object.values(depth)) + 1, source: planning.source, attempts: planning.attempts, repairs: planning.repairs?.length || 0 });
         await layer('plan', 'done');
       }
 
@@ -561,7 +639,7 @@ export class Factory {
       // ── Execution loop (layers 3–6) ───────────────────────────────────────────────────────
       await setStatus('running');
       await layer('execution', 'active');
-      await this.executionLoop(run, { ws, notes, provider, signal, track, emit, save, layer, diag });
+      await this.executionLoop(run, { ws, notes, provider, providerFor, signal, track, emit, save, layer, diag });
       if (signal.aborted) throw signal.reason || new Error('cancelled');
       const tasks = run.plan.tasks;
       const allDone = tasks.every((t) => DONE_STATES.has(t.status));
@@ -654,7 +732,7 @@ export class Factory {
     await Promise.allSettled(running.values());
   }
 
-  async runTask(run, task, { ws, notes = ws, provider, signal, track, emit, save, layer, diag }) {
+  async runTask(run, task, { ws, notes = ws, provider, providerFor = () => provider, signal, track, emit, save, layer, diag }) {
     const maxAttempts = run.settings.maxAttempts;
     const base = task.attemptBase || 0;
     let feedback = task.attempts.length > base ? task.attempts.at(-1).feedback : null;
@@ -665,15 +743,17 @@ export class Factory {
 
     for (let n = task.attempts.length - base + 1; n <= maxAttempts; n++) {
       if (signal.aborted) return;
-      const attempt = { n, startedAt: new Date().toISOString(), verification: [] };
+      // Which model makes this attempt, recorded on the attempt so the run can show who did what and how it went.
+      const route = this.routeFor(run, task, n);
+      const attempt = { n, startedAt: new Date().toISOString(), verification: [], model: { provider: route.provider, label: route.providerLabel || route.provider, model: route.model, via: route.via } };
       task.attempts.push(attempt);
       task.status = 'running';
       await save();
-      emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title });
+      emit('task', { taskId: task.id, status: 'running', attempt: n, role: task.role, title: task.title, model: `${attempt.model.label} · ${route.model}`, via: route.via });
 
       const lessons = await readLessons(notes);
       const out = await this.agentRunner(run)({
-        provider, ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
+        provider: providerFor(route), ws, run, task, attempt: n, maxAttempts, feedback, upstream, lessons,
         settings: run.settings, signal, track, diag,
         emit: (type, data) => emit(type, { ...data, attempt: n }),
       });
@@ -1290,6 +1370,11 @@ export class Factory {
     await save();
     emit('checklist', { items });
   }
+}
+
+/** { engineer: 'ollama · qwen3-coder' } from a run's roleModels, for events. */
+function routeSummary(roleModels = {}) {
+  return Object.fromEntries(Object.entries(roleModels || {}).map(([role, r]) => [role, `${r.provider} · ${r.model}`]));
 }
 
 function headline(text = '') {

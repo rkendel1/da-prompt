@@ -25,6 +25,7 @@ import { engineStatus } from './engines/index.js';
 import { describeStack } from './stack.js';
 import { describeInference } from './contract.js';
 import { readRecords, summarizeRun } from './diagnostics.js';
+import { runModelPerformance, aggregatePerformance } from './performance.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -162,6 +163,12 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'engines' && method === 'GET') return json(res, 200, { engines: await engineStatus(cfg), default: cfg.defaultEngine || 'builtin' });
     if (parts[1] === 'stack' && parts.length === 2 && method === 'GET') return json(res, 200, describeStack());
+    // Track record of every model across stored runs (src/performance.js): observation only.
+    if (parts[1] === 'models' && parts[2] === 'performance' && parts.length === 3 && method === 'GET') {
+      const runs = [];
+      for (const r of await store.list()) runs.push(await store.load(r.id).catch(() => null));
+      return json(res, 200, aggregatePerformance(runs.filter(Boolean)));
+    }
     if (parts[1] === 'diagnostics' && parts[2] === 'inference' && method === 'GET') {
       // Offline preflight: configuration only. It never contacts a provider or sends a model request.
       const q = (k) => url.searchParams.get(k) || undefined;
@@ -259,6 +266,7 @@ export async function createServer(overrides = {}) {
       const limit = Math.max(0, Math.min(1000, Number(url.searchParams.get('calls') ?? 200) || 0));
       return json(res, 200, { diagnostics: summarizeRun(run, await store.events(id), records), calls: records.filter((r) => r.type === 'call').slice(-limit) });
     }
+    if (sub === 'models' && method === 'GET') return json(res, 200, { performance: runModelPerformance(run, readRecords(store.runDir(id))) });
     if (sub === 'artifacts' && method === 'GET') {
       const delivery = [];
       for (const [name, label] of [['FACTORY_REPORT.md', 'Factory report'], ['test-results.json', 'Test results'], ['changes.patch', 'Patch'], ['project.tar.gz', isExisting(run) ? 'Changed files archive' : 'Project archive'], ['DELETED_FILES.txt', 'Deleted files']]) {
@@ -934,7 +942,7 @@ export async function createServer(overrides = {}) {
     const idea = `${task.title}${task.description ? `\n\n${task.description}` : ''}`;
     let run;
     try {
-      run = await factory.createRun({ idea, provider: body.provider, model: body.model, settings: body.settings, source: { projectId: project.id }, taskId: task.id });
+      run = await factory.createRun({ idea, provider: body.provider, model: body.model, planner: body.planner, roles: body.roles, retryModel: body.retryModel, settings: body.settings, source: { projectId: project.id }, taskId: task.id });
     } catch (err) {
       throw asHttp(err);
     }

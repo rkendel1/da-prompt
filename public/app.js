@@ -202,6 +202,7 @@ function renderNew({ project: preselect = '' } = {}) {
         tokenBudget: Number(fd.get('tokenBudget')),
         deploy: fd.get('deploy') === 'on',
         pax: fd.get('pax') === 'on',
+        standardPlanOnFailure: choice.standardPlanOnFailure !== false,
         ...(project.mode() === 'new' ? stack.settings() : {}),
       },
     };
@@ -662,7 +663,7 @@ function renderRun({ keepTab = false } = {}) {
     ${failureCard(run, canResume)}
     ${nextActions(run, canResume)}
     <div class="tabs" role="tablist">
-      ${[['overview', 'Overview'], ['graph', 'Task graph'], ['activity', 'Activity'], ['files', 'Files'], ['evidence', 'Evidence'], ['delivery', 'Delivery']]
+      ${[['overview', 'Overview'], ['graph', 'Task graph'], ['models', 'Models'], ['activity', 'Activity'], ['files', 'Files'], ['evidence', 'Evidence'], ['delivery', 'Delivery']]
         .map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${current.tab === k}">${l}<span class="count" data-count="${k}"></span></button>`).join('')}
     </div>`;
 
@@ -678,11 +679,13 @@ function renderRun({ keepTab = false } = {}) {
   updateTabCounts();
   const tab = $('#tab');
   // Live updates re-render the overview and graph; files/activity/delivery keep their state.
-  const live = ['overview', 'graph'].includes(current.tab) || (current.tab === 'delivery' && !tab.dataset.delivered && run.delivery);
+  const live = ['overview', 'graph'].includes(current.tab) || (current.tab === 'delivery' && !tab.dataset.delivered && run.delivery)
+    // The Models tab fetches from the server, so live updates refresh it at most every 15 s.
+    || (current.tab === 'models' && Date.now() - (current.modelsAt || 0) > 15_000);
   if (keepTab && !live && tab.dataset.tab === current.tab) return;
   tab.dataset.tab = current.tab;
   tab.dataset.delivered = run.delivery ? '1' : '';
-  ({ overview: renderOverview, graph: renderGraph, activity: renderActivity, files: renderFiles, evidence: renderEvidenceTab, delivery: renderDelivery })[current.tab](tab, run, escalated);
+  ({ overview: renderOverview, graph: renderGraph, models: renderModels, activity: renderActivity, files: renderFiles, evidence: renderEvidenceTab, delivery: renderDelivery })[current.tab](tab, run, escalated);
 }
 
 
@@ -918,6 +921,80 @@ function renderOverview(el, run, escalated) {
   }));
 }
 
+// Models -------------------------------------------------------------------------------------
+// Which model was set to do what, how planning went, and how each model did on its tasks (src/performance.js).
+const fmtMs = (ms) => (ms == null ? '–' : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
+const PLAN_OUTCOME = { planned: ['completed', 'plan produced'], standard: ['needs_attention', 'standard plan used'], failed: ['failed', 'no valid plan'], cancelled: ['cancelled', 'cancelled'], planning: ['running', 'planning'] };
+const modelName = (m) => `${m.label || m.provider} · ${m.model}`;
+
+async function renderModels(el, run) {
+  current.modelsAt = Date.now();
+  let perf;
+  try {
+    perf = (await api(`api/runs/${run.id}/models`)).performance;
+  } catch (e) {
+    el.innerHTML = `<div class="card"><p class="form-error">Could not load model results: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (current.tab !== 'models') return; // the user moved on while it loaded
+  const r = perf.routing;
+  const roles = Object.entries(r.roles || {});
+  const plannerEntry = perf.models.find((m) => m.plan);
+  const pl = plannerEntry?.plan;
+  const stageCell = (m) => Object.keys(m.stages).map((s) => `<span class="pill tag">${esc(s)}</span>`).join(' ');
+  const sum = (m, f) => Object.entries(m.stages).filter(([s]) => s !== 'planner' && s !== 'summary').reduce((n, [, v]) => n + (v[f] || 0), 0);
+  const rate = (a, b) => (b ? `${a}/${b} <span class="muted">(${Math.round((100 * a) / b)}%)</span>` : '–');
+  const inferred = perf.models.reduce((n, m) => n + m.inferred, 0);
+  el.innerHTML = `
+    <div class="grid-2">
+      <div class="card">
+        <h2>Who was set to do what</h2>
+        <table class="plain">
+          <tr><th>planner</th><td>${esc(modelName(r.planner))}</td></tr>
+          <tr><th>agents (default)</th><td>${esc(modelName(r.agent))}</td></tr>
+          ${roles.map(([role, m]) => `<tr><th>${esc(role)}</th><td>${esc(modelName({ label: m.providerLabel, ...m }))}</td></tr>`).join('')}
+          <tr><th>retries</th><td>${r.retry ? esc(modelName({ label: r.retry.providerLabel, ...r.retry })) : '<span class="muted">same model as the first attempt</span>'}</td></tr>
+          ${!run.source ? `<tr><th>if planning fails</th><td>${run.settings?.standardPlanOnFailure === false ? 'off: a failed plan stops the run' : 'on: the standard plan is used if the planner fails'}</td></tr>` : ''}
+        </table>
+        ${!run.executing ? '<p class="hint">Change any of these with <b>Edit run</b>, then Resume; done work is kept.</p>' : ''}
+      </div>
+      <div class="card">
+        <h2>Planning ${pl ? `<span class="pill ${esc((PLAN_OUTCOME[pl.outcome] || [])[0] || 'pending')}">${esc((PLAN_OUTCOME[pl.outcome] || [])[1] || pl.outcome)}</span>` : ''}</h2>
+        ${pl ? `<table class="plain">
+          <tr><th>model</th><td>${esc(modelName(plannerEntry))}</td></tr>
+          ${pl.recorded ? `<tr><th>attempts</th><td>${esc(pl.attempts ?? '–')}${pl.rejected ? ` · ${pl.rejected} rejected` : ''} · ${esc(fmtMs(pl.durationMs))}</td></tr>` : '<tr><th>attempts</th><td class="muted">not recorded for runs before this version</td></tr>'}
+          ${pl.error ? `<tr><th>problem</th><td>${esc(pl.error)}</td></tr>` : ''}
+        </table>
+        ${pl.rejections?.length ? `<h3>Rejected attempts</h3><ol class="plain small">${pl.rejections.map((x) => `<li>${esc(x.join('; '))}</li>`).join('')}</ol>` : ''}
+        ${pl.repairs?.length ? `<h3>Repaired by the factory</h3><p class="hint">Checks no model could pass, fixed before any task ran.</p><ul class="plain small">${pl.repairs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}` : '<p class="muted">No planner record.</p>'}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Results by model</h2>
+      ${perf.models.length ? `<div class="table-scroll"><table class="plain models-table">
+        <thead><tr><th>model</th><th>did</th><th>tasks verified</th><th>first try</th><th>attempts verified</th><th>escalated</th><th>avg attempt</th><th>model calls</th><th>time in model</th><th>tokens in / out</th></tr></thead>
+        <tbody>${perf.models.map((m) => {
+          const fin = sum(m, 'finishedAttempts');
+          const c = m.calls;
+          return `<tr><td><b>${esc(m.model)}</b><br><span class="muted">${esc(m.label)}</span></td><td>${stageCell(m)}</td>
+            <td>${rate(sum(m, 'verified'), sum(m, 'tasks'))}</td><td>${rate(sum(m, 'firstTryVerified'), sum(m, 'firstTry'))}</td>
+            <td>${rate(sum(m, 'attemptsVerified'), sum(m, 'attempts'))}</td><td>${sum(m, 'escalated') || '–'}</td>
+            <td>${fin ? esc(fmtMs(sum(m, 'attemptMs') / fin)) : '–'}</td>
+            <td>${perf.callsRecorded ? `${c.count}${c.failed ? ` <span class="bad">(${c.failed} failed)</span>` : ''}` : '–'}</td>
+            <td>${perf.callsRecorded ? esc(fmtMs(c.durationMs)) : '–'}</td>
+            <td>${!perf.callsRecorded ? '–' : c.count && c.tokensUnavailable === c.count ? '<span class="muted">not reported</span>' : `${fmtNum(c.inputTokens)} / ${fmtNum(c.outputTokens)}`}</td></tr>`;
+        }).join('')}</tbody></table></div>
+        <p class="hint">A task counts for every model that worked on it; verified or escalated goes to the model that made its last attempt. First try = the first attempt of each set of attempts. Time and tokens come from the run's diagnostics.${inferred ? ` ${inferred} attempt(s) were made before attempts recorded their model and are attributed to the run's agent model.` : ''}</p>` : '<p class="muted">No model has worked on this run yet.</p>'}
+    </div>
+    ${perf.tasks.length ? `<div class="card" style="margin-top:16px">
+      <h2>Task by task</h2>
+      <div class="table-scroll"><table class="plain task-models">
+        <thead><tr><th>task</th><th>role</th><th>status</th><th>attempts (model · result)</th></tr></thead>
+        <tbody>${perf.tasks.map((t) => `<tr><td><b>${esc(t.id)}</b><br><span class="muted">${esc(t.title)}</span></td><td>${esc(t.role)}</td><td><span class="pill ${esc(t.status)}">${esc(t.status)}</span></td>
+          <td>${t.attempts.map((a) => `<div class="attempt-chip ${a.ok ? 'ok' : a.finished ? 'bad' : ''}" title="${esc(a.error || '')}">${esc(a.n)} · ${a.ok ? '✓' : a.finished ? '✗' : '…'} ${esc(a.model)}${a.via === 'retry' ? ' <em>retry model</em>' : a.via === 'role' ? ' <em>role model</em>' : ''}${a.durationMs != null ? ` <span class="muted">${esc(fmtMs(a.durationMs))}</span>` : ''}${a.error ? `<br><span class="muted small">${esc(a.error)}</span>` : ''}</div>`).join('') || '<span class="muted">not started</span>'}</td></tr>`).join('')}</tbody>
+      </table></div></div>` : ''}`;
+}
+
 // Graph --------------------------------------------------------------------------------------
 function renderGraph(el, run) {
   const tasks = run.plan?.tasks || [];
@@ -980,6 +1057,7 @@ function renderTaskDetail(el, t, run) {
       ${t.status === 'escalated' && !run.executing ? `<div class="actions"><button class="btn" data-do="retry">Retry</button><button class="btn" data-do="skip">Skip</button></div>` : ''}</div>
     <div class="kv">
       <b>role</b><span>${esc(t.role)}</span>
+      <b>model</b><span>${esc(taskModel(run, t))}</span>
       <b>depends on</b><span>${esc((t.dependsOn || []).join(', ') || '—')}</span>
       <b>spec</b><span>${esc(t.description)}</span>
       <b>acceptance</b><span><ul class="plain">${t.acceptance.map((a) => `<li>${esc(a)}</li>`).join('')}</ul></span>
@@ -988,13 +1066,22 @@ function renderTaskDetail(el, t, run) {
       ${t.result ? `<b>result</b><span>${esc(t.result.summary)}</span><b>files</b><span class="mono">${esc((t.result.files || []).join(', '))}</span>` : ''}
     </div>
     ${(t.attempts || []).map((a) => `<div class="attempt">
-      <h4>Attempt ${a.n} <span class="pill ${a.ok ? 'completed' : a.finishedAt ? 'failed' : 'running'}">${a.ok ? 'verified' : a.finishedAt ? 'failed' : 'in progress'}</span><span class="muted mono">${esc(dur(a.startedAt, a.finishedAt))}</span></h4>
+      <h4>Attempt ${a.n} <span class="pill ${a.ok ? 'completed' : a.finishedAt ? 'failed' : 'running'}">${a.ok ? 'verified' : a.finishedAt ? 'failed' : 'in progress'}</span><span class="muted mono">${esc(dur(a.startedAt, a.finishedAt))}${a.model ? ` · ${esc(a.model.model)}${a.model.via === 'retry' ? ' (retry model)' : ''}` : ''}</span></h4>
       ${a.error ? `<p>${esc(a.error)}</p>` : ''}
       ${(a.verification || []).map((v) => `<div class="vcheck"><span class="${v.ok ? 'ok' : 'no'}" style="color:var(--${v.ok ? 'ok' : 'bad'})">${v.ok ? '✓' : '✗'}</span><span>${esc(v.command)}</span></div>
         ${!v.ok && v.output ? `<pre class="out">${esc(v.output)}</pre>` : ''}`).join('')}
     </div>`).join('')}
   </div>`;
   el.querySelectorAll('[data-do]').forEach((b) => (b.onclick = () => taskAction(t.id, b.dataset.do)));
+}
+
+// The model working on a task now (or that verified it), else the one its next attempt will use, mirroring Factory.routeFor.
+function taskModel(run, t) {
+  const last = t.attempts?.at(-1);
+  if (last?.model && (t.status === 'running' || t.status === 'completed')) return `${last.model.label} · ${last.model.model} (${t.status === 'running' ? 'working now' : 'made the verified attempt'})`;
+  const n = (t.attempts?.length || 0) - (t.attemptBase || 0) + 1;
+  const r = n > 1 && run.retryModel ? { ...run.retryModel, why: 'retry model' } : run.roleModels?.[t.role] ? { ...run.roleModels[t.role], why: `${t.role} model` } : { provider: run.provider, providerLabel: run.providerLabel, model: run.model, why: 'agent model' };
+  return `${r.providerLabel || r.provider} · ${r.model} (${r.why})`;
 }
 
 // Activity ----------------------------------------------------------------------------------
@@ -1011,9 +1098,9 @@ function describe(e) {
     case 'output': return [who, e.ok ? `Project delivered to ${esc(e.dir)}` : `Delivery to ${esc(e.dir)} failed: ${esc(e.error)}`, e.ok ? 'ok' : 'bad'];
     case 'run.status': return [who, `Status → <b>${esc(statusLabel(e.status))}</b>${e.note ? ` — ${esc(e.note)}` : ''}`];
     case 'layer': return [who, `Layer <b>${esc(LAYER_NAMES[e.layer] || e.layer)}</b>: ${esc(e.state)}`, e.state === 'done' ? 'ok' : e.state === 'failed' ? 'warn' : ''];
-    case 'plan': return [who, `Plan ready: ${e.tasks} tasks across ${e.levels} levels`, 'ok'];
+    case 'plan': return [who, `Plan ready: ${e.tasks} tasks across ${e.levels} levels${e.source === 'standard' ? ' · <b>the factory\'s standard plan</b> (the planner model did not produce a valid one)' : ''}${e.repairs ? ` · ${e.repairs} repair(s), see the Models tab` : ''}`, e.source === 'standard' ? 'warn' : 'ok'];
     case 'agents': return [who, `Agents: ${esc(e.roles.join(', '))}`];
-    case 'task': return [who, `Task ${esc(e.status)}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.summary ? ` — ${esc(e.summary)}` : ''}${e.blockedBy ? ` by ${esc(e.blockedBy)}` : ''}`, e.status === 'completed' ? 'ok' : e.status === 'blocked' ? 'warn' : ''];
+    case 'task': return [who, `Task ${esc(e.status)}${e.attempt ? ` (attempt ${e.attempt})` : ''}${e.model ? ` · <span class="muted">${esc(e.model)}${e.via === 'retry' ? ', retry model' : ''}</span>` : ''}${e.summary ? ` — ${esc(e.summary)}` : ''}${e.blockedBy ? ` by ${esc(e.blockedBy)}` : ''}`, e.status === 'completed' ? 'ok' : e.status === 'blocked' ? 'warn' : ''];
     case 'agent.message': return [who, `<span class="muted">“${esc(e.text)}”</span>`];
     case 'tool': {
       const label = e.tool === 'run_command' ? `$ ${esc(e.input?.command)}` : `${esc(e.tool)} ${esc(e.input?.path || '')}${e.input?.bytes != null ? ` <span class="muted">(${e.input.bytes}b)</span>` : ''}`;
@@ -1421,7 +1508,7 @@ async function openEditRun(run) {
   dlg.addEventListener('close', () => dlg.remove());
   dlg.showModal();
   const picker = await mountModelPicker($('#er-picker', dlg), api, {
-    initial: { provider: run.provider, model: run.model, plannerProvider: run.plannerProvider !== run.provider ? run.plannerProvider : undefined, plannerModel: run.plannerModel, engine: run.engine || 'builtin', numCtx: run.providerOptions?.numCtx },
+    initial: { provider: run.provider, model: run.model, plannerProvider: run.plannerProvider !== run.provider ? run.plannerProvider : undefined, plannerModel: run.plannerModel, engine: run.engine || 'builtin', numCtx: run.providerOptions?.numCtx, roles: run.roleModels || {}, retryModel: run.retryModel || null, standardPlanOnFailure: run.settings?.standardPlanOnFailure !== false },
   });
   $('#er-cancel', dlg).onclick = () => dlg.close();
   $('#er-form', dlg).addEventListener('submit', async (e) => {
@@ -1430,9 +1517,9 @@ async function openEditRun(run) {
     const f = e.target;
     const choice = picker.getChoice();
     const body = {
-      ...(choice.provider ? { provider: choice.provider, model: choice.model, providerOptions: choice.providerOptions, ...(choice.planner ? { planner: choice.planner } : {}), ...(choice.engine ? { engine: choice.engine } : {}) } : {}),
+      ...(choice.provider ? { provider: choice.provider, model: choice.model, providerOptions: choice.providerOptions, roles: choice.roles, retryModel: choice.retryModel, ...(choice.planner ? { planner: choice.planner } : {}), ...(choice.engine ? { engine: choice.engine } : {}) } : {}),
       inputs: { idea: f.idea.value, requirements: f.requirements.value, stack: f.stack.value, limits: f.limits.value, tools: f.tools.value },
-      settings: { maxParallel: f.maxParallel.value, maxAttempts: f.maxAttempts.value, maxAgentTurns: f.maxAgentTurns.value, tokenBudget: f.tokenBudget.value, timeoutMinutes: f.timeoutMinutes.value },
+      settings: { maxParallel: f.maxParallel.value, maxAttempts: f.maxAttempts.value, maxAgentTurns: f.maxAgentTurns.value, tokenBudget: f.tokenBudget.value, timeoutMinutes: f.timeoutMinutes.value, ...(run.source ? {} : { standardPlanOnFailure: choice.standardPlanOnFailure !== false }) },
       ...(f.allowInstall ? { allowInstall: f.allowInstall.checked } : {}),
       ...(f.note.value.trim() ? { note: f.note.value } : {}),
       interrupt: Boolean(current.run?.executing),

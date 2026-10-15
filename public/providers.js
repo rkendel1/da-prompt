@@ -44,6 +44,35 @@ function writePref(v) {
   }
 }
 
+// Roles a model can be assigned to (the planner has its own fields). Mirrors ROLES in src/graph.js.
+export const ROUTE_ROLES = [
+  ['product', 'Product', 'PRD, docs, README'],
+  ['engineer', 'Engineer', 'server, store, API, tests'],
+  ['design', 'Design', 'UI and copy'],
+  ['qa', 'QA', 'tests and fixes'],
+  ['devops', 'DevOps', 'Dockerfile, deploy docs'],
+  ['research', 'Research', 'findings'],
+];
+const SEP = '::';
+const routeValue = (r) => (r?.provider && r?.model ? `${r.provider}${SEP}${r.model}` : '');
+const routeOf = (v) => {
+  const i = String(v || '').indexOf(SEP);
+  return i > 0 ? { provider: v.slice(0, i), model: v.slice(i + SEP.length) } : null;
+};
+
+/** "4/5 tasks verified · 3/5 first try" for a model in one stage, from GET api/models/performance. */
+export function trackRecord(perf, provider, model, stage) {
+  const m = perf?.models?.find((x) => x.provider === provider && x.model === model);
+  if (stage === 'planner') {
+    const p = m?.plans;
+    if (!p?.total) return 'no planning history';
+    return `${p.planned}/${p.total} plans produced${p.standard ? ` · ${p.standard} used the standard plan` : ''}${p.failed ? ` · ${p.failed} failed` : ''}${p.cancelled ? ` · ${p.cancelled} cancelled` : ''}`;
+  }
+  const s = m?.stages?.[stage];
+  if (!s?.tasks) return `no history as ${stage}`;
+  return `${s.verified}/${s.tasks} task${s.tasks === 1 ? '' : 's'} verified · ${s.firstTryVerified}/${s.firstTry} first try${s.escalated ? ` · ${s.escalated} escalated` : ''}`;
+}
+
 const fmtSize = (b) => (b ? `${(b / 1e9).toFixed(b > 1e10 ? 0 : 1)} GB` : '');
 function modelLabel(m) {
   const bits = [m.params, fmtSize(m.size), m.ctx ? `${Math.round(m.ctx / 1024)}k ctx` : null].filter(Boolean);
@@ -95,6 +124,34 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
     const plannerCustom = state.plannerCustom ?? Boolean(planner && plannerModels.length && !plannerModels.some((m) => m.id === planner));
     const selected = models.find((m) => m.id === model);
     const offline = p?.type === 'offline';
+    // Per-role routing: remembered with the provider it was chosen for, like the planner.
+    const roles = state.roles ?? (pref.roles || {});
+    const retry = state.retry ?? (pref.retryModel ? routeValue(pref.retryModel) : '');
+    const standardPlanOnFailure = state.standardPlanOnFailure ?? pref.standardPlanOnFailure !== false;
+    const routeSelect = (attrs, value) => {
+      const known = ready.filter((x) => x.type !== 'offline').some((x) => x.models.some((m) => routeValue({ provider: x.id, model: m.id }) === value));
+      return `<select ${attrs}><option value="">Same as agent model</option>
+        ${ready.filter((x) => x.type !== 'offline').map((x) => `<optgroup label="${esc(x.label)}${x.local ? ' · local' : ''}">${x.models.map((m) => { const v = routeValue({ provider: x.id, model: m.id }); return `<option value="${esc(v)}" ${v === value ? 'selected' : ''}>${esc(m.id)}</option>`; }).join('')}</optgroup>`).join('')}
+        ${value && !known ? `<option value="${esc(value)}" selected>${esc(value.replace(SEP, ' · '))}</option>` : ''}</select>`;
+    };
+    const effective = (v) => routeOf(v) || { provider: pid, model };
+    const overrides = Object.values(roles).filter(Boolean).length + (retry ? 1 : 0);
+    // Several local models in one run: Ollama loads each one; if they do not fit in memory together it swaps them per call.
+    const localIds = new Set(providers.filter((x) => x.local && x.type !== 'offline').map((x) => x.id));
+    const localModels = new Set([...Object.values(roles), retry, `${pid}${SEP}${model}`, plannerProv ? `${plannerProv}${SEP}${planner}` : ''].map(routeOf).filter((r) => r && localIds.has(r.provider) && r.model).map(routeValue));
+    const routingBlock = `
+      <details class="routing" id="pk-routing" ${overrides || state.routingOpen ? 'open' : ''}>
+        <summary>Who does what <em>${overrides ? `${overrides} model override${overrides === 1 ? '' : 's'}` : 'every role uses the agent model'}</em></summary>
+        <p class="hint">Give each role its own model, for example a strong local coder for Engineer and a small fast model for docs. The planner is set above. Under each choice: that model's record in that role from your earlier runs.</p>
+        <div class="picker-grid route-grid">
+          ${ROUTE_ROLES.map(([id, label, what]) => `<label class="field"><span>${esc(label)} <em>${esc(what)}</em></span>${routeSelect(`data-role="${id}"`, routeValue(roles[id]))}
+            <small class="hint track" data-track="${id}">${esc(trackRecord(state.perf, effective(routeValue(roles[id])).provider, effective(routeValue(roles[id])).model, id))}</small></label>`).join('')}
+          <label class="field"><span>Retry attempts with <em>attempt 2 onward of any task</em></span>${routeSelect('id="pk-retry"', retry)}
+            <small class="hint">${retry ? 'A failed task gets its next attempts from this model.' : 'Retries use the same model as the first attempt.'}</small></label>
+        </div>
+        <label class="field check"><input type="checkbox" id="pk-standardplan" ${standardPlanOnFailure ? 'checked' : ''}> <span>New apps: if the planner can't produce a valid plan, continue with the factory's standard plan (shown on the run) instead of failing</span></label>
+        ${localModels.size > 1 ? `<p class="hint warn-text">This run uses ${localModels.size} local models. If they don't fit in memory together, the local server reloads them between calls, which is slow; lower Parallel agents or share models.</p>` : ''}
+      </details>`;
 
     root.innerHTML = `
       <div class="picker-row">
@@ -145,6 +202,8 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
           ${plannerCustom ? `<input id="pk-planner-custom" placeholder="model id" value="${esc(planner)}" style="margin-top:6px">` : ''}
         </label>
       </div>
+      ${state.perf ? `<p class="hint track">Track record · ${esc(model)} as engineer: ${esc(trackRecord(state.perf, pid, model, 'engineer'))}${planner || !plannerProv ? ` · ${esc(planner || model)} as planner: ${esc(trackRecord(state.perf, plannerProv || pid, planner || model, 'planner'))}` : ''} · <a href="#/providers">all models</a></p>` : ''}
+      ${routingBlock}
       ${engineBlock(p)}
       <div class="picker-status">
         <span id="pk-note" class="hint">${selected?.tools === false ? `${esc(selected.id)} doesn't advertise tool support; the factory will use JSON tool calls. Larger coding models work best.` : p?.local ? `Runs locally at ${esc(p.baseUrl)} — no API key needed.` : `Using ${esc(p?.label)}${p?.keySource ? ` · key from ${esc(p.keySource === 'saved' ? 'Providers page' : p.keySource)}` : ''}.`}</span>
@@ -154,9 +213,19 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
 
     $('#pk-provider', root).onchange = (e) => {
       state.provider = e.target.value;
-      state.model = state.customModel = state.planner = state.plannerCustom = state.plannerProvider = state.numCtx = state.toolMode = undefined;
+      state.model = state.customModel = state.planner = state.plannerCustom = state.plannerProvider = state.numCtx = state.toolMode = state.roles = state.retry = undefined;
       render();
     };
+    const routing = $('#pk-routing', root);
+    if (routing) routing.ontoggle = () => (state.routingOpen = routing.open);
+    root.querySelectorAll('select[data-role]').forEach((sel) => (sel.onchange = () => {
+      state.roles = { ...roles, [sel.dataset.role]: routeOf(sel.value) || undefined };
+      render();
+    }));
+    const retrySel = $('#pk-retry', root);
+    if (retrySel) retrySel.onchange = () => { state.retry = retrySel.value; render(); };
+    const standardBox = $('#pk-standardplan', root);
+    if (standardBox) standardBox.onchange = () => (state.standardPlanOnFailure = standardBox.checked);
     $('#pk-refresh', root).onclick = async () => {
       root.querySelector('#pk-refresh').disabled = true;
       state.data = await loadProviders(api, { refresh: true });
@@ -221,17 +290,29 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
     const pSel = $('#pk-planner', root)?.value;
     const plannerModel = $('#pk-planner-custom', root)?.value.trim() || (pSel && pSel !== '__custom' ? pSel : '') || undefined;
     const plannerProvider = $('#pk-planner-provider', root)?.value || undefined;
+    const offline = p?.type === 'offline';
+    const roles = {};
+    root.querySelectorAll('select[data-role]').forEach((sel) => {
+      const r = routeOf(sel.value);
+      if (r) roles[sel.dataset.role] = r;
+    });
+    const retryModel = routeOf($('#pk-retry', root)?.value);
+    const standardPlanOnFailure = $('#pk-standardplan', root)?.checked ?? true;
     const choice = {
       provider: state.provider,
-      model: p?.type === 'offline' ? undefined : model,
-      planner: p?.type === 'offline' ? undefined : { provider: plannerProvider, model: plannerModel },
-      engine: p?.type === 'offline' ? undefined : $('#pk-engine', root)?.value || undefined,
+      model: offline ? undefined : model,
+      planner: offline ? undefined : { provider: plannerProvider, model: plannerModel },
+      engine: offline ? undefined : $('#pk-engine', root)?.value || undefined,
       providerOptions: {
         numCtx: $('#pk-numctx', root)?.value || undefined,
         toolMode: $('#pk-toolmode', root)?.value || undefined,
       },
+      // Sent as-is: {} and null clear earlier routing when a run is edited.
+      roles: offline ? {} : roles,
+      retryModel: offline ? null : retryModel,
+      standardPlanOnFailure,
     };
-    if (!initial) writePref({ provider: choice.provider, model: choice.model, engine: choice.engine, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx });
+    if (!initial) writePref({ provider: choice.provider, model: choice.model, engine: choice.engine, plannerProvider, plannerModel, numCtx: choice.providerOptions.numCtx, roles, retryModel, standardPlanOnFailure });
     return choice;
   }
 
@@ -242,12 +323,27 @@ export async function mountModelPicker(root, api, { initial = null } = {}) {
     return { getChoice: () => ({}) };
   }
   state.engines = await api('api/engines').catch(() => null);
+  state.perf = await api('api/models/performance').catch(() => null);
   state.provider = usable(state.pref.provider) ? state.pref.provider : state.data.defaultProvider;
   render();
   return { getChoice };
 }
 
 // ── Providers page ──────────────────────────────────────────────────────────────────────────
+/** Every model's results across stored runs, per stage: what to route where, from evidence rather than guesswork. */
+function trackTable(perf) {
+  const head = '<h2>Model track record</h2><p class="hint">From every stored run: how often each model\'s work passed the factory\'s own verification, per role. Small numbers are anecdotes, not rankings. Choose who does what under <b>Who does what</b> on New run.</p>';
+  if (!perf?.models?.length) return `${head}<p class="muted">No runs yet.</p>`;
+  const roles = ['product', 'engineer', 'design', 'qa', 'devops', 'research'];
+  const cell = (s) => (s?.tasks ? `${s.verified}/${s.tasks}<br><span class="muted">${s.firstTryVerified}/${s.firstTry} first try</span>` : '<span class="muted">–</span>');
+  return `${head}<div class="table-scroll"><table class="plain models-table">
+    <thead><tr><th>model</th><th>runs</th><th>planner<br><span class="muted">plans produced</span></th>${roles.map((r) => `<th>${r}<br><span class="muted">tasks verified</span></th>`).join('')}<th>last used</th></tr></thead>
+    <tbody>${perf.models.map((m) => `<tr><td><b>${esc(m.model)}</b><br><span class="muted">${esc(m.label)}</span></td><td>${m.runs}</td>
+      <td>${m.plans.total ? `${m.plans.planned}/${m.plans.total}${m.plans.standard ? `<br><span class="muted">${m.plans.standard} standard plan</span>` : ''}${m.plans.cancelled ? `<br><span class="muted">${m.plans.cancelled} cancelled</span>` : ''}` : '<span class="muted">–</span>'}</td>
+      ${roles.map((r) => `<td>${cell(m.stages[r])}</td>`).join('')}<td class="muted">${esc(String(m.lastUsedAt || '').slice(0, 10))}</td></tr>`).join('')}</tbody></table></div>
+    ${perf.models.some((m) => m.inferred) ? '<p class="hint">Attempts from before attempts recorded their model are attributed to their run\'s agent model.</p>' : ''}`;
+}
+
 export async function renderProvidersPage(main, api, toast) {
   document.title = 'Providers · da-prompt';
   main.innerHTML = `<section class="page">
@@ -257,6 +353,7 @@ export async function renderProvidersPage(main, api, toast) {
       <div class="actions"><button class="btn" id="pv-refresh">↻ Re-check all</button></div>
     </div>
     <div id="pv-list" class="pv-list"><p class="muted">Checking providers…</p></div>
+    <div class="card" id="pv-track"><h2>Model track record</h2><p class="muted">Loading…</p></div>
     <form class="card pv-add" id="pv-add" autocomplete="off">
       <h2>Add a provider</h2>
       <p class="hint">For another machine running Ollama, a hosted gateway, or any server that speaks the OpenAI Chat Completions API.</p>
@@ -271,6 +368,7 @@ export async function renderProvidersPage(main, api, toast) {
   </section>`;
 
   const list = $('#pv-list');
+  api('api/models/performance').then((perf) => ($('#pv-track').innerHTML = trackTable(perf))).catch((e) => ($('#pv-track').innerHTML = `<h2>Model track record</h2><p class="form-error">${esc(e.message)}</p>`));
   const draw = (data) => {
     const sorted = [...data.providers].sort((a, b) => (b.status === 'ready') - (a.status === 'ready'));
     list.innerHTML = sorted.map((p) => card(p, data.defaultProvider, data)).join('');

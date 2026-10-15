@@ -570,6 +570,41 @@ Keys can come from environment variables or be pasted on the Providers page (sav
 The Providers page also lets you change base URLs, set a default model, set Ollama's
 context window, and **Test** a model with a real tool call.
 
+### Who does what: a model per role, a retry model, and each model's track record
+
+A run has a planner model and an agent model, and can route further (New run → **Who does what**, or Edit run on a stopped
+run): a model per role (`product`, `engineer`, `design`, `qa`, `devops`, `research`) and a **retry model** that makes a
+task's attempts from the second one on. Any ready provider's model can be used for any role, so one run can mix a strong
+local coder for Engineer, a small fast model for docs, and a frontier model only for retries. Over the API:
+
+```json
+{ "provider": "ollama", "model": "qwen3-coder:30b",
+  "planner": { "provider": "ollama", "model": "qwen3:32b" },
+  "roles": { "product": { "provider": "ollama", "model": "qwen2.5-coder:7b" } },
+  "retryModel": { "provider": "anthropic", "model": "claude-sonnet-5-5" } }
+```
+
+Every task attempt records the model that made it. The run's **Models** tab shows who was set to do what, how planning went
+(attempts, rejected attempts and why, repairs), and per model: tasks verified, first-try rate, attempts, escalations, time in
+the model and tokens. The **Providers** page has the **track record** across all runs, per model and role
+(`GET /api/models/performance`; one run: `GET /api/runs/<id>/models`), and New run shows each choice's record in its role.
+These are observations from the factory's own verification; they never change what a run does.
+
+What the planner gets wrong regardless of who builds is repaired before any task runs, and listed on the Models tab: verify
+commands that are tool names (`run_command npm test`), foreground servers used as checks (`docker run -p …`, `npm start`; they
+can only time out), image outputs no agent can produce, a "final verification" pseudo-task (moved to `finalVerify`), and for
+new apps a missing `finalVerify` or a `deploy.start` that ignores `PORT`. If the planner still produces no valid plan for a new
+app, the run continues on the factory's **standard plan** (PRD → app → UI/QA/DevOps → README), clearly marked; turn that off
+with `settings.standardPlanOnFailure: false`. A new app's workspace starts with its own `package.json`, so an early `npm test`
+can never run the suite of a project above the data folder.
+
+The built-in agent loop also takes the two habits small local models show most: a file written as a code block under its path
+(`### public/index.html` then a fenced block) is saved through the ordinary `write_file` tool, and the model is told so; and a
+model that keeps saying "now I'll call complete_task" without calling it gets a concrete nudge, then, if it already did work
+and the task has checks, its attempt goes to the factory's verification marked *not formally completed* (verification decides,
+as for every attempt). Six tool-less replies in a row end the attempt instead of using up all its turns. Checks that need a
+server nobody started (`curl localhost:…`) are repaired out of the plan; the deploy check runs the app and probes it instead.
+
 ### Using a hosted provider (no local model needed)
 
 Nothing in the factory requires Ollama: it is one provider among those above, and it is only the *automatic* default when no

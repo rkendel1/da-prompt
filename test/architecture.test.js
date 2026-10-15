@@ -173,7 +173,7 @@ test('diagnostics are observational: a recorder that fails on every write change
     tools: r.tools.map((e) => [e.tool, e.ok, e.exitCode ?? null]),
     checklist: r.run.checklist.map((c) => [c.id, c.ok]),
     // What the model was shown on each agent turn (ids, paths and commit hashes differ between runs and are normalised).
-    seen: JSON.stringify(r.provider.requests.filter((q) => q.kind === 'task').map((q) => [q.attempt, q.messages, q.tools])).replace(/toolu_t_\d+/g, 'ID').replace(/\/[^\s"'\\]*da-prompt[^\s"'\\]*/g, 'PATH').replace(/\b[0-9a-f]{10,40}\b/g, 'SHA').replace(/duration_ms:? [\d.]+/g, 'duration_ms N'),
+    seen: JSON.stringify(r.provider.requests.filter((q) => q.kind === 'task').map((q) => [q.attempt, q.messages, q.tools])).replace(/toolu_t_\d+/g, 'ID').replace(/\/[^\s"'\\]*da-prompt[^\s"'\\]*/g, 'PATH').replace(/\b[0-9a-f]{10,40}\b/g, 'SHA').replace(/duration_ms:? [\d.]+/g, 'duration_ms N').replace(/\([\d.]+ms\)/g, '(Nms)'),
   });
   for (const name of ['recovery', 'falseClaim']) {
     const normal = shape(await runReplay(FIXTURES[name]));

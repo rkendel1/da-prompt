@@ -173,8 +173,16 @@ Planning rules:
 ${appportException(run) ? '' : '- The app is AppPort-native (rules below): the implementation task installs the pinned @appport packages and builds src/appport.js over the app\'s own store; the QA task tests it in test/appport.test.js; the README documents the capabilities.\n'}${run.settings?.stack?.some((id) => id !== 'appport') ? `- The selected stack is ${stackLabel(run.settings.stack)}: the implementation task builds on every selected component as its rules below say, the QA task writes the tests those rules name, and the README documents the stack.\n` : ''}${newAppRules(run)}`;
 }
 
-export async function runPlanner({ provider, run, signal, track, log }) {
+/**
+ * Produce the plan. `stats` (optional) is filled in as planning goes: attempts made, the problems each rejected attempt had,
+ * and the repairs applied, so the run can show how well the planner model did. Throws an error with code `invalid_plan`
+ * when the model answered but never produced a usable plan.
+ */
+export async function runPlanner({ provider, run, signal, track, log, stats = {} }) {
   const existing = isExisting(run);
+  stats.attempts = 0;
+  stats.rejections = [];
+  stats.repairs = [];
   const messages = [
     {
       role: 'user',
@@ -182,23 +190,159 @@ export async function runPlanner({ provider, run, signal, track, log }) {
     },
   ];
   for (let attempt = 1; attempt <= 3; attempt++) {
+    stats.attempts = attempt;
     const res = await call(provider, { system: plannerSystem(run), messages, tools: [planToolFor(run)], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan', project: existing ? run.project : null, source: run.source, stack: run.settings?.stack } }, track);
     const use = res.content.find((c) => c.type === 'tool_use' && c.name === 'submit_plan');
     messages.push({ role: 'assistant', content: res.content });
     // Local models often write the plan as JSON in their reply instead of calling the tool; take it from there.
     const input = use ? use.input : planFromText(res.content);
     if (!input) {
+      stats.rejections.push(['no plan in the reply']);
       messages.push({ role: 'user', content: 'Call submit_plan with the plan (one JSON object with product, tasks, finalVerify and deploy).' });
       continue;
     }
-    const plan = normalizePlan(input, { idea: run.inputs.idea });
+    const { plan, repairs } = repairPlan(normalizePlan(input, { idea: run.inputs.idea }), { existing });
     const problems = validatePlan(plan);
-    if (problems.length === 0) return plan;
+    if (problems.length === 0) {
+      stats.repairs = repairs;
+      for (const r of repairs) log?.(`Plan repaired: ${r}`);
+      return plan;
+    }
+    stats.rejections.push(problems.slice(0, 10));
     log?.(`Plan attempt ${attempt} rejected: ${problems.join('; ')}`);
     const fix = `The plan is invalid:\n- ${problems.join('\n- ')}\nFix these and call submit_plan again.`;
     messages.push({ role: 'user', content: use ? [{ type: 'tool_result', tool_use_id: use.id, is_error: true, content: fix }] : fix });
   }
-  throw new Error('planner could not produce a valid plan after 3 attempts');
+  throw Object.assign(new Error('planner could not produce a valid plan after 3 attempts'), { code: 'invalid_plan' });
+}
+
+const TOOL_NAMES = new Set(AGENT_TOOLS.map((t) => t.name));
+// Files a text-only agent has no way to produce: no image, audio, video or document tool exists.
+const BINARY_OUTPUT = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?|psd|pdf|mp3|wav|ogg|mp4|mov|webm|zip)$/i;
+// Commands that start something long-running in the foreground. As a check they never exit, so they can only time out.
+const FOREGROUND = [
+  /^docker\s+run\b(?!.*\s(-d|--detach)\b)/,
+  /^docker(-|\s+)compose\s+up\b(?!.*\s(-d|--detach)\b)/,
+  /^(npm|pnpm|yarn)\s+(run\s+)?(start|dev|serve|preview)\b/,
+  /^node\s+(\S*\/)?(server|app|index|main)\.[cm]?js\s*$/,
+  /^python3?\s+-m\s+http\.server\b/,
+  /^(npx\s+)?(serve|http-server|nodemon)\b/,
+  /^(flask\s+run|uvicorn|gunicorn)\b/,
+];
+const backgrounded = (seg) => /(^|[^&])&\s*($|[^&])/.test(seg);
+const isForeground = (seg) => !backgrounded(seg) && FOREGROUND.some((re) => re.test(seg.trim()));
+// A request to a local server. Nothing is running while checks run, unless the same command started it in the background
+// (the factory's own deploy check starts the app and probes its health path).
+const needsServer = (seg) => /^(curl|wget|http)\b.*\b(localhost|127\.0\.0\.1|0\.0\.0\.0)\b/.test(seg.trim());
+
+/**
+ * Repair one verify command. Returns { cmd } (possibly changed) or { cmd: null } to drop it, with `why` when it changed.
+ * - a tool name used as a command (`run_command npm test`, `write_file PRD.md`) becomes the shell command it meant;
+ * - in a `&&` chain, a foreground server and everything after it (which needs that server) is cut; the rest is kept.
+ */
+export function repairCommand(command) {
+  let cmd = String(command || '').trim();
+  const tool = cmd.match(/^([a-z_]+)\b\s*(.*)$/s);
+  if (tool && TOOL_NAMES.has(tool[1])) {
+    const rest = tool[2].trim().replace(/^[:(]\s*/, '').replace(/\)\s*$/, '').replace(/^(\x22|\x27|\x60)(.*)\1$/s, '$2').trim();
+    if (tool[1] === 'run_command' && rest) cmd = rest;
+    else if ((tool[1] === 'read_file' || tool[1] === 'write_file') && /^[\w./@-]+$/.test(rest)) return { cmd: `test -s ${rest}`, why: `"${command}" is a tool name, not a shell command; checking the file instead` };
+    else return { cmd: null, why: `"${command}" is a tool name, not a shell command` };
+  }
+  if (/;|\|\|/.test(cmd)) return isForeground(cmd.split(/;|\|\|/)[0]) ? { cmd: null, why: `"${command}" starts a server in the foreground, so it could only time out` } : { cmd, ...(cmd !== command ? { why: `"${command}" → "${cmd}"` } : {}) };
+  const segs = cmd.split('&&').map((s) => s.trim());
+  const server = segs.findIndex((s) => needsServer(s));
+  if (server !== -1 && !segs.slice(0, server).some(backgrounded)) {
+    const kept = segs.slice(0, server).filter((x) => !isForeground(x)).join(' && ');
+    return { cmd: kept || null, why: `"${command}" needs a running server, and none runs while checks run (the deploy check starts the app and probes it)${kept ? `; kept "${kept}"` : ''}` };
+  }
+  const cut = segs.findIndex(isForeground);
+  if (cut === -1) return cmd === String(command).trim() ? { cmd } : { cmd, why: `"${command}" is a tool name; running "${cmd}"` };
+  const kept = segs.slice(0, cut).join(' && ');
+  return { cmd: kept || null, why: `"${command}" starts a server in the foreground, so it could only time out${kept ? `; kept "${kept}"` : ''}` };
+}
+
+/**
+ * Repair plan defects that make a task impossible to verify, whatever model does the work. Every one of these was seen in
+ * real local-model plans: verify commands that are tool names, foreground servers as checks (`docker run -p …`), image
+ * outputs no agent can produce, a "final verification" pseudo-task, and (new apps) no final checks or no start command.
+ * Returns { plan, repairs } with one line per change; validatePlan still decides afterwards.
+ */
+export function repairPlan(plan, { existing = false } = {}) {
+  const repairs = [];
+  const fixList = (list, where) => {
+    const out = [];
+    for (const c of list || []) {
+      const r = repairCommand(c);
+      if (r.why) repairs.push(`${where}: ${r.why}`);
+      if (r.cmd && !out.includes(r.cmd)) out.push(r.cmd);
+    }
+    return out;
+  };
+  let tasks = plan.tasks.map((t) => ({ ...t }));
+  for (const t of tasks) {
+    const dropped = (t.outputs || []).filter((o) => BINARY_OUTPUT.test(o));
+    if (dropped.length) {
+      t.outputs = t.outputs.filter((o) => !dropped.includes(o));
+      t.verify = (t.verify || []).filter((v) => !dropped.some((o) => v.includes(o)));
+      repairs.push(`task "${t.id}": agents cannot produce ${dropped.join(', ')} (no image or media tool); removed from its outputs and checks`);
+    }
+    t.verify = fixList(t.verify, `task "${t.id}"`);
+  }
+  let finalVerify = fixList(plan.finalVerify, 'finalVerify');
+  // A task that only re-runs the final checks belongs in finalVerify; as a task it blocks on everything and proves nothing new.
+  const pseudo = tasks.filter((t) => (/^final[\s_-]*(verif|check|test)/i.test(t.id) || /^(run\s+)?(the\s+)?final\s+(verification|checks?)$/i.test(t.title)) && !(t.outputs || []).length);
+  for (const p of pseudo) {
+    tasks = tasks.filter((t) => t !== p);
+    for (const t of tasks) if (t.dependsOn.includes(p.id)) t.dependsOn = [...new Set([...t.dependsOn.filter((d) => d !== p.id), ...p.dependsOn])];
+    for (const v of p.verify) if (!finalVerify.includes(v)) finalVerify.push(v);
+    repairs.push(`task "${p.id}" only re-ran the final checks; its commands were moved to finalVerify`);
+  }
+  let deploy = plan.deploy;
+  if (!existing) {
+    if (!finalVerify.length) {
+      finalVerify = ['npm test'];
+      repairs.push('finalVerify was empty; using "npm test"');
+    }
+    if (!deploy?.start || /^docker\b/.test(deploy.start)) {
+      repairs.push(deploy?.start ? `deploy.start "${deploy.start}" does not honour PORT; using "npm start"` : 'deploy.start was missing; using "npm start"');
+      deploy = { start: 'npm start', healthPath: deploy?.healthPath || '/' };
+    }
+  }
+  return { plan: { ...plan, tasks, finalVerify, deploy }, repairs };
+}
+
+/**
+ * The factory's own plan for a new app, used when the planner model cannot produce a valid one. It is the shape every good
+ * plan for a new app has (PRD → app → UI/QA/DevOps → README) with checks the factory knows are runnable; the agents still
+ * get the run's rules (AppPort, stack) and the user's idea, so only the decomposition is fixed, not the product.
+ */
+export function standardPlan(run) {
+  const idea = String(run.inputs?.idea || '').trim();
+  const name = idea.split('\n')[0].replace(/^(an?|the)\s+/i, '').slice(0, 60) || 'App';
+  const task = (id, role, title, description, dependsOn, acceptance, verify, outputs = []) => ({ id, role, title, description, dependsOn, acceptance, verify, outputs, files: [] });
+  return {
+    product: {
+      name: name.charAt(0).toUpperCase() + name.slice(1),
+      summary: idea,
+      users: [],
+      successCriteria: ['The core flows in the request work through the UI and the HTTP API', 'npm test passes and covers those flows', 'The app starts with npm start and honours PORT'],
+    },
+    tasks: [
+      task('prd', 'product', 'Write the PRD', `Write PRD.md for this request: users, the core flows, the data model, the HTTP API, and testable acceptance criteria. Keep it short and concrete.\n\nRequest: ${idea}`, [], ['PRD.md lists the users, core flows, data model, API and acceptance criteria'], ['test -s PRD.md'], ['PRD.md']),
+      task('app', 'engineer', 'Build the server, store and API', 'Implement the app from PRD.md: package.json (scripts "start" honouring PORT and "test"), the data store, the HTTP API and the tests for it (node:test). Follow the workspace and stack rules. Run npm test before finishing.', ['prd'], ['npm test passes', 'npm start serves the API on PORT'], ['npm test']),
+      task('ui', 'design', 'Build the web UI', 'Build the browser UI as static files in public/ served by the app: every core flow from PRD.md, accessible and responsive. Call the API with relative URLs. Keep npm test passing.', ['app'], ['public/index.html implements the core flows', 'npm test still passes'], ['test -s public/index.html', 'npm test'], ['public/index.html']),
+      task('qa', 'qa', 'Test the success criteria', 'Add tests that prove each acceptance criterion in PRD.md, including edge cases; fix real defects you find. Never weaken a test to make it pass.', ['app'], ['npm test passes and covers every acceptance criterion'], ['npm test']),
+      task('devops', 'devops', 'Make it deployable', 'Add a Dockerfile that runs npm start and honours PORT, and DEPLOY.md with how to configure, run and health-check the app.', ['app'], ['Dockerfile and DEPLOY.md exist and match the app'], ['test -s Dockerfile', 'test -s DEPLOY.md'], ['Dockerfile', 'DEPLOY.md']),
+      task('readme', 'product', 'Write the README', 'Write README.md: what the app does, how to install, run (PORT), test and deploy it, and its API. Describe only what was actually built.', ['ui', 'qa', 'devops'], ['README.md documents running, testing and the API'], ['test -s README.md'], ['README.md']),
+    ],
+    architecture: '',
+    affectedFiles: [],
+    risks: ['This is the factory\'s standard plan: the planner model did not produce a valid plan for this request.'],
+    openQuestions: [],
+    finalVerify: ['npm test'],
+    deploy: { start: 'npm start', healthPath: '/' },
+  };
 }
 
 /** A plan object written as JSON in the model's text (bare, or wrapped as {"plan": …} / {"input": …}), or null. */
@@ -355,24 +499,55 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
   const commandsRun = [];
 
   const budget = historyBudget(provider, system, AGENT_TOOLS);
+  let idle = 0; // consecutive replies that neither called a tool nor wrote a file
+  let fromReply = false; // the last tool calls were taken from files written in the reply
 
   for (let turn = 1; turn <= settings.maxAgentTurns; turn++) {
     if (signal?.aborted) return { ok: false, error: 'cancelled' };
     const res = await call(provider, { system, messages: compactHistory(messages, budget), tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run), stack: run.settings?.stack } }, track);
-    messages.push({ role: 'assistant', content: res.content });
+    const content = [...res.content];
+    messages.push({ role: 'assistant', content });
 
     for (const block of res.content) {
       if (block.type === 'text' && block.text.trim()) emit('agent.message', { taskId: task.id, role: task.role, text: redact(block.text.trim()).slice(0, 2000) });
     }
-    const uses = res.content.filter((c) => c.type === 'tool_use');
+    let uses = content.filter((c) => c.type === 'tool_use');
+    fromReply = false;
+    if (uses.length === 0 && res.stop_reason !== 'max_tokens') {
+      // Small models often write a file as a code block under its path instead of calling write_file. Those blocks become
+      // write_file calls (the same tool, through execTool and the Workspace); nothing else in a reply is ever executed.
+      const files = filesFromReply(content.filter((c) => c.type === 'text').map((c) => c.text).join('\n'));
+      if (files.length) {
+        uses = files.map((f, i) => ({ type: 'tool_use', id: `reply_${turn}_${i}`, name: 'write_file', input: f }));
+        content.push(...uses);
+        fromReply = true;
+        emit('log', { level: 'warn', text: `${task.id}: the model wrote ${files.map((f) => f.path).join(', ')} in its reply instead of calling write_file; saved through write_file.` });
+      }
+    }
     if (uses.length === 0) {
       if (res.stop_reason === 'max_tokens') {
         messages.push({ role: 'user', content: 'Your reply was cut off. Continue, writing large files in smaller pieces if needed.' });
-      } else {
-        messages.push({ role: 'user', content: 'Continue the task using the tools, and call complete_task when it is done and verified.' });
+        continue;
       }
+      idle += 1;
+      // A model that keeps describing actions without taking them. If it already did work and the task has checks, hand the
+      // attempt to the factory's verification (which decides, as for any attempt); otherwise stop early instead of looping.
+      const worked = filesTouched.size > 0 || commandsRun.some((c) => c.exitCode === 0);
+      if (idle >= 3 && worked && (task.verify?.length || task.outputs?.length)) {
+        const said = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim().slice(0, 600);
+        emit('log', { level: 'warn', text: `${task.id}: the model stopped calling tools after doing work and never called complete_task; the factory is verifying what it produced.` });
+        return { ok: true, result: { ...completionFields({ summary: `[Not formally completed: the model stopped calling tools after ${turn} turns without calling complete_task. The factory's checks decide.] ${said}` }, filesTouched), commandsRun, turns: turn, implicit: true } };
+      }
+      if (idle >= 6) return { ok: false, error: `the model replied ${idle} times in a row without calling a tool (it described actions instead of taking them)` };
+      messages.push({
+        role: 'user',
+        content: idle === 1
+          ? 'Continue the task using the tools, and call complete_task when it is done and verified.'
+          : 'You described an action but did not call a tool, so nothing happened. Writing about a tool, or a code block, does nothing. Call the tool itself now: write_file with {"path": "…", "content": "…"} to save a file, run_command to run something, or complete_task with {"summary": "…", "files": […]} if the task is done.',
+      });
       continue;
     }
+    idle = 0;
 
     const results = [];
     let completion = null;
@@ -396,7 +571,8 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
         exitCode: out.exitCode,
         durationMs: out.durationMs,
       });
-      results.push({ type: 'tool_result', tool_use_id: use.id, content: out.text.slice(0, 12_000), ...(out.isError ? { is_error: true } : {}) });
+      const note = fromReply && !out.isError ? ' (saved from the code block in your reply; call write_file yourself next time, then complete_task when the task is done)' : '';
+      results.push({ type: 'tool_result', tool_use_id: use.id, content: `${out.text.slice(0, 12_000)}${note}`, ...(out.isError ? { is_error: true } : {}) });
     }
     messages.push({ role: 'user', content: results });
     if (completion) {
@@ -404,6 +580,34 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
     }
   }
   return { ok: false, error: `agent did not finish within ${settings.maxAgentTurns} turns` };
+}
+
+const SHELL_FENCE = /^(bash|sh|shell|zsh|console|terminal|cmd|powershell|text|plaintext|output)$/i;
+// A line that names exactly one relative file path: `### public/index.html`, `**src/app.js**`, `File: test/a.test.js`, `` `x.css`: ``.
+const PATH_LINE = /^(?:#{1,6}\s*|[-*]\s+)?(?:\*\*|__)?\s*(?:(?:file(?:name)?|path)\s*:\s*)?[\x60\x27\x22]?([\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,10})[\x60\x27\x22]?\s*(?:\*\*|__)?\s*:?\s*$/i;
+
+/**
+ * Files a model wrote in a text reply instead of calling write_file: each fenced code block directly under a line that names
+ * one relative path. Shell-command blocks, empty blocks, absolute paths and `..` are ignored; a path named twice keeps the last
+ * block. Returns [{ path, content }] for write_file, which (through the Workspace) still decides whether the path is allowed.
+ */
+export function filesFromReply(text = '') {
+  const lines = String(text).split('\n');
+  const out = new Map();
+  for (let i = 0; i < lines.length; i++) {
+    const open = lines[i].match(/^\s*(\x60{3,}|~{3,})\s*([\w+#.-]*)/);
+    if (!open) continue;
+    let end = i + 1;
+    while (end < lines.length && !lines[end].trim().startsWith(open[1])) end++;
+    let j = i - 1;
+    while (j >= 0 && !lines[j].trim()) j--;
+    const named = j >= 0 && lines[j].trim().match(PATH_LINE);
+    const body = lines.slice(i + 1, end).join('\n');
+    const filePath = named?.[1];
+    if (filePath && body.trim() && !filePath.startsWith('/') && !filePath.split('/').includes('..') && (!SHELL_FENCE.test(open[2]) || /\.(sh|bash)$/.test(filePath))) out.set(filePath, `${body.replace(/\s+$/, '')}\n`);
+    i = end;
+  }
+  return [...out].map(([path, content]) => ({ path, content }));
 }
 
 export async function execTool(ws, use, { settings, signal }) {
