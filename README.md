@@ -605,6 +605,50 @@ and the task has checks, its attempt goes to the factory's verification marked *
 as for every attempt). Six tool-less replies in a row end the attempt instead of using up all its turns. Checks that need a
 server nobody started (`curl localhost:…`) are repaired out of the plan; the deploy check runs the app and probes it instead.
 
+### The application specification and the technology catalog
+
+Every run carries an **application specification** (`run.spec`, `src/appspec.js`, version 1): architecture, frontend and
+tooling, languages, runtimes, backend, data, capabilities (AppPort first), production and testing requirements, constraints,
+requested changes and an optional capability model. New applications and existing projects use the same shape, the same
+validator and the same AppPort contract and gate. A run keeps four things apart:
+
+| | what it is | where |
+| --- | --- | --- |
+| desired | what was asked for; never evidence | `run.spec.desired` |
+| observed | what the repository's files show, each with its basis (manifest entry or file) | `run.spec.observed` (existing projects, before planning) |
+| plan | keep / already present / add / observe, computed before any task runs | `run.spec.plan` |
+| evidence | what verification established per requested technology: verified, present (presence-only checks), failed, not verified | `run.spec.evidence` and the `spec` checklist item |
+
+Options come from **`templates/catalog.json`** (data, no code): id, category, status (*supported*, *constrained* with its
+constraint, or *planned* with its blocker and next step), prerequisites and conflicts, how it is generated (offline template
+or model agents), whether it can be integrated into an existing project, its verification, and how it is detected. Package
+pins stay in `templates/stack.json` (React, Vite and TypeScript were added there after a verified install, typecheck and
+build); a catalog entry names its stack component. Profiles (*Quick prototype*, *Production web application*, *Python
+backend*, *Multi-service*, *Existing application enhancement*) are presets over the spec; editing one simply makes a
+custom spec. Adding a technology means adding its catalog entry (and its stack component, rules and verification): the
+selector renders from the catalog.
+
+New run → **Application** shows the profiles, a searchable, grouped selector with each option's status and why it cannot
+be chosen, the whole stack at a glance, and a review (architecture, selected technologies, capabilities, what an existing
+project keeps, what will be added, every problem with its resolution). Validation is deterministic and runs before
+anything starts; for an existing project it runs again after the repository is observed, and a requested integration the
+repository cannot take (for example AppPort in a Python project) stops the run before any change. Nothing is silently
+dropped, downgraded or replaced by the default app.
+
+For an existing project the default is to keep everything and **observe** AppPort (reported, never claimed); selecting
+AppPort adopts it with the same rules and the same conformance gate as a new app. The gate starts the app, so it runs only
+when the run authorized a local preview; otherwise AppPort is reported as *not verified*.
+
+```sh
+da-prompt catalog                       # options and profiles (--all shows blockers, --category frontend)
+da-prompt spec check --profile production-web
+da-prompt spec check --spec app.json --project prj_abc   # detects what the project has first
+da-prompt run "A reading list" --new --profile production-web
+```
+
+API: `GET /api/catalog`, `POST /api/spec/validate` (`{ spec, source?, provider? }` → diagnostics, option states, summary,
+plan preview), and `spec` on `POST /api/runs` (instead of the older `settings.stack`, which still works and becomes a spec).
+
 ### Using a hosted provider (no local model needed)
 
 Nothing in the factory requires Ollama: it is one provider among those above, and it is only the *automatic* default when no

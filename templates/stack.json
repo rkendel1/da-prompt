@@ -1,5 +1,5 @@
 {
-  "comment": "The product stack a NEW generated application can be built on: the single source for package names, exact published versions, what each component requires, whether it is supported, and the rules agents are given. Read by src/stack.js (factory, gate, prompts) and src/providers/offline.js (templates). Versions were verified against the npm registry; unsupported components record the verified blocker and the next step.",
+  "comment": "The product stack a NEW generated application can be built on: the single source for package names, exact published versions, what each component requires, whether it is supported, and the rules agents are given. Read by src/stack.js (factory, gate, prompts; the technology catalog in templates/catalog.json refers to these components by id for every pinned package) and src/providers/offline.js (templates). Versions were verified against the npm registry; unsupported components record the verified blocker and the next step.",
   "install": "npm install --no-audit --no-fund --ignore-scripts --prefer-offline",
   "default": [
     "appport"
@@ -66,6 +66,67 @@
         "Test in test/distribution.test.js: publish, verify, a tampered manifest is rejected, wrong artifact bytes are rejected, and a release signed by another key is rejected."
       ]
     },
+    "react": {
+      "label": "React",
+      "summary": "React UI components, bundled for the browser (with Vite).",
+      "status": "supported",
+      "requires": [
+        "vite"
+      ],
+      "dependencies": {
+        "react": "19.3.1",
+        "react-dom": "19.3.1"
+      },
+      "devDependencies": {
+        "@vitejs/plugin-react": "6.1.2",
+        "@types/react": "19.3.0",
+        "@types/react-dom": "19.3.0"
+      },
+      "packages": [
+        "react",
+        "react-dom",
+        "@vitejs/plugin-react",
+        "@types/react",
+        "@types/react-dom"
+      ],
+      "rules": [
+        "React UI (selected): the browser UI is React 19 (react, react-dom; react-dom/client createRoot). Its source lives in web/ (web/index.html loading ./src/main.jsx or ./src/main.tsx); there is no other UI. Call the API with relative URLs (fetch('api/items')). Keep components small and accessible (labels, focus, contrast)."
+      ]
+    },
+    "vite": {
+      "label": "Vite",
+      "summary": "Frontend build tooling: bundles web/ into public/, which the app's server serves.",
+      "status": "supported",
+      "requires": [],
+      "dependencies": {},
+      "devDependencies": {
+        "vite": "8.3.4"
+      },
+      "packages": [
+        "vite"
+      ],
+      "rules": [
+        "Vite (selected): vite.config (js or ts) with root: 'web', base: './', build: { outDir: '../public', emptyOutDir: true } (and the React plugin from @vitejs/plugin-react when React is selected). package.json scripts.build is \"vite build\"; the server serves the built public/ exactly as before (no dev server, no second server in production). Build output is generated: list public/ in .gitignore. npm test must not depend on a build, and the factory runs npm run build itself and checks public/index.html."
+      ]
+    },
+    "typescript": {
+      "label": "TypeScript",
+      "summary": "Type-checked source with tsc --noEmit (the UI is TypeScript compiled by Vite).",
+      "status": "supported",
+      "requires": [
+        "vite"
+      ],
+      "dependencies": {},
+      "devDependencies": {
+        "typescript": "7.0.2"
+      },
+      "packages": [
+        "typescript"
+      ],
+      "rules": [
+        "TypeScript (selected): the UI source is TypeScript (web/src/*.ts, *.tsx) compiled by Vite; the Node server stays ESM JavaScript run by node directly (no build step to start it). tsconfig.json: strict true, noEmit true, moduleResolution \"Bundler\", jsx \"react-jsx\" when React is selected, skipLibCheck true, include [\"web/src\"]. package.json scripts.typecheck is \"tsc --noEmit -p .\" and must exit 0."
+      ]
+    },
     "authboundry": {
       "label": "AuthBoundry",
       "summary": "Authentication, authorization and delegation as an authority boundary.",
@@ -78,7 +139,7 @@
         "@authboundry/bridge": "0.1.3"
       },
       "blocker": "The AuthBoundry authority server could not be verified: `authboundry init` and its FeltDB session bridge work, but `authboundry serve` (1.15.3, linux-x64, with and without --upstream, with AUTHBOUNDRY_FELTDB_PATH set) never opened its listening port and produced no output. @authboundry/core 1.15.3 also pins @feltdb/core 0.11.5 and @appport/services 0.3.2 exactly, which conflict with this stack's FeltDB 0.11.9.",
-      "next": "Verify the exact `authboundry serve` invocation, environment and bridge lifecycle on a supported machine; capture a sign-in \u2192 /auth/session \u2192 /auth/authorize grant and denial round trip; and resolve the pinned @feltdb/core / @appport/services versions. Then add AuthBoundry as its own tested increment."
+      "next": "Verify the exact `authboundry serve` invocation, environment and bridge lifecycle on a supported machine; capture a sign-in → /auth/session → /auth/authorize grant and denial round trip; and resolve the pinned @feltdb/core / @appport/services versions. Then add AuthBoundry as its own tested increment."
     },
     "services": {
       "label": "AppPort Services",

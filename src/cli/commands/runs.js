@@ -47,6 +47,8 @@ export const RUN_OPTIONS = {
   'pax-steps': { type: 'string', valueName: 'LIST', description: 'Comma-separated PAX steps (info,doctor,reality,drift,graph,test-plan,test).' },
   deploy: { type: 'boolean', description: 'Authorize a local preview of the result.' },
   stack: { type: 'string', valueName: 'IDS', description: 'New apps only: product stack components, comma-separated (AppPort is always included), e.g. feltdb or distribution. See: da-prompt stack' },
+  spec: { type: 'string', valueName: 'FILE', description: 'An application specification (JSON) for a new app or an existing project. See: da-prompt catalog, da-prompt spec check' },
+  profile: { type: 'string', valueName: 'ID', description: 'Start from a catalog profile (e.g. production-web); combine with --spec to customize. See: da-prompt catalog' },
   'appport-exception': { type: 'string', valueName: 'REASON', description: 'New apps only: do not require an AppPort capability boundary, for the stated reason (recorded in the run).' },
   'allow-install': { type: 'boolean', description: 'Allow dependency installs (they run project scripts).' },
   'auto-apply': { type: 'boolean', description: 'Local directory runs: apply the result to your directory automatically when it is verified and ready.' },
@@ -59,6 +61,20 @@ export const RUN_OPTIONS = {
   'cancel-on-interrupt': { type: 'boolean', description: 'Ctrl-C cancels the run instead of just detaching.' },
   verbose: { type: 'boolean', short: 'v', description: 'Show agent messages and every tool call.' },
 };
+
+/** The application specification from --spec FILE and/or --profile ID (the file's own fields win over the profile's). */
+export function readSpecOption(opts) {
+  if (!opts.spec && !opts.profile) return null;
+  let spec = {};
+  if (opts.spec) {
+    try {
+      spec = JSON.parse(fs.readFileSync(opts.spec, 'utf8'));
+    } catch (e) {
+      throw usageError(`--spec ${opts.spec}: ${e.code === 'ENOENT' ? 'no such file' : `not valid JSON (${e.message})`}`);
+    }
+  }
+  return opts.profile ? { ...spec, profile: opts.profile } : spec;
+}
 
 export async function startRun(ctx, { forceNew = false } = {}) {
   const { out, opts, args } = ctx;
@@ -90,7 +106,10 @@ export async function startRun(ctx, { forceNew = false } = {}) {
     if (!opts['appport-exception'].trim()) throw usageError('--appport-exception needs a reason.');
     settings.appportException = opts['appport-exception'];
   }
+  const spec = readSpecOption(opts);
+  if (spec && (settings.stack || settings.appportException)) throw usageError('Use either --spec/--profile or --stack/--appport-exception, not both.');
   const body = {
+    ...(spec ? { spec } : {}),
     idea: task,
     requirements: opts.requirements,
     stack: opts.stack,

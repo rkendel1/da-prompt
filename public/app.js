@@ -1,5 +1,6 @@
 // da-prompt factory UI. No framework: hash routing, fetch, EventSource.
 import { mountModelPicker, renderProvidersPage } from './providers.js';
+import { mountAppSpec } from './appspec.js';
 import { renderTerminalPage } from './terminal.js';
 import { renderProjectsPage } from './projects.js';
 import { renderChatPage } from './chat.js';
@@ -177,7 +178,7 @@ function renderNew({ project: preselect = '' } = {}) {
     const err = $('#form-error');
     err.hidden = true;
     const btn = form.querySelector('button[type=submit]');
-    const missing = project.validate(new FormData(form)) || (project.mode() === 'new' ? stack.validate() : '');
+    const missing = project.validate(new FormData(form)) || (await stack.validate());
     if (missing) {
       err.textContent = missing;
       err.hidden = false;
@@ -195,6 +196,7 @@ function renderNew({ project: preselect = '' } = {}) {
       tools: fd.get('tools'),
       repoUrl: project.mode() === 'new' ? fd.get('repoUrl') || undefined : undefined,
       source: project.source(fd),
+      spec: stack.spec(),
       outputDir: fd.get('outputDir') || undefined,
       settings: {
         maxParallel: Number(fd.get('maxParallel')),
@@ -203,7 +205,6 @@ function renderNew({ project: preselect = '' } = {}) {
         deploy: fd.get('deploy') === 'on',
         pax: fd.get('pax') === 'on',
         standardPlanOnFailure: choice.standardPlanOnFailure !== false,
-        ...(project.mode() === 'new' ? stack.settings() : {}),
       },
     };
     try {
@@ -296,38 +297,42 @@ function mountNewRunExtras(form, picker, project) {
  * unsupported ones are shown with their blocker instead of being selectable. AppPort is on by default: unticking it needs a
  * reason, sent as the run's AppPort exception (the factory refuses a new app without AppPort and without a reason).
  */
+// The application selector (public/appspec.js): the same specification for a new application and an existing project.
 function mountStackPicker(form, project) {
   const box = $('#stack-opt');
-  const choices = $('#stack-choices');
-  const reason = $('#appport-reason');
-  const appportOn = () => choices.querySelector('input[name=stackComponent][value=appport]')?.checked !== false;
-  const sync = () => {
-    box.hidden = project.mode() !== 'new';
-    reason.hidden = appportOn();
+  const sel = mountAppSpec($('#appspec'), api, {
+    lifecycle: () => (project.mode() === 'new' ? 'new' : 'existing'),
+    source: () => {
+      try {
+        return project.source(new FormData(form)) || null;
+      } catch {
+        return null;
+      }
+    },
+    provider: () => $('#pk-provider')?.value || '',
+    idea: () => form.idea.value,
+  });
+  // A different source or provider can change what is detected and what can be built: check again (debounced).
+  let timer;
+  const later = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!box.isConnected) return; // the user left New run
+      $('#appspec-mode').textContent = project.mode() === 'new' ? 'new application' : 'existing project: what it has is detected, you choose what to add';
+      sel.refresh();
+    }, 250);
   };
-  form.addEventListener('change', sync);
-  sync();
-  api('api/stack')
-    .then(({ components, default: defaults }) => {
-      choices.innerHTML = components
-        .map((c) => {
-          const on = c.required || defaults.includes(c.id);
-          const disabled = c.status !== 'supported';
-          const pkgs = Object.entries(c.packages || {}).map(([k, v]) => `${k}@${v}`).join(', ');
-          const note = c.status === 'supported' ? (c.required ? 'on by default; unticking it needs a reason' : '') : `not supported yet: ${c.blocker} Next: ${c.next}`;
-          return `<label class="field check stack-choice${c.status === 'supported' ? '' : ' unsupported'}" title="${esc(pkgs)}"><input type="checkbox" name="stackComponent" value="${esc(c.id)}"${on ? ' checked' : ''}${disabled ? ' disabled' : ''}> <span><b>${esc(c.label)}</b> — ${esc(c.summary)}${note ? ` <small class="muted">${esc(note)}</small>` : ''}</span></label>`;
-        })
-        .join('');
-      sync();
-    })
-    .catch(() => {
-      choices.textContent = 'The stack options could not be loaded; the default stack (AppPort) will be used.';
-    });
-  const selected = () => [...choices.querySelectorAll('input[name=stackComponent]')].filter((i) => i.checked).map((i) => i.value);
+  form.addEventListener('change', (e) => {
+    if (!box.contains(e.target)) later();
+  });
   return {
-    selected,
-    validate: () => (!appportOn() && !form.appportException.value.trim() ? 'Say why this app should not expose an AppPort boundary, or tick AppPort again.' : ''),
-    settings: () => (appportOn() ? { stack: selected() } : { stack: selected(), appportException: form.appportException.value.trim() }),
+    ready: sel.ready,
+    validate: async () => {
+      clearTimeout(timer);
+      await sel.sync();
+      return sel.validate();
+    },
+    spec: () => sel.spec(),
   };
 }
 
@@ -839,6 +844,37 @@ async function taskAction(taskId, action, body = {}) {
   }
 }
 
+// Application specification ----------------------------------------------------------------
+// Requested (what was asked), detected (what the repository's files show, with the basis), result (what verification
+// established). Names come from the catalog; nothing here decides anything.
+let catalogCache = null;
+const catalogName = (id) => catalogCache?.entries.find((e) => e.id === id)?.name || id;
+const EVIDENCE_LABEL = { verified: ['completed', 'verified'], present: ['completed', 'present'], 'nothing-to-verify': ['skipped', 'nothing to verify'], failed: ['failed', 'failed'], 'not-verified': ['needs_attention', 'not verified'] };
+function specCard(run) {
+  const sp = run.spec;
+  if (!sp?.desired) return '';
+  if (!catalogCache) api('api/catalog').then((c) => { catalogCache = c; if (current?.tab === 'overview' && current.run?.id === run.id) renderRun(); }).catch(() => {});
+  const d = sp.desired;
+  const requested = new Set(Object.entries({ architecture: d.architecture, frontend: d.frontend, tooling: d.tooling, backend: d.backend }).map(([, v]) => v).filter(Boolean).concat(d.languages, d.runtimes, d.data, d.capabilities, d.production));
+  const before = new Map((sp.observed?.technologies || []).map((t) => [t.id, t.basis]));
+  const after = new Map((sp.evidence?.observed?.technologies || []).map((t) => [t.id, t.basis]));
+  const evidence = new Map((sp.evidence?.items || []).map((i) => [i.id, i]));
+  const ids = [...new Set([...requested, ...before.keys()])];
+  const plan = sp.plan?.items || [];
+  return `<div class="card spec-card"><h2>Application specification</h2>
+    <p class="mono">${esc(sp.summary || [...requested].map(catalogName).join(' | '))}</p>
+    <div class="table-scroll"><table class="plain"><thead><tr><th>technology</th><th>requested</th><th>detected</th><th>result</th></tr></thead><tbody>
+    ${ids.map((id) => {
+      const ev = evidence.get(id);
+      const [cls, lbl] = EVIDENCE_LABEL[ev?.state] || ['pending', requested.has(id) ? (run.executing ? 'pending' : 'not checked') : '—'];
+      const det = before.get(id) || after.get(id);
+      return `<tr><td>${esc(catalogName(id))}</td><td>${requested.has(id) ? 'yes' : '<span class="muted">no</span>'}</td><td>${det ? esc(det) : '<span class="muted">—</span>'}</td><td>${requested.has(id) ? `<span class="pill ${esc(cls)}" title="${esc((ev?.checks || []).map((c) => `${c.check}: ${c.state}`).join('; '))}">${esc(lbl)}</span>` : '<span class="muted">kept, not claimed</span>'}</td></tr>`;
+    }).join('')}</tbody></table></div>
+    ${plan.length && d.lifecycle === 'existing' ? `<h3>Plan (before any change)</h3><ul class="plain">${plan.map((i) => `<li><b>${esc(i.action)}</b> ${esc(i.detail)}</li>`).join('')}</ul>` : ''}
+    ${(sp.diagnostics || []).filter((x) => x.level !== 'error').map((x) => `<p class="hint">${esc(x.message)}</p>`).join('')}
+    <p class="hint">Requested is what was asked; detected is what the repository's files show; only the result column comes from verification.</p></div>`;
+}
+
 // Overview ---------------------------------------------------------------------------------
 function renderOverview(el, run, escalated) {
   const p = run.plan;
@@ -877,6 +913,7 @@ function renderOverview(el, run, escalated) {
           ${p ? `<h3>Success criteria</h3><ul class="plain">${p.product.successCriteria.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
           ${p?.product.users?.length ? `<h3 style="margin-top:14px">Users</h3><ul class="plain">${p.product.users.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
         </div>
+        ${specCard(run)}
         ${run.source ? sourceCard(run) + baselineCard(run) + verificationCard(run) : ''}
         ${run.summary ? `<div class="card md"><h2>Final summary</h2>${md(run.summary)}</div>` : ''}
         ${run.lessons?.length ? `<div class="card"><h2>Lessons (${run.source ? 'factory notes' : 'CLAUDE.md'})</h2><ul class="plain">${run.lessons.map((l) => `<li>${esc(l.text)}</li>`).join('')}</ul></div>` : ''}
