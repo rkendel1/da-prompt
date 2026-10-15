@@ -7,6 +7,7 @@ import { ROLES, validatePlan } from './graph.js';
 import { redact } from './security.js';
 import { extractJsonValues } from './providers/tooltext.js';
 import { compactHistory, historyBudget } from './providers/history.js';
+import { KIND_TEST_DEFINITION, KIND_INDEPENDENT_QA, sealedWriteGuard } from './testfirst.js';
 import { APPPORT_RULES, appportException } from './appport.js';
 import { stackRules, stackLabel } from './stack.js';
 import { specRules, planContext } from './appspec.js';
@@ -84,6 +85,8 @@ export const AGENT_TOOLS = [
         files: { type: 'array', items: { type: 'string' } },
         commands: { type: 'array', items: { type: 'string' } },
         nextSteps: { type: 'array', items: { type: 'string' } },
+        testFiles: { type: 'array', items: { type: 'string' }, description: 'QA test definition only: the test files that cover the acceptance criteria (new or already existing)' },
+        disputedTests: { type: 'array', items: { type: 'string' }, description: 'Tests you believe contradict the acceptance criteria, with why. Never edit them: they are QA-owned and will be reviewed.' },
       },
       required: ['summary', 'files'],
     },
@@ -161,6 +164,7 @@ Planning rules:
 - Fill architecture (how the relevant code is organised today) and affectedFiles. Put risks and open questions honestly.
 - Omit deploy unless the inventory says deployment is authorized for this run.
 - The application specification in the inventory is part of the request: plan its "Add" items with the smallest change that fits the existing code (for example a Dockerfile when Docker is added), and never replace what it lists as already present.
+- Test first: a QA task inspects the acceptance criteria and the existing tests BEFORE implementation (the implementation task depends on it) and adds only the missing tests; a QA task after the implementation independently verifies it. Reuse existing tests that already cover a criterion.
 - Maximise parallelism: only add a dependency when a task needs another task's output.
 ${existingRules(run, { plan: false })}`;
 }
@@ -173,6 +177,7 @@ You are acting in LAYER 1 (plan). Produce the plan by calling submit_plan exactl
 Planning rules:
 - 4–12 small tasks. Each has one owner role, a precise description, acceptance criteria and verify commands that exit 0 only when the task truly works.
 - Maximise parallelism: only add a dependency when a task needs another task's output.
+- Test first: success criteria and every task's acceptance criteria are the agreed behaviour. Include a QA task that defines the acceptance tests BEFORE implementation (implementation tasks depend on it) and a QA task after the implementation that independently verifies it. Do not plan QA that only re-runs what an engineer already ran.
 - Include: a product/PRD task, implementation tasks, a UI task if the product has a UI, a QA task that runs the full test suite, a devops task (start command, Dockerfile, DEPLOY.md), and a README task last.
 - finalVerify must run the full test suite. deploy.start must start the app honouring PORT; deploy.healthPath must return 2xx once it is up.
 - Agents only have a local shell and the workspace; do not plan for external services unless the inputs provide access.
@@ -420,6 +425,8 @@ export function normalizePlan(p = {}, { idea = '' } = {}) {
       outputs: arr(t.outputs),
       files: arr(t.files),
       verify,
+      ...([KIND_TEST_DEFINITION, KIND_INDEPENDENT_QA].includes(t.kind) ? { kind: t.kind } : {}),
+      ...(arr(t.baseline).length ? { baseline: arr(t.baseline) } : {}),
     };
   });
   for (const t of tasks) {
@@ -457,6 +464,8 @@ export function completionFields(completion, filesTouched = []) {
     files: [...new Set([...strings(c.files), ...filesTouched])].filter((f) => typeof f === 'string'),
     commands: strings(c.commands),
     nextSteps: strings(c.nextSteps),
+    ...(strings(c.testFiles).length ? { testFiles: strings(c.testFiles) } : {}),
+    ...(strings(c.disputedTests).length ? { disputedTests: strings(c.disputedTests).map((x) => redact(x.slice(0, 600))) } : {}),
   };
 }
 
@@ -468,6 +477,31 @@ ${ROLE_BRIEFS[task.role] || ROLE_BRIEFS.engineer}
 You are executing ONE task from the plan (LAYER 3). Other agents may be working on other files in parallel; stay within your task.
 ${rulesFor(run)}${project ? `\n\n${project}` : ''}
 ${lessons ? `\nLessons recorded in CLAUDE.md from earlier failures — follow them:\n${lessons}\n` : ''}`;
+}
+
+/** What the test-first contract asks of this task (see src/testfirst.js). Empty for plans without it. */
+export function testFirstBrief(run, task) {
+  const sealed = Object.keys(run.testContract?.sealed || {});
+  if (task.kind === KIND_TEST_DEFINITION) {
+    return ['', '## Test definition (QA, before any implementation)',
+      '- Derive tests from the acceptance criteria and the intended external behaviour, never from how it will be implemented.',
+      '- First read the existing tests. If they already cover a criterion, do NOT write a duplicate: rely on them. Add only what is missing: positive, negative, boundary and regression cases that apply.',
+      '- Do not write the implementation. The tests are expected to fail now because the behaviour does not exist yet.',
+      '- Run the tests once so you know how they fail, then call complete_task with testFiles: every test file that covers the criteria, new or existing.',
+      ...(task.baseline?.length ? [`- The factory will run these to record the baseline: ${task.baseline.map((b) => `\`${b}\``).join(', ')}`] : [])];
+  }
+  if (task.kind === KIND_INDEPENDENT_QA) {
+    return ['', '## Independent QA (after implementation)',
+      '- You verify; you do not trust the engineer\'s summary. Read the acceptance criteria, then run the tests that QA defined before implementation and judge the result yourself.',
+      '- Probe negative cases and boundaries the tests may not reach. Report a real defect plainly (what input, what happened, what was expected) and finish: the factory sends it back to the engineer. Do not fix the implementation yourself.',
+      '- You may add tests. You may not edit the QA-owned tests listed below.',
+      ...(sealed.length ? ['', 'QA-owned tests (sealed):', ...sealed.map((f) => `- ${f}`)] : [])];
+  }
+  if (sealed.length) {
+    return ['', '## QA-owned tests (sealed)', ...sealed.map((f) => `- ${f}`),
+      'These define the expected behaviour. Run them as often as you like, but never edit, delete or rename them: changes are detected, undone and fail your attempt. If one contradicts the acceptance criteria, list it in complete_task disputedTests with why and stop; it will be reviewed.'];
+  }
+  return [];
 }
 
 export function taskBrief(run, task, { attempt, maxAttempts, feedback, upstream }) {
@@ -487,6 +521,7 @@ export function taskBrief(run, task, { attempt, maxAttempts, feedback, upstream 
     lines.push('', '## Upstream results you can build on');
     for (const u of upstream) lines.push(`- ${u.id} (${u.role}): ${u.summary}${u.files?.length ? `\n  files: ${u.files.join(', ')}` : ''}`);
   }
+  lines.push(...testFirstBrief(run, task));
   if (feedback) {
     lines.push('', '## Previous attempt failed verification — read this first', feedback, '', 'Find the real root cause, make a focused fix, re-run the checks yourself, then call complete_task.');
   }
@@ -564,7 +599,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
         results.push({ type: 'tool_result', tool_use_id: use.id, content: 'Recorded. The factory will now verify your work.' });
         continue;
       }
-      const out = await execTool(ws, use, { settings, signal });
+      const out = await execTool(ws, use, { settings, signal, deny: sealedWriteGuard(run, task) });
       if (use.name === 'write_file' && !out.isError) filesTouched.add(out.path);
       if (use.name === 'run_command') commandsRun.push({ command: use.input?.command, exitCode: out.exitCode });
       emit('tool', {
@@ -616,7 +651,7 @@ export function filesFromReply(text = '') {
   return [...out].map(([path, content]) => ({ path, content }));
 }
 
-export async function execTool(ws, use, { settings, signal }) {
+export async function execTool(ws, use, { settings, signal, deny }) {
   const input = normalizeToolInput(use.name, use.input);
   try {
     switch (use.name) {
@@ -630,6 +665,8 @@ export async function execTool(ws, use, { settings, signal }) {
         return { text, preview: `${text.length} chars` };
       }
       case 'write_file': {
+        const why = deny?.(input.path);
+        if (why) return { text: `error: ${why}`, preview: why, isError: true };
         const r = await ws.writeFile(input.path, input.content);
         return { text: `wrote ${r.path} (${r.bytes} bytes)`, preview: `${r.bytes} bytes`, path: r.path };
       }

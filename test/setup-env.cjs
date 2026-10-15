@@ -6,6 +6,10 @@ for (const k of Object.keys(process.env)) {
   if ((/^(FACTORY_|DA_PROMPT_|ANTHROPIC_|OPENAI_|OPENROUTER_|GEMINI_|GROQ_|MISTRAL_|DEEPSEEK_|XAI_|TOGETHER_|OLLAMA_|LMSTUDIO_|LLAMACPP_|VLLM_|GITHUB_|GH_)/.test(k) || k === 'PORT' || k === 'HOST') && k !== 'DA_PROMPT_PAX_BIN') delete process.env[k];
 }
 
+// Test-first QA (src/testfirst.js) is on by default; the suite's older tests drive mock providers through one-task plans, so it
+// is off unless a test asks for it with settings.testFirst (test/test-first.test.js does).
+process.env.FACTORY_TEST_FIRST = '0';
+
 // Generated apps depend on the pinned @appport/* packages (src/appport.js): every test run of the factory installs them. One
 // npm cache for the whole suite (outside every test's data dir) means they are downloaded at most once per machine; installs
 // use --prefer-offline, so a warm cache needs no network.

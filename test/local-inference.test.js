@@ -214,7 +214,7 @@ const factoryFor = (ollama, extra = {}) => {
 test('a local model that writes its plan as text and its tool calls as XML completes a run on the built-in engine', async () => {
   const ollama = await localOllama();
   const { store, factory } = factoryFor(ollama);
-  const run = await factory.start((await factory.createRun({ idea: 'a hello file', provider: 'ollama', model: 'qwen3-coder:30b', settings: { deploy: false } })).id);
+  const run = await factory.start((await factory.createRun({ idea: 'a hello file', provider: 'ollama', model: 'qwen3-coder:30b', settings: { deploy: false, testFirst: false } })).id);
   // The plan, the tool calls and verification all worked (this tiny app has no README or deploy, so the run itself needs attention).
   const item = (id) => run.checklist.find((c) => c.id === id);
   assert.deepEqual([item('tasks').ok, item('tests').ok], [true, true], run.error || JSON.stringify(run.checklist));
@@ -281,7 +281,7 @@ test('the fx engine reaches a local model through the bridge: num_ctx, text tool
   const ollama = await localOllama();
   const fx = httpFx();
   const { store, factory } = factoryFor(ollama, { engineModules: { fx } });
-  const run = await factory.start((await factory.createRun({ idea: 'a hello file', provider: 'ollama', model: 'qwen3-coder:30b', engine: 'fx', providerOptions: { numCtx: 16384 }, settings: { deploy: false } })).id);
+  const run = await factory.start((await factory.createRun({ idea: 'a hello file', provider: 'ollama', model: 'qwen3-coder:30b', engine: 'fx', providerOptions: { numCtx: 16384 }, settings: { deploy: false, testFirst: false } })).id);
   // The plan, the tool calls and verification all worked (this tiny app has no README or deploy, so the run itself needs attention).
   const item = (id) => run.checklist.find((c) => c.id === id);
   assert.deepEqual([item('tasks').ok, item('tests').ok], [true, true], run.error || JSON.stringify(run.checklist));
@@ -304,7 +304,7 @@ test('the fx engine reaches a local model through the bridge: num_ctx, text tool
   });
   servers.push(broken);
   const b = factoryFor(broken, { engineModules: { fx } });
-  const failed = await b.factory.start((await b.factory.createRun({ idea: 'x', provider: 'ollama', model: 'm:7b', engine: 'fx', settings: { deploy: false, maxAttempts: 1 } })).id);
+  const failed = await b.factory.start((await b.factory.createRun({ idea: 'x', provider: 'ollama', model: 'm:7b', engine: 'fx', settings: { deploy: false, testFirst: false, maxAttempts: 1 } })).id);
   assert.notEqual(failed.status, 'completed');
   assert.ok(failed.plan, failed.error);
   assert.match(failed.plan.tasks[0].attempts[0].error, /^Model error: Ollama \(m:7b\): HTTP 400: model requires more system memory/);
@@ -442,7 +442,7 @@ test('a task whose required verification fails cannot make the run succeed', asy
   });
   servers.push(ollama);
   const { factory } = factoryFor(ollama);
-  const run = await factory.start((await factory.createRun({ idea: 'a', provider: 'ollama', model: 'q:7b', settings: { deploy: false, maxAttempts: 2 } })).id);
+  const run = await factory.start((await factory.createRun({ idea: 'a', provider: 'ollama', model: 'q:7b', settings: { deploy: false, testFirst: false, maxAttempts: 2 } })).id);
   const t = run.plan.tasks[0];
   assert.equal(t.status, 'escalated');
   assert.equal(t.attempts.length, 2);

@@ -51,6 +51,8 @@ export function loadConfig(overrides = {}) {
       maxAgentTurns: int('FACTORY_MAX_AGENT_TURNS', 40),
       tokenBudget: int('FACTORY_TOKEN_BUDGET', 2_000_000),
       commandTimeoutMs: int('FACTORY_COMMAND_TIMEOUT_MS', 180_000),
+      // Test-first QA for runs that do not say (FACTORY_TEST_FIRST=0 turns it off for the operator; a run's settings.testFirst wins).
+      testFirst: !/^(0|false|off|no)$/i.test(String(process.env.FACTORY_TEST_FIRST ?? '1')),
       // Existing-project runs: install dependencies (in the isolated workspace) and let agents install what they need.
       allowInstall: /^(1|true|on|yes)$/i.test(process.env.FACTORY_ALLOW_INSTALL || ''),
     },

@@ -6,6 +6,7 @@
 // the committed state of the source) or a working-tree copy ("snapshot": includes uncommitted files,
 // the only option for non-git folders) — and are handed back as a patch, an archive, a branch or a PR.
 
+import { isMissingDependency } from './testfirst.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -818,7 +819,7 @@ export async function runChecks(ws, commands, { timeoutMs, signal, onResult, ins
       status: r.exitCode === 0 ? 'passed' : r.exitCode === 126 && /^blocked:/m.test(r.stderr) ? 'blocked' : r.exitCode === 127 ? 'unavailable' : r.timedOut ? 'timeout' : 'failed',
       output: text.slice(-4000),
       signature: r.exitCode === 0 ? [] : failureSignature(text),
-      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) ? (installsAllowed ? 'dependencies or tools are still missing after the automatic install (see the install results above)' : 'dependencies or tools are missing in the workspace, and installing them is off for this run — re-run with dependency installs allowed') : null,
+      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) && isMissingDependency(text) ? (installsAllowed ? 'dependencies or tools are still missing after the automatic install (see the install results above)' : 'dependencies or tools are missing in the workspace, and installing them is off for this run — re-run with dependency installs allowed') : null,
     };
     out.push(entry);
     onResult?.(entry);
