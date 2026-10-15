@@ -2,16 +2,21 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../src/app.js';
 import { ItemStore } from '../src/store.js';
+import { tempDir } from './helpers.js';
 
 let server;
 let base;
+const store = new ItemStore({ path: tempDir() });
 
 before(async () => {
-  server = createApp({ store: new ItemStore() });
+  server = createApp({ store });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => new Promise((r) => server.close(r)));
+after(async () => {
+  await new Promise((r) => server.close(r));
+  await store.close();
+});
 
 const json = (method, path, body) =>
   fetch(base + path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });

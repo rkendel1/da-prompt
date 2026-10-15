@@ -59,25 +59,25 @@ export function createApp({ store = new ItemStore(), tokens } = {}) {
         return await serveStatic(res, url.pathname);
       }
       if (parts[1] === 'health' && parts.length === 2) {
-        return send(res, 200, { ok: true, name: APP_NAME, items: store.stats() });
+        return send(res, 200, { ok: true, name: APP_NAME, items: await store.stats() });
       }
       if (parts[1] === 'items' && parts.length === 2) {
-        if (req.method === 'GET') return send(res, 200, { items: store.list() });
-        if (req.method === 'POST') return send(res, 201, { item: store.create(await readJson(req)) });
+        if (req.method === 'GET') return send(res, 200, { items: await store.list() });
+        if (req.method === 'POST') return send(res, 201, { item: await store.create(await readJson(req)) });
         return send(res, 405, { error: 'method not allowed' });
       }
       if (parts[1] === 'items' && parts.length === 3) {
         const id = decodeURIComponent(parts[2]);
         if (req.method === 'GET') {
-          const item = store.get(id);
+          const item = await store.get(id);
           return item ? send(res, 200, { item }) : send(res, 404, { error: 'item not found' });
         }
         if (req.method === 'PATCH') {
-          const item = store.update(id, await readJson(req));
+          const item = await store.update(id, await readJson(req));
           return item ? send(res, 200, { item }) : send(res, 404, { error: 'item not found' });
         }
         if (req.method === 'DELETE') {
-          return store.remove(id) ? send(res, 204) : send(res, 404, { error: 'item not found' });
+          return (await store.remove(id)) ? send(res, 204) : send(res, 404, { error: 'item not found' });
         }
         return send(res, 405, { error: 'method not allowed' });
       }
@@ -92,9 +92,13 @@ export function createApp({ store = new ItemStore(), tokens } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
-  const server = createApp();
+  const store = new ItemStore();
+  const server = createApp({ store });
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
-  const stop = () => server.close(() => process.exit(0));
+  const stop = () => server.close(async () => {
+    await store.close();
+    process.exit(0);
+  });
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

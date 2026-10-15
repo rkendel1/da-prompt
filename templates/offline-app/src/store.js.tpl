@@ -63,4 +63,6 @@ export class ItemStore {
   remove(id) {
     return this.items.delete(id);
   }
+
+  close() {}
 {{STATS_METHOD}}}

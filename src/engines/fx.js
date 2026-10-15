@@ -51,7 +51,7 @@ export function makeFxRunner(cfg) {
       }
     };
     try {
-      bridge = await startBridge(provider, { token, meta: { task, attempt, inputs: run.inputs } });
+      bridge = await startBridge(provider, { token, meta: { task, attempt, inputs: run.inputs, stack: run.settings?.stack } });
       const model = await fx.createFxModel({ baseUrl: bridge.baseUrl, model: ep.model, apiKeyEnv: envName });
       const stop = () => queueMicrotask(() => state.turn?.cancel());
       const tools = AGENT_TOOLS.map((t) => ({

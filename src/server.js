@@ -22,6 +22,7 @@ import { TaskStore, TASK_ID_RE, STARTABLE, OPEN } from './tasks.js';
 import { ChatService, CONVERSATION_ID_RE, MESSAGE_ID_RE } from './chat.js';
 import { SOURCES } from './chat-context.js';
 import { engineStatus } from './engines/index.js';
+import { describeStack } from './stack.js';
 import { describeInference } from './contract.js';
 import { readRecords, summarizeRun } from './diagnostics.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
@@ -160,6 +161,7 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'tasks') return tasksApi(req, res, parts, url);
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'engines' && method === 'GET') return json(res, 200, { engines: await engineStatus(cfg), default: cfg.defaultEngine || 'builtin' });
+    if (parts[1] === 'stack' && parts.length === 2 && method === 'GET') return json(res, 200, describeStack());
     if (parts[1] === 'diagnostics' && parts[2] === 'inference' && method === 'GET') {
       // Offline preflight: configuration only. It never contacts a provider or sends a model request.
       const q = (k) => url.searchParams.get(k) || undefined;
@@ -318,7 +320,7 @@ export async function createServer(overrides = {}) {
         const body = await readBody(req);
         if (body.authorize !== true) throw new HttpError(403, 'starting a preview of an existing project needs explicit authorization ({"authorize": true})');
       }
-      const d = await previews.start(id, store.workspaceDir(id), run.plan.deploy);
+      const d = await previews.start(id, store.workspaceDir(id), run.plan.deploy, isExisting(run) ? {} : { env: factory.appEnv(store.workspaceDir(id)) });
       run.deployment = { ...(run.deployment || {}), ...d, start: run.plan.deploy.start, healthPath: run.plan.deploy.healthPath, url: d.ok ? `/preview/${id}/` : null, at: new Date().toISOString() };
       await store.save(run);
       store.event(id, 'deploy', { ok: d.ok, url: run.deployment.url, error: d.error, logs: d.logs, restarted: true });

@@ -1,0 +1,113 @@
+{
+  "comment": "The product stack a NEW generated application can be built on: the single source for package names, exact published versions, what each component requires, whether it is supported, and the rules agents are given. Read by src/stack.js (factory, gate, prompts) and src/providers/offline.js (templates). Versions were verified against the npm registry; unsupported components record the verified blocker and the next step.",
+  "install": "npm install --no-audit --no-fund --ignore-scripts --prefer-offline",
+  "default": [
+    "appport"
+  ],
+  "components": {
+    "appport": {
+      "label": "AppPort",
+      "summary": "Capability discovery and invocation: the app's operations as declared, authorized capabilities (required for every new app).",
+      "status": "supported",
+      "required": true,
+      "dependencies": {
+        "@appport/authorization": "1.0.4",
+        "@appport/core": "1.1.0",
+        "@appport/protocol": "1.1.0",
+        "@appport/schema": "1.1.0",
+        "@appport/server": "1.1.1"
+      },
+      "devDependencies": {
+        "@appport/client": "1.1.1",
+        "@appport/transport-http": "1.1.1"
+      },
+      "packages": [
+        "@appport/core",
+        "@appport/server"
+      ]
+    },
+    "feltdb": {
+      "label": "FeltDB",
+      "summary": "Durable, transactional application state: the app's authoritative store survives restarts.",
+      "status": "supported",
+      "requires": [],
+      "dependencies": {
+        "@feltdb/core": "0.11.9"
+      },
+      "devDependencies": {},
+      "packages": [
+        "@feltdb/core"
+      ],
+      "rules": [
+        "Durable state (FeltDB, selected): the app's authoritative state lives in FeltDB (@feltdb/core). Open it once at startup with createFeltDB({ namespace: '<app>', mode: 'local', path }) where path comes from process.env.DATA_DIR (default './data'), use db.collection(name) with insert/get/find/all/update/delete (all async) and db.transaction for multi-record changes, and db.close() on shutdown. Never pass memory: true. At startup record the store's schema version: put { id: 'schema', version: <n> } in the 'app_meta' collection (FeltDB writes nothing to disk before the first write; this makes the store observable and versions it).",
+        "FeltDB is the ONLY store: no in-memory copy of records, no cache, no second database. The HTTP API and every AppPort capability call the same store functions over FeltDB.",
+        "The app must be the sole writer of its DATA_DIR. FeltDB 0.11.9 does not enforce its documented single-writer lock (a second process's write was observed to succeed), so the app enforces it itself: at startup create <DATA_DIR>/.writer.lock exclusively (fs.openSync(path, 'wx')) holding its pid, refuse to start (exit non-zero) when a live process already holds it, replace it only when that pid is gone, and remove it on shutdown. Strip FeltDB's internal __version field from API results.",
+        "Test durability in test/feltdb.test.js: write through the app, close it, then read the records back with a fresh createFeltDB on the same path (read-only use) and through a restarted app; and show that a second instance on the same DATA_DIR refuses to start.",
+        "@feltdb/core 0.11.9 sends anonymous usage telemetry to feltdb.com unless FELTDB_TELEMETRY=0 (the factory sets it to 0 for everything it runs). State this in the README and DEPLOY.md with the switch; do not hide it or silently change the package default."
+      ]
+    },
+    "distribution": {
+      "label": "Distribution Protocol",
+      "summary": "Signed, verifiable artifact distribution: publish releases whose bytes and publisher anyone can verify.",
+      "status": "supported",
+      "requires": [],
+      "dependencies": {
+        "@distribution-protocol/protocol": "1.0.0"
+      },
+      "devDependencies": {},
+      "packages": [
+        "@distribution-protocol/protocol"
+      ],
+      "rules": [
+        "Signed distribution (Distribution Protocol, selected): use @distribution-protocol/protocol for every release the app publishes. Sign with signRelease(manifest, privateKey, { keyId }) where privateKey = crypto.createPrivateKey(process.env.PUBLISHER_PRIVATE_KEY) (PKCS#8 PEM, Ed25519) and keyId from PUBLISHER_KEY_ID; the manifest has protocol 'distribution/1', product { id: 'product://<publisher>/<name>', name, version }, publisher { id: 'publisher://<publisher>' } from PUBLISHER_ID, artifacts [{ id, mediaType, digest: digestOfBytes(bytes), size, target: { os: 'any', arch: 'any' } }], interfaces [], permissions [], requirements []. Without PUBLISHER_PRIVATE_KEY, publishing is refused; reading and verifying still work.",
+        "Verify with verifyRelease(release) AND by requiring release.signature.publicKey to equal exportPublicKey of the app's own publisher key (verifyRelease alone proves only that some key signed); check artifact bytes with verifyArtifactBytes(bytes, artifact). Report { valid, reason } and never treat an unverified release or unmatched bytes as valid.",
+        "Never put the private key in source, in a capability description, in a response or in the browser.",
+        "Test in test/distribution.test.js: publish, verify, a tampered manifest is rejected, wrong artifact bytes are rejected, and a release signed by another key is rejected."
+      ]
+    },
+    "authboundry": {
+      "label": "AuthBoundry",
+      "summary": "Authentication, authorization and delegation as an authority boundary.",
+      "status": "unsupported",
+      "packages": [
+        "@authboundry/core"
+      ],
+      "verified": {
+        "@authboundry/core": "1.15.3",
+        "@authboundry/bridge": "0.1.3"
+      },
+      "blocker": "The AuthBoundry authority server could not be verified: `authboundry init` and its FeltDB session bridge work, but `authboundry serve` (1.15.3, linux-x64, with and without --upstream, with AUTHBOUNDRY_FELTDB_PATH set) never opened its listening port and produced no output. @authboundry/core 1.15.3 also pins @feltdb/core 0.11.5 and @appport/services 0.3.2 exactly, which conflict with this stack's FeltDB 0.11.9.",
+      "next": "Verify the exact `authboundry serve` invocation, environment and bridge lifecycle on a supported machine; capture a sign-in \u2192 /auth/session \u2192 /auth/authorize grant and denial round trip; and resolve the pinned @feltdb/core / @appport/services versions. Then add AuthBoundry as its own tested increment."
+    },
+    "services": {
+      "label": "AppPort Services",
+      "summary": "API keys, durable jobs, webhooks and secrets.",
+      "status": "unsupported",
+      "packages": [
+        "@appport/services"
+      ],
+      "verified": {
+        "@appport/services": "0.4.11"
+      },
+      "requires": [
+        "authboundry",
+        "feltdb"
+      ],
+      "blocker": "@appport/services 0.4.11 executes effects only after an AuthBoundry ServiceAuthorizer allows them (without one, API-key management fails closed), and AuthBoundry is not yet supported. An app-owned substitute authorizer would be a second authorization authority, so none is generated.",
+      "next": "Support AuthBoundry first (see its blocker), then add Services on its intended AuthBoundry authorization path as a separate, tested increment."
+    },
+    "appboundry": {
+      "label": "AppBoundry",
+      "summary": "Application packaging, verification and execution integration.",
+      "status": "unsupported",
+      "packages": [
+        "@appport/appboundry"
+      ],
+      "verified": {
+        "@appport/appboundry": "1.1.1"
+      },
+      "blocker": "Not a broken package: `appboundry build` packages the contract-driven AppPort model (appboundry.contract.json, appport.implementation.json and a WASM artifact, created interactively by `appport add`), which does not fit the factory's code-defined AppPort boundary.",
+      "next": "A separate integration design: how a generated app adopts the contract-driven model (or how AppBoundry packages a code-defined boundary), with a non-interactive build."
+    }
+  }
+}

@@ -25,6 +25,7 @@ import { makeFxRunner } from './engines/fx.js';
 import { RunDiagnostics, instrumentProvider } from './diagnostics.js';
 import { contractWarnings } from './contract.js';
 import { appportException, cleanException, checkAppPortConformance } from './appport.js';
+import { resolveStack, checkStackConformance, stackLabel } from './stack.js';
 import { launchApp, stopProcess } from './deploy.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
@@ -138,6 +139,10 @@ export class Factory {
     // New apps are AppPort-native (src/appport.js); a run may opt out only with a stated reason. Existing projects: not applicable.
     const appportException = existing ? '' : cleanException(s.appportException);
     if (appportException) settings.appportException = appportException;
+    // The product stack (src/stack.js, templates/stack.json): validated here so an unknown, unsupported or incomplete
+    // selection fails before anything runs. Existing projects keep their own stack.
+    if (existing && s.stack != null) throw new Error('A stack selection applies to new applications only; an existing project keeps its own stack.');
+    if (!existing) settings.stack = resolveStack(s.stack, { exception: appportException });
     const repoUrl = !existing && typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
     if (repoUrl && /^https:\/\/[^/?#]*@/.test(repoUrl)) throw new Error('repoUrl must not contain credentials; add a GitHub token in Settings instead');
@@ -263,14 +268,16 @@ export class Factory {
   }
 
   /**
-   * Start a NEW run from an existing one with the same request, model, engine, settings and source, changing only what
-   * is given (today: whether dependency installs are allowed). The earlier run and its results are left exactly as they are.
+   * Start a NEW run from an existing one with the same request, model, engine, settings (a new app's stack included) and
+   * source, changing only what is given (today: whether dependency installs are allowed, for existing projects). The earlier
+   * run and its results are left exactly as they are.
    */
   async rerun(id, { allowInstall } = {}) {
     const old = await this.store.load(id);
-    if (!isExisting(old)) throw new ProjectError(409, 'only runs against an existing project can be re-run this way');
-    const o = old.source;
-    const source = o.projectId
+    const existing = isExisting(old);
+    if (!existing && allowInstall !== undefined) throw new ProjectError(409, 'allowInstall applies to runs against an existing project; a new app installs its stack\'s packages anyway');
+    const o = old.source || {};
+    const source = !existing ? undefined : o.projectId
       ? { projectId: o.projectId, workingMode: o.workingMode, publish: o.publish, autoApply: o.autoApply, allowInstall: allowInstall ?? o.allowInstall }
       : { mode: o.mode, directoryId: o.directoryId, repoUrl: o.repoUrl, ref: o.ref, workingMode: o.workingMode, publish: o.publish, autoApply: o.autoApply, allowInstall: allowInstall ?? o.allowInstall };
     const s = old.settings || {};
@@ -278,7 +285,7 @@ export class Factory {
       ...old.inputs,
       provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
       planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException },
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException, stack: s.stack },
       source,
     });
   }
@@ -482,7 +489,7 @@ export class Factory {
     let run = await this.store.load(id);
     const existing = isExisting(run);
     // Existing projects: commands pass through the project command policy and .git is write-protected.
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: this.toolEnv(), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     // Factory notes (plan, lessons) live beside the workspace for existing projects, never inside the project.
     const notes = existing ? new Workspace(this.store.notesDir(id)) : ws;
     const save = () => this.store.save(run);
@@ -507,6 +514,7 @@ export class Factory {
     };
     for (const text of contractWarnings(run, this.providers)) emit('log', { level: 'warn', text });
     if (appportException(run)) emit('log', { level: 'warn', text: `AppPort contract not required for this run (explicit exception): ${appportException(run)}` });
+    if (run.settings.stack) emit('log', { text: `Stack: ${stackLabel(run.settings.stack)}` });
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -974,7 +982,7 @@ export class Factory {
     if (!run.delivery?.integrity) throw new ProjectError(409, 'the run has not been delivered yet');
     if (run.projectId && (await this.registry.find(run.projectId).catch(() => null))) await this.registry.locate(run.projectId, { purpose: 'publish changes' });
     await this.assertApproved(run, 'publish them');
-    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true, launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache } });
+    const ws = new Workspace(this.store.workspaceDir(id), { protectGit: true, launcher: computeLauncher(this.cfg), env: this.toolEnv() });
     run.delivery.publication = await this.publishNow(run, { ws, emit: (t, d) => this.store.event(id, t, d), pullRequest });
     await writeReport(run, this.store.deliveryDir(id));
     await this.store.save(run);
@@ -1072,7 +1080,7 @@ export class Factory {
     const chosen = (Array.isArray(steps) && steps.length ? steps : run.settings.paxSteps?.length ? run.settings.paxSteps : this.cfg.paxSteps).filter((x) => PAX_STEP_IDS.includes(x));
     if (!chosen.length) throw new ProjectError(400, 'choose at least one PAX step');
     if (chosen.includes('test') && confirmTests !== true) throw new ProjectError(400, 'the "test" step runs the project\'s native tests through PAX and can change files; confirm it explicitly ({"confirmTests": true})');
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(isExisting(run) ? { protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: this.toolEnv(), ...(isExisting(run) ? { protectGit: true } : {}) });
     const emit = (t, d) => this.store.event(id, t, d);
     const controller = new AbortController();
     this.active.set(id, { controller, promise: Promise.resolve() });
@@ -1095,7 +1103,7 @@ export class Factory {
     const run = await this.store.load(id);
     if (!run.plan || !fs.existsSync(this.store.workspaceDir(id))) throw new ProjectError(409, 'the run has no workspace to check');
     const existing = isExisting(run);
-    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: { npm_config_cache: this.cfg.npmCache }, ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
+    const ws = new Workspace(this.store.workspaceDir(id), { launcher: computeLauncher(this.cfg), env: this.toolEnv(), ...(existing ? { policy: existingProjectPolicy({ allowInstall: run.source.allowInstall }), protectGit: true } : {}) });
     const base = run.project?.baseline || [];
     const commands = [...new Set([...(run.plan.finalVerify || []), ...base.map((b) => b.command)])].filter(Boolean);
     if (!commands.length) throw new ProjectError(409, 'this run has no checks to run (no baseline or final verification commands)');
@@ -1159,6 +1167,48 @@ export class Factory {
     return { path: filePath, diff: redact(patch.length > 300_000 ? `${patch.slice(0, 300_000)}\n…[diff truncated]` : patch) };
   }
 
+  /**
+   * The environment a generated app runs with in a preview or a gate: the shared npm cache, and its data under the workspace's
+   * .home (never delivered), in a folder of its own per purpose so a gate never touches a preview's data.
+   */
+  /**
+   * Non-secret variables for every command the factory runs in a generated app (agents' commands, tests, previews, gates):
+   * the shared npm cache, and FeltDB telemetry off. @feltdb/core 0.11.9 posts usage events to feltdb.com by default; a factory
+   * run does not phone home on the user's behalf (the generated app documents the switch and leaves the choice to its operator).
+   */
+  toolEnv() {
+    return { npm_config_cache: this.cfg.npmCache, FELTDB_TELEMETRY: '0' };
+  }
+
+  appEnv(root, purpose = 'preview') {
+    const dataDir = path.join(root, '.home', 'data', purpose === 'preview' ? 'preview' : `${purpose}-${crypto.randomBytes(4).toString('hex')}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    return { ...this.toolEnv(), DATA_DIR: dataDir };
+  }
+
+  /** The stack checklist item of a new app: selected integrations present and working, unselected packages absent. */
+  async stackItem(run, ws, { allDone, signal, emit }) {
+    const label = `The selected stack is integrated (${stackLabel(run.settings.stack)}) and nothing else is`;
+    if (!allDone || signal.aborted) return { id: 'stack', label, ok: false, detail: 'not checked: not all tasks completed' };
+    if (!run.plan.deploy?.start) return { id: 'stack', label, ok: false, detail: 'not checked: the plan has no start command to run the app with' };
+    emit('log', { text: `Checking the stack: ${stackLabel(run.settings.stack)}` });
+    const gateDir = path.join(ws.root, '.home', 'data');
+    fs.mkdirSync(gateDir, { recursive: true });
+    const gate = await checkStackConformance({
+      ws,
+      stack: run.settings.stack,
+      tmpDir: gateDir,
+      launch: async (env, { timeoutMs = 30_000 } = {}) => {
+        const r = await launchApp(ws.root, run.plan.deploy, { env: { ...this.toolEnv(), ...env }, timeoutMs });
+        return { ok: r.ok, port: r.port, error: r.error, stop: () => r.ok && stopProcess(r.child) };
+      },
+    });
+    run.stackCheck = { ok: gate.ok, stack: run.settings.stack, checks: gate.checks.map((c) => ({ ...c, detail: redact(String(c.detail)).slice(0, 600) })), at: new Date().toISOString() };
+    emit('verify', { taskId: '_stack', results: gate.checks.map((c) => ({ command: `stack: ${c.id}`, ok: c.ok, exitCode: c.ok ? 0 : 1, output: redact(String(c.detail)).slice(0, 600) })) });
+    const failed = gate.checks.filter((c) => !c.ok);
+    return { id: 'stack', label, ok: gate.ok, detail: gate.ok ? `${gate.checks.length} checks passed` : failed.map((c) => `${c.id}: ${c.detail}`).join('; ').slice(0, 600) };
+  }
+
   /** The AppPort checklist item of a new app: the conformance gate's verdict, or the run's explicit exception. */
   async appportItem(run, ws, { allDone, signal, emit }) {
     const label = 'Capabilities are AppPort-native (discoverable, authorized, invocable)';
@@ -1173,7 +1223,7 @@ export class Factory {
     const gate = await checkAppPortConformance({
       ws,
       launch: async (env) => {
-        const r = await launchApp(ws.root, run.plan.deploy, { env: { ...env, npm_config_cache: this.cfg.npmCache }, timeoutMs: 30_000 });
+        const r = await launchApp(ws.root, run.plan.deploy, { env: { ...this.appEnv(ws.root, 'appport-gate'), ...env }, timeoutMs: 30_000 });
         return { ok: r.ok, port: r.port, error: r.error, stop: () => r.ok && stopProcess(r.child) };
       },
     });
@@ -1213,7 +1263,7 @@ export class Factory {
     const docsDeploy = ws.exists('DEPLOY.md') || /deploy/i.test(ws.exists('README.md') ? await ws.readFile('README.md') : '');
     if (run.plan.deploy && run.settings.deploy && allDone && !signal.aborted) {
       emit('log', { text: `Deploying: ${run.plan.deploy.start}` });
-      const d = await this.previews.start(run.id, ws.root, run.plan.deploy);
+      const d = await this.previews.start(run.id, ws.root, run.plan.deploy, { env: this.appEnv(ws.root) });
       run.deployment = { ...d, start: run.plan.deploy.start, healthPath: run.plan.deploy.healthPath, url: d.ok ? `/preview/${run.id}/` : null, at: new Date().toISOString() };
       emit('deploy', { ok: d.ok, url: run.deployment.url, error: d.error, logs: d.logs });
     } else if (run.plan.deploy) {
@@ -1224,6 +1274,8 @@ export class Factory {
 
     // AppPort-native: the app's capability boundary is discoverable, authorized and invocable (src/appport.js).
     items.push(await this.appportItem(run, ws, { allDone, signal, emit }));
+    // The selected stack: its integrations are present and working, unselected packages are absent (src/stack.js).
+    if (run.settings.stack) items.push(await this.stackItem(run, ws, { allDone, signal, emit }));
 
     // Documentation.
     let readme = '';
