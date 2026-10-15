@@ -68,11 +68,16 @@ export function toOpenAIReply(res = {}) {
 }
 
 /**
- * Start a bridge for `provider` on 127.0.0.1 (random port). Resolves { baseUrl, token, lastError(), close() }. `meta` is passed
- * to every provider.chat() call. `token` (default: random) must be sent as `Authorization: Bearer <token>`.
+ * Start a bridge for `provider` on 127.0.0.1 (random port). Resolves { baseUrl, token, lastError(), budget(), close() }. `meta` is passed
+ * to every provider.chat() call. `track` (the run's { check, add }) is charged for every model request the engine makes, as the
+ * built-in loop does: the engine only reports usage when a whole turn ends, which would let a budget be passed unnoticed and
+ * would lose the usage of requests in a turn that failed. A request is refused once the budget is spent; budget() then holds
+ * the BudgetError so the engine can stop the attempt as a budget stop, not a model error.
+ * `token` (default: random) must be sent as `Authorization: Bearer <token>`.
  */
-export function startBridge(provider, { token = crypto.randomBytes(24).toString('hex'), meta = {}, keepaliveMs = BRIDGE_KEEPALIVE_MS } = {}) {
+export function startBridge(provider, { token = crypto.randomBytes(24).toString('hex'), meta = {}, keepaliveMs = BRIDGE_KEEPALIVE_MS, track } = {}) {
   let lastError = null;
+  let budget = null;
   const sockets = new Set();
   const server = http.createServer((req, res) => {
     const path = new URL(req.url, 'http://x').pathname.replace(/\/+$/, '');
@@ -122,7 +127,14 @@ export function startBridge(provider, { token = crypto.randomBytes(24).toString(
         // The engine keeps its whole history; what is sent must still fit the model's window (see history.js).
         req2.messages = compactHistory(req2.messages, historyBudget(provider, req2.system, req2.tools));
         const maxTokens = Number(body.max_tokens ?? body.max_completion_tokens);
+        try {
+          track?.check();
+        } catch (e) {
+          budget = e;
+          throw e;
+        }
         const out = await provider.chat({ ...req2, ...(Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}), signal: ac.signal, meta: { kind: 'task', ...meta } });
+        track?.add(out.usage);
         const { message, finish, usage } = toOpenAIReply(out);
         lastError = null;
         if (!stream) return reply(200, { id, object: 'chat.completion', created, model, choices: [{ index: 0, message, finish_reason: finish }], usage });
@@ -155,6 +167,7 @@ export function startBridge(provider, { token = crypto.randomBytes(24).toString(
         baseUrl: `http://127.0.0.1:${port}/v1`,
         token,
         lastError: () => lastError,
+        budget: () => budget,
         close: () =>
           new Promise((r) => {
             for (const s of sockets) s.destroy();

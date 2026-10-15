@@ -69,6 +69,8 @@ export class OpenAICompatProvider {
     let raw;
     if (this.dialect === 'ollama') {
       const body = { model, messages: msgs, stream: false, options: { num_predict: limit } };
+      // Planning needs a structured answer inside the output budget; a thinking model otherwise spends it reasoning.
+      if (meta.kind === 'plan') body.think = false;
       if (this.numCtx) body.options.num_ctx = this.numCtx;
       if (this.temperature != null) body.options.temperature = this.temperature;
       if (mode === 'native' && tools.length) body.tools = tools.map(toOpenAITool);
