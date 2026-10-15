@@ -156,9 +156,10 @@ test('AppPort + FeltDB: durable writes verified from a fresh process, read back 
   const { factory, store } = setup();
   const run = await factory.start((await factory.createRun({ idea: 'A habit tracker with daily check-ins', provider: 'offline', settings: { stack: ['feltdb'], deploy: false } })).id);
   assert.equal(run.status, 'completed', JSON.stringify(run.checklist));
-  assert.deepEqual(run.stackCheck.checks.map((c) => [c.id, c.ok]), [['stack-packages', true], ['stack-unselected-absent', true], ['feltdb-used', true], ['feltdb-durable-store', true], ['feltdb-sole-writer', true]]);
+  assert.deepEqual(run.stackCheck.checks.map((c) => [c.id, c.ok]), [['stack-packages', true], ['stack-unselected-absent', true], ['feltdb-used', true], ['feltdb-durable-store', true], ['feltdb-sole-writer', true], ['feltdb-clean-shutdown', true], ['feltdb-flow', true], ['feltdb-flow-deployed', true]]);
   const root = store.workspaceDir(run.id);
   feltdbApp = { run, root };
+  assert.match(fs.readFileSync(path.join(root, 'feltdb.flow'), 'utf8'), /app Tracker \{\s+collection Item \{/);
   assert.equal(pkgOf(root).dependencies['@feltdb/core'], '0.11.9');
   assert.equal(installed(root, '@distribution-protocol/protocol'), false);
   assert.match(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), /Stack: AppPort \+ FeltDB[\s\S]*only writer[\s\S]*FELTDB_TELEMETRY=0/);
@@ -181,18 +182,23 @@ console.log(JSON.stringify({ a: b.item, c: c.item }));`);
 
   // Independent of the app: a fresh process opens the app's FeltDB folder and reads the records.
   const namespace = fs.readFileSync(path.join(root, 'src', 'store.js'), 'utf8').match(/const NAMESPACE = '([^']+)'/)[1];
-  const stored = inApp(root, `import { createFeltDB } from '@feltdb/core';
+  const stored = inApp(root, `import fs from 'node:fs';
+import { createFeltDB, parseFlowSpec, compileApplicationContract } from '@feltdb/core';
+const spec = parseFlowSpec(fs.readFileSync('feltdb.flow', 'utf8'));
 const db = createFeltDB({ namespace: ${JSON.stringify(namespace)}, mode: 'local', path: ${JSON.stringify(dataDir)} });
-const items = await db.collection('items').all();
-const schema = await db.collection('app_meta').get('schema');
+const items = await db.collection('Item').all();
+const model = await db.application.get();
 await db.close();
-console.log(JSON.stringify({ items, schema }));`);
+console.log(JSON.stringify({ items, model, flow: (await compileApplicationContract(spec, 'local', spec.app)).hashes.application }));`);
   const byId = Object.fromEntries(stored.items.map((i) => [i.id, i]));
   assert.equal(stored.items.length, 2);
   assert.equal(byId[written.a.id].title, 'Persist me');
   assert.equal(byId[written.a.id].done, true, 'the update is durable');
   assert.equal(byId[written.c.id].title, 'And me');
-  assert.equal(stored.schema.version, 1);
+  // feltdb.flow is the store's active model, and every stored record has exactly the declared fields.
+  assert.equal(stored.model.contract_hash, stored.flow);
+  assert.equal(stored.model.version, 1);
+  for (const i of stored.items) assert.deepEqual(Object.keys(i).filter((k) => k !== '__version').sort(), ['createdAt', 'done', 'id', 'notes', 'title', 'updatedAt']);
   assert.ok(fs.readdirSync(dataDir).some((f) => /^state\./.test(f)), 'FeltDB files are in DATA_DIR');
   assert.equal(fs.existsSync(path.join(dataDir, '.writer.lock')), false, 'the lock is released on shutdown');
 
@@ -255,6 +261,62 @@ console.log(JSON.stringify({ valid: verifyRelease(release).valid, ours: release.
   app.stop();
 });
 
+test('AppPort + FeltDB + Distribution Protocol: signed releases are kept in FeltDB under feltdb.flow, verifiable from a fresh process and after a restart', async () => {
+  const { factory, store } = setup();
+  const run = await factory.start((await factory.createRun({ idea: 'A release service for our CLI tool that keeps every release', provider: 'offline', settings: { stack: ['feltdb', 'distribution'], deploy: false } })).id);
+  assert.equal(run.status, 'completed', JSON.stringify(run.checklist));
+  assert.deepEqual(run.settings.stack, ['appport', 'feltdb', 'distribution']);
+  assert.deepEqual(run.stackCheck.checks.filter((c) => !c.ok), []);
+  assert.deepEqual(run.stackCheck.checks.map((c) => c.id), ['stack-packages', 'stack-unselected-absent', 'feltdb-used', 'feltdb-durable-store', 'feltdb-sole-writer', 'feltdb-clean-shutdown', 'feltdb-flow', 'feltdb-flow-deployed', 'distribution-used']);
+  assert.ok(run.checklist.find((c) => c.id === 'appport').ok);
+  const root = store.workspaceDir(run.id);
+  assert.deepEqual(Object.keys(pkgOf(root).dependencies).filter((d) => !d.startsWith('@appport/')).sort(), ['@distribution-protocol/protocol', '@feltdb/core']);
+  assert.match(fs.readFileSync(path.join(root, 'feltdb.flow'), 'utf8'), /app Releases \{\s+collection Release \{/);
+
+  const dataDir = tmpDir('full-stack-data-');
+  const pem = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const env = { DATA_DIR: dataDir, APP_API_TOKEN: 'full-token-q8v3z6', PUBLISHER_PRIVATE_KEY: pem, PUBLISHER_ID: 'publisher://acme' };
+  const app = await startApp(root, run.plan.deploy, env);
+  assert.ok(app.ok, app.error);
+  const content = Buffer.from('cli binary v2.0.0').toString('base64');
+  const published = inApp(root, `${CLIENT}
+const app = await connect(${JSON.stringify(app.base)}, ${JSON.stringify(env.APP_API_TOKEN)});
+console.log(JSON.stringify((await app.call('releases.publish', { name: 'mycli', version: '2.0.0', artifactId: 'mycli-any', content: ${JSON.stringify(content)} })).release));`);
+  app.stop();
+  await waitExit(app.child);
+
+  // A fresh process: the release is in FeltDB as feltdb.flow declares it, and the package verifies the stored manifest and bytes.
+  const stored = inApp(root, `import fs from 'node:fs';
+import { createFeltDB, parseFlowSpec, compileApplicationContract } from '@feltdb/core';
+import { verifyRelease, verifyArtifactBytes } from '@distribution-protocol/protocol';
+const spec = parseFlowSpec(fs.readFileSync('feltdb.flow', 'utf8'));
+const db = createFeltDB({ namespace: 'any', mode: 'local', path: ${JSON.stringify(dataDir)} });
+const [r] = await db.collection('Release').all();
+const model = await db.application.get();
+await db.close();
+console.log(JSON.stringify({ id: r.id, fields: Object.keys(r).filter((k) => k !== 'id' && k !== '__version').sort(), declared: spec.collections[0].fields.map((f) => f.name).sort(), release: r.release, valid: verifyRelease(r.release).valid, bytes: verifyArtifactBytes(Buffer.from(r.content, 'base64'), r.release.manifest.artifacts[0]), model: model.contract_hash, flow: (await compileApplicationContract(spec, 'local', spec.app)).hashes.application }));`);
+  assert.equal(stored.id, 'mycli@2.0.0');
+  assert.deepEqual(stored.fields, stored.declared);
+  assert.deepEqual(stored.release, published.release);
+  assert.deepEqual([stored.valid, stored.bytes], [true, true]);
+  assert.equal(stored.model, stored.flow);
+
+  // A restarted app serves and verifies the same release, and it is still immutable.
+  const again = await startApp(root, run.plan.deploy, env);
+  assert.ok(again.ok, again.error);
+  const after = inApp(root, `${CLIENT}
+const app = await connect(${JSON.stringify(again.base)}, ${JSON.stringify(env.APP_API_TOKEN)});
+console.log(JSON.stringify({
+  got: await app.call('releases.get', { name: 'mycli', version: '2.0.0' }),
+  verified: await app.call('releases.verify', { release: ${JSON.stringify(published.release)}, content: ${JSON.stringify(content)} }),
+  again: await code(app.call('releases.publish', { name: 'mycli', version: '2.0.0', content: ${JSON.stringify(content)} })),
+}));`);
+  assert.deepEqual(after.got.release, published);
+  assert.deepEqual(after.verified, { valid: true, reason: null });
+  assert.equal(after.again, 'CONFLICT');
+  again.stop();
+});
+
 // ── the stack gate's negative cases ─────────────────────────────────────────────────────────────
 
 async function gate(source, stack, edit) {
@@ -302,9 +364,29 @@ test('the stack gate fails a FeltDB app that does not enforce a single writer, o
   assert.deepEqual(failing(unlocked), ['feltdb-sole-writer']);
   const elsewhere = await gate(feltdbApp, ['appport', 'feltdb'], (root) => {
     const f = path.join(root, 'src', 'store.js');
-    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace("constructor({ path: dir = process.env.DATA_DIR || './data' } = {}) {", "constructor({ path: dir = './other-data' } = {}) {"));
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace("path: dir = process.env.DATA_DIR || './data',", "path: dir = './other-data',"));
   });
   assert.ok(failing(elsewhere).includes('feltdb-durable-store'), JSON.stringify(elsewhere.checks));
+});
+
+test('the stack gate fails a FeltDB app whose feltdb.flow is missing, invalid, or not the model it deployed', async () => {
+  const missing = await gate(feltdbApp, ['appport', 'feltdb'], (root) => fs.rmSync(path.join(root, 'feltdb.flow')));
+  assert.ok(failing(missing).includes('feltdb-flow'), JSON.stringify(missing.checks));
+  assert.match(missing.checks.find((c) => c.id === 'feltdb-flow').detail, /feltdb\.flow is missing/);
+  const invalid = await gate(feltdbApp, ['appport', 'feltdb'], (root) => {
+    const f = path.join(root, 'feltdb.flow');
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('done: boolean', 'done: bool'));
+  });
+  assert.ok(failing(invalid).includes('feltdb-flow'), JSON.stringify(invalid.checks));
+  assert.match(invalid.checks.find((c) => c.id === 'feltdb-flow').detail, /Unsupported field type bool/);
+  assert.ok(failing(invalid).includes('feltdb-durable-store'), 'an app with an invalid flow does not start');
+  // An app that ships feltdb.flow but deploys another model (here: a hard-coded one with an extra field) fails.
+  const other = await gate(feltdbApp, ['appport', 'feltdb'], (root) => {
+    const f = path.join(root, 'src', 'store.js');
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace("flow = loadFlow() } = {}) {", "flow = loadFlow() } = {}) {\n    flow = { ...flow, collections: flow.collections.map((c) => ({ ...c, fields: [...c.fields, { name: 'extra', type: 'text', optional: true }] })) };"));
+  });
+  assert.deepEqual(failing(other), ['feltdb-flow-deployed']);
+  assert.match(other.checks.find((c) => c.id === 'feltdb-flow-deployed').detail, /is not feltdb\.flow/);
 });
 
 test('generated app sizes stay what the stack says (footprint record for docs/stack-profiles.md)', () => {

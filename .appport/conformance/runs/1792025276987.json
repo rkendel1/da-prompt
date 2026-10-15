@@ -1,0 +1,122 @@
+{
+  "protocol": "appport/1",
+  "timestamp": "2026-10-15T00:47:56.888Z",
+  "server": {
+    "url": "http://127.0.0.1:42527"
+  },
+  "levels": [
+    {
+      "level": 1,
+      "name": "Protocol",
+      "results": [
+        {
+          "name": "appport/1 version header in discovery",
+          "passed": true
+        },
+        {
+          "name": "Request envelope has required fields",
+          "passed": true
+        },
+        {
+          "name": "Response envelope has required fields",
+          "passed": true
+        },
+        {
+          "name": "Request ID is preserved in response",
+          "passed": true
+        },
+        {
+          "name": "Error envelope format is correct",
+          "passed": true
+        },
+        {
+          "name": "Protocol version mismatch is rejected",
+          "passed": true
+        }
+      ],
+      "passed": 6,
+      "total": 6
+    },
+    {
+      "level": 2,
+      "name": "Discovery",
+      "results": [
+        {
+          "name": "Discovery endpoint exists at /.well-known/appport",
+          "passed": true
+        },
+        {
+          "name": "Discovery document is valid JSON",
+          "passed": true
+        },
+        {
+          "name": "Discovery advertises protocol version",
+          "passed": true
+        },
+        {
+          "name": "Application identity is present",
+          "passed": true
+        },
+        {
+          "name": "Transports are declared",
+          "passed": true
+        },
+        {
+          "name": "Manifest can be fetched",
+          "passed": true
+        },
+        {
+          "name": "Manifest has capability definitions",
+          "passed": true
+        },
+        {
+          "name": "Manifest capability has required fields",
+          "passed": true
+        }
+      ],
+      "passed": 8,
+      "total": 8
+    },
+    {
+      "level": 3,
+      "name": "Application",
+      "results": [
+        {
+          "name": "Can invoke a capability",
+          "passed": true
+        },
+        {
+          "name": "Unknown capability returns error",
+          "passed": false
+        },
+        {
+          "name": "Unknown capability version returns error",
+          "passed": true
+        },
+        {
+          "name": "Capability with correct version works",
+          "passed": true
+        },
+        {
+          "name": "Response has output or error",
+          "passed": true
+        }
+      ],
+      "passed": 4,
+      "total": 5
+    },
+    {
+      "level": 4,
+      "name": "Interaction",
+      "results": [],
+      "passed": 0,
+      "total": 0
+    }
+  ],
+  "highestLevel": 2,
+  "summary": {
+    "totalTests": 19,
+    "passedTests": 18,
+    "failedTests": 1
+  }
+}

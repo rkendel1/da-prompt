@@ -907,9 +907,15 @@ da-prompt run "A habit tracker" --new --stack feltdb   # AppPort + FeltDB (AppPo
 
 In the browser it is the *Product stack* fieldset on New Run, where each supported component can be ticked or unticked (unticking AppPort asks for the reason that is recorded as the run's AppPort exception); through the API, `settings.stack` (`GET /api/stack` lists the
 options). A new run's checklist has a **stack** item: the selected packages are installed at compatible versions, unselected
-packages are absent, and the selected integrations work (a FeltDB app keeps its state in `DATA_DIR` and refuses a second
-writer; a Distribution app signs and verifies with the package). Reruns keep the selection. The factory runs everything with
-`FELTDB_TELEMETRY=0`; a generated FeltDB app documents FeltDB's default telemetry and the switch.
+packages are absent, and the selected integrations work. A FeltDB app keeps its state in `DATA_DIR` under the model declared in
+its `feltdb.flow`: the flow must validate, the app deploys it as the store's active model, and it checks every record against
+it, because FeltDB's local runtime does not. The app also refuses a second writer. A Distribution app signs and verifies with
+the package. Reruns keep the selection. The factory runs everything with `FELTDB_TELEMETRY=0`; a generated FeltDB app
+documents FeltDB's default telemetry and the switch.
+
+`npm run prove:stack` generates an app with every supported component (AppPort + FeltDB + Distribution) and proves each one
+from outside the factory; the latest report is [docs/stack-proof.md](docs/stack-proof.md). Screenshots of the stack picker
+are in [docs/screenshots/stack/](docs/screenshots/stack/).
 
 ## Existing projects
 

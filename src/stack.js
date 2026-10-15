@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 
 const STACK = JSON.parse(fs.readFileSync(new URL('../templates/stack.json', import.meta.url), 'utf8'));
 export const STACK_COMPONENTS = STACK.components;
@@ -190,6 +191,68 @@ export async function checkStackConformance({ ws, stack, launch, tmpDir }) {
   return { ok: checks.every((c) => c.ok), checks };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Run a command in the app's folder (FeltDB telemetry off, HOME inside the workspace). Never rejects. */
+function runIn(root, file, args, env = {}) {
+  return new Promise((resolve) => {
+    execFile(file, args, { cwd: root, timeout: 30_000, maxBuffer: 1 << 20, env: { PATH: process.env.PATH, HOME: path.join(root, '.home'), FELTDB_TELEMETRY: '0', ...env } }, (err, stdout, stderr) =>
+      resolve({ ok: !err, out: `${stdout}${stderr}`.trim(), error: err?.message }),
+    );
+  });
+}
+
+// Read with the app's own @feltdb/core, in a separate process after the app stopped: the flow's compiled contract hash and
+// the store's active model. The namespace does not partition a local store, so any name reads the app's data.
+const READ_ACTIVE_MODEL = `
+import fs from 'node:fs';
+import { createFeltDB, parseFlowSpec, validateFlowSpec, compileApplicationContract } from '@feltdb/core';
+const spec = parseFlowSpec(fs.readFileSync('feltdb.flow', 'utf8'));
+const errors = validateFlowSpec(spec).filter((d) => d.severity === 'error').map((d) => d.message);
+const expected = (await compileApplicationContract(spec, 'local', spec.app)).hashes.application;
+const db = createFeltDB({ namespace: 'da-prompt-stack-gate', mode: 'local', path: process.env.DATA_DIR });
+let active = {};
+try { active = await db.application.get(); } catch (e) { active = { error: e.message }; }
+await db.close();
+console.log(JSON.stringify({ app: spec.app, collections: spec.collections.map((c) => c.name), errors, expected, active: active.contract_hash || null, version: active.version ?? null, error: active.error || null }));
+`;
+
+/** The flow is the authority: present, valid by FeltDB's own CLI, and exactly the model the running app deployed. */
+async function checkFlow({ ws, dataDir, add, ran = true }) {
+  let source = null;
+  try {
+    source = await ws.readFile('feltdb.flow');
+  } catch {
+    /* missing */
+  }
+  if (source === null) {
+    add('feltdb-flow', false, 'feltdb.flow is missing at the project root: the data model must be declared there and deployed by the app');
+    return;
+  }
+  const bin = path.join(ws.root, 'node_modules', '.bin', 'feltdb');
+  const valid = await runIn(ws.root, bin, ['validate', 'feltdb.flow']);
+  add('feltdb-flow', valid.ok, valid.ok ? `feltdb validate: ${valid.out.split('\n').pop()}` : `feltdb validate feltdb.flow failed: ${(valid.out || valid.error || '').slice(0, 300)}`);
+  if (!valid.ok || !ran) return;
+  const read = await runIn(ws.root, process.execPath, ['--input-type=module', '-e', READ_ACTIVE_MODEL], { DATA_DIR: dataDir });
+  let r = null;
+  try {
+    r = JSON.parse(read.out.split('\n').pop());
+  } catch {
+    /* reported below */
+  }
+  if (!r) return add('feltdb-flow-deployed', false, `could not read the store's active model: ${(read.out || read.error || '').slice(0, 300)}`);
+  const ok = r.active && r.active === r.expected;
+  add(
+    'feltdb-flow-deployed',
+    ok,
+    ok
+      ? `the app deployed feltdb.flow (${r.app}: ${r.collections.join(', ')}) as its store's active model, version ${r.version}, contract ${r.expected.slice(0, 19)}…`
+      : r.active
+        ? `the store's active model (${r.active}) is not feltdb.flow (${r.expected}): the app must deploy the flow it ships`
+        : `the app ran but deployed no data model (${r.error || 'none'}): it must deploy feltdb.flow with db.deployFlowSpec at startup`,
+  );
+}
+
 async function checkFeltdb({ ws, launch, tmpDir, add }) {
   const used = await sourceUses(ws, 'src', '@feltdb/core');
   const tested = await sourceUses(ws, 'test', '@feltdb/core');
@@ -200,12 +263,13 @@ async function checkFeltdb({ ws, launch, tmpDir, add }) {
   const first = await launch({ DATA_DIR: dataDir });
   if (!first.ok) {
     add('feltdb-durable-store', false, `the app did not start with DATA_DIR set: ${first.error || 'unknown error'}`);
+    await checkFlow({ ws, dataDir, add, ran: false });
     return;
   }
   try {
     const files = fs.readdirSync(dataDir);
     const feltFiles = files.filter((f) => /^state\.|\.journal$/.test(f));
-    add('feltdb-durable-store', feltFiles.length > 0, feltFiles.length ? `the app opened its FeltDB store in DATA_DIR (${feltFiles.join(', ')})` : `the app started but created no FeltDB state in DATA_DIR (found: ${files.join(', ') || 'nothing'}); it must open createFeltDB({ mode: 'local', path: process.env.DATA_DIR }) and record its schema version in app_meta at startup`);
+    add('feltdb-durable-store', feltFiles.length > 0, feltFiles.length ? `the app opened its FeltDB store in DATA_DIR (${feltFiles.join(', ')})` : `the app started but created no FeltDB state in DATA_DIR (found: ${files.join(', ') || 'nothing'}); it must open createFeltDB({ mode: 'local', path: process.env.DATA_DIR }) and deploy feltdb.flow at startup`);
     // The app is the sole writer: a second instance on the same DATA_DIR must refuse to start.
     const second = await launch({ DATA_DIR: dataDir }, { timeoutMs: 8000 });
     if (second.ok) second.stop();
@@ -213,4 +277,9 @@ async function checkFeltdb({ ws, launch, tmpDir, add }) {
   } finally {
     first.stop();
   }
+  // A stopped app closes FeltDB and releases its writer lock; then its active model is read from a separate process.
+  const lock = path.join(dataDir, '.writer.lock');
+  for (let i = 0; i < 50 && fs.existsSync(lock); i++) await sleep(100);
+  add('feltdb-clean-shutdown', !fs.existsSync(lock), fs.existsSync(lock) ? 'after SIGTERM the app did not release DATA_DIR/.writer.lock within 5 s: it must close FeltDB and remove its lock on shutdown' : 'after SIGTERM the app closed its store and released DATA_DIR/.writer.lock');
+  await checkFlow({ ws, dataDir, add });
 }

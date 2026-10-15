@@ -1,5 +1,6 @@
 // The application's state and rules. Items live in FeltDB (@feltdb/core), the single durable source of truth for the HTTP
-// API, the UI and the AppPort capabilities alike: there is no in-memory copy and no cache.
+// API, the UI and the AppPort capabilities alike: there is no in-memory copy and no cache. What a record may hold is declared
+// in feltdb.flow; the store deploys that model on open and checks every record against it before writing (src/flow.js).
 //
 // This process is the only writer of its data folder. FeltDB 0.11.9 does not enforce a single-writer lock (a second process's
 // write was observed to succeed), so the store takes an exclusive lock file itself and refuses to open when a live process
@@ -8,11 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createFeltDB } from '@feltdb/core';
+import { loadFlow, deployFlow, recordCheck } from './flow.js';
 
 const MAX_TITLE = 200;
 const MAX_NOTES = 2000;
-const SCHEMA_VERSION = 1;
 const NAMESPACE = 'app.{{SLUG_ID}}';
+const ITEMS = 'Item'; // the collection declared in feltdb.flow
 
 export class ValidationError extends Error {
   constructor(message) {
@@ -86,7 +88,9 @@ const plain = (record) => {
 
 /** Durable item store over FeltDB. `path` defaults to DATA_DIR (or ./data). Call close() to flush and release the lock. */
 export class ItemStore {
-  constructor({ path: dir = process.env.DATA_DIR || './data' } = {}) {
+  constructor({ path: dir = process.env.DATA_DIR || './data', flow = loadFlow() } = {}) {
+    this.flow = flow; // an invalid feltdb.flow throws before anything is opened
+    this.check = recordCheck(flow);
     this.dir = path.resolve(dir);
     this.release = lockDir(this.dir);
     try {
@@ -95,9 +99,15 @@ export class ItemStore {
       this.release();
       throw err;
     }
-    this.items = this.db.collection('items');
-    // Version the store on open; this is also the store's first durable write, so its files exist from startup.
-    this.ready = this.db.collection('app_meta').put({ version: SCHEMA_VERSION }, 'schema');
+    this.items = this.db.collection(ITEMS);
+    // Deploy feltdb.flow as the store's active model (also the store's first durable write, so its files exist from startup).
+    // When it cannot be deployed the store closes and every call fails with that reason; the app refuses to start.
+    this.ready = deployFlow(this.db, flow).catch(async (err) => {
+      this.closed = true;
+      await this.db.close().catch(() => {});
+      this.release();
+      throw err;
+    });
   }
 
   async list() {
@@ -114,7 +124,7 @@ export class ItemStore {
     const data = clean(input);
     await this.ready;
     const now = new Date().toISOString();
-    const item = { id: randomUUID(), title: data.title, notes: data.notes || '', done: data.done ?? false, createdAt: now, updatedAt: now };
+    const item = this.check(ITEMS, { id: randomUUID(), title: data.title, notes: data.notes || '', done: data.done ?? false, createdAt: now, updatedAt: now });
     await this.items.insert(item, item.id);
     return plain(await this.items.get(item.id));
   }
@@ -122,8 +132,11 @@ export class ItemStore {
   async update(id, input) {
     const data = clean(input, { partial: true });
     await this.ready;
-    if (!(await this.items.exists(id))) return null;
-    await this.items.update(id, { ...data, updatedAt: new Date().toISOString() });
+    const current = plain(await this.items.get(id));
+    if (!current) return null;
+    const patch = { ...data, updatedAt: new Date().toISOString() };
+    this.check(ITEMS, { ...current, ...patch });
+    await this.items.update(id, patch);
     return plain(await this.items.get(id));
   }
 
@@ -139,6 +152,10 @@ export class ItemStore {
     this.closed = true;
     try {
       await this.ready;
+    } catch {
+      return; // a failed open already closed the store and released its lock
+    }
+    try {
       await this.db.close();
     } finally {
       this.release();
