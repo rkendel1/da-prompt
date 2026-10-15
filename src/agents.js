@@ -9,6 +9,7 @@ import { extractJsonValues } from './providers/tooltext.js';
 import { compactHistory, historyBudget } from './providers/history.js';
 import { APPPORT_RULES, appportException } from './appport.js';
 import { stackRules, stackLabel } from './stack.js';
+import { specRules, planContext } from './appspec.js';
 
 export const ROLE_BRIEFS = {
   product: 'You are the Product agent. Refine requirements, user flows and the PRD. Write crisp, testable acceptance criteria and keep docs accurate to what was actually built.',
@@ -41,8 +42,12 @@ const EXISTING_WORKSPACE_RULES = `Workspace rules (existing project):
 
 // New apps are AppPort-native unless the run carries an explicit exception (src/appport.js).
 // …and are built on the run's selected stack (src/stack.js): its packages and rules, and none of the unselected packages.
-const newAppRules = (run) => [WORKSPACE_RULES, appportException(run) ? '' : APPPORT_RULES, run.settings?.stack ? stackRules(run.settings.stack) : ''].filter(Boolean).join('\n\n');
-const rulesFor = (run) => (isExisting(run) ? EXISTING_WORKSPACE_RULES : newAppRules(run));
+// …and to its application specification (src/appspec.js): the rules of what it selected that are not packages.
+const newAppRules = (run) => [WORKSPACE_RULES, appportException(run) ? '' : APPPORT_RULES, run.settings?.stack ? stackRules(run.settings.stack) : '', run.spec?.desired ? specRules(run.spec.desired) : ''].filter(Boolean).join('\n\n');
+// An existing application adopts AppPort only when its specification requires it, under the same contract as a new app.
+const adoptsAppPort = (run) => run.spec?.desired?.lifecycle === 'existing' && run.spec.desired.capabilities.includes('appport') && !run.spec.observed?.appport?.declared;
+const existingRules = (run, { plan = true } = {}) => [EXISTING_WORKSPACE_RULES, adoptsAppPort(run) ? `Adopt AppPort in this existing application (selected in its specification). Integrate it into the existing server and store, change nothing else.\n${APPPORT_RULES.split('\n').slice(1).join('\n')}` : '', plan && run.spec?.plan ? planContext(run.spec.desired, run.spec.plan) : ''].filter(Boolean).join('\n\n');
+const rulesFor = (run) => (isExisting(run) ? existingRules(run) : newAppRules(run));
 
 export const AGENT_TOOLS = [
   {
@@ -155,8 +160,9 @@ Planning rules:
 - Baseline failures are pre-existing: never make a task's success depend on them passing.
 - Fill architecture (how the relevant code is organised today) and affectedFiles. Put risks and open questions honestly.
 - Omit deploy unless the inventory says deployment is authorized for this run.
+- The application specification in the inventory is part of the request: plan its "Add" items with the smallest change that fits the existing code (for example a Dockerfile when Docker is added), and never replace what it lists as already present.
 - Maximise parallelism: only add a dependency when a task needs another task's output.
-${EXISTING_WORKSPACE_RULES}`;
+${existingRules(run, { plan: false })}`;
 }
 
 function plannerSystem(run) {

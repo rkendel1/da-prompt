@@ -464,53 +464,56 @@ test('keyboard and labels: every operations page can be driven from the keyboard
   await page.close();
 });
 
-test('New Run: every supported stack component can be selected or deselected; unsupported ones show their blocker', async (t) => {
+test('New Run: the application selector — profiles, catalog options with their status, the AppPort reason, and the same selector for an existing project', async (t) => {
   if (skip) return t.skip(skip);
   const { page, errors } = await open(main, { hash: '#/' });
   await page.waitForSelector('#new-form');
-  await page.waitForSelector('input[name=stackComponent][value=feltdb]');
-  assert.equal(await page.isHidden('#stack-opt'), false, 'shown for a new application');
-  assert.equal(await page.isChecked('input[name=stackComponent][value=appport]'), true, 'AppPort is on by default');
-  for (const id of ['appport', 'feltdb', 'distribution']) assert.equal(await page.isDisabled(`input[name=stackComponent][value=${id}]`), false, `${id} can be toggled`);
-  for (const id of ['authboundry', 'services', 'appboundry']) assert.equal(await page.isDisabled(`input[name=stackComponent][value=${id}]`), true, id);
-  assert.match(await textOf(page, '#stack-opt'), /AuthBoundry .*not supported yet: .*authboundry serve.*Next:/);
-  assert.match(await textOf(page, '#stack-opt'), /AppPort Services .*not supported yet: .*ServiceAuthorizer/);
-  // Choosing an existing project hides the stack: an existing project keeps its own.
-  await page.check('input[value=local]');
-  await page.waitForFunction(() => document.querySelector('#stack-opt').hidden);
-  await page.check('input[value=new]');
-  await page.waitForFunction(() => !document.querySelector('#stack-opt').hidden);
+  await page.waitForSelector('input[name=appspec-data][value=feltdb]');
+  const summary = () => textOf(page, '.appspec-summary');
+  assert.match(await summary(), /Full-stack web \| Plain HTML, CSS and JS .*AppPort valid/, 'the default application, at a glance');
+  assert.equal(await page.isChecked('input[name=appspec-capability][value=appport]'), true, 'AppPort is on by default');
+  for (const id of ['appport', 'feltdb', 'distribution']) assert.equal(await page.isDisabled(`input[name=appspec-capability][value=${id}], input[name=appspec-data][value=${id}]`), false, `${id} can be toggled`);
+  // Catalog-only options are not executable choices: listed apart, each with its blocker.
+  assert.equal(await page.$('input[value=authboundry]'), null);
+  assert.match(await textOf(page, '#stack-opt'), /not yet supported: AuthBoundry, AppPort Services, AppBoundry/);
+  assert.match(await textOf(page, '#stack-opt'), /AuthBoundry .*authboundry serve/);
+  // Searching narrows the options.
+  await page.fill('#appspec-search', 'feltdb');
+  await page.waitForFunction(() => document.querySelectorAll('.appspec-opts .opt').length === 1);
+  await page.fill('#appspec-search', '');
 
   // Deselecting AppPort asks for the reason; without one nothing starts.
   assert.equal(await page.isHidden('#appport-reason'), true);
-  await page.uncheck('input[name=stackComponent][value=appport]');
+  await page.uncheck('input[name=appspec-capability][value=appport]');
   await page.waitForSelector('#appport-reason:not([hidden])');
   await page.fill('textarea[name=idea]', 'An internal batch job');
   await page.click('button[type=submit]');
   await page.waitForSelector('#form-error:not([hidden])');
   assert.match(await textOf(page, '#form-error'), /Say why this app should not expose an AppPort boundary/);
-  // Selecting it again hides the question; selecting FeltDB records both.
-  await page.check('input[name=stackComponent][value=appport]');
+  // Selecting it again hides the question; choosing FeltDB swaps out "No persistent storage", visibly, and the run records it.
+  await page.check('input[name=appspec-capability][value=appport]');
   await page.waitForSelector('#appport-reason', { state: 'hidden' });
-  await page.check('input[name=stackComponent][value=feltdb]');
-  await page.uncheck('input[name=stackComponent][value=feltdb]');
-  await page.check('input[name=stackComponent][value=feltdb]');
+  await page.check('input[name=appspec-data][value=feltdb]');
+  await page.waitForFunction(() => /FeltDB/.test(document.querySelector('.appspec-summary').textContent) && !document.querySelector('input[name=appspec-data][value=data-none]').checked);
   await page.fill('textarea[name=idea]', 'A habit tracker that keeps its data');
   await page.click('button[type=submit]');
   await page.waitForFunction(() => /#\/runs\//.test(location.hash), null, { timeout: 20_000 });
   const id = (await page.evaluate(() => location.hash)).split('/').pop();
   const { run } = await (await fetch(`${main.url}api/runs/${id}`)).json();
   assert.deepEqual(run.settings.stack, ['appport', 'feltdb']);
+  assert.deepEqual(run.spec.desired.data, ['feltdb']);
   assert.equal('appportException' in run.settings, false);
   await page.waitForFunction(() => /stack appport \+ feltdb/.test(document.querySelector('#main').textContent), null, { timeout: 20_000 });
+  await page.waitForFunction(() => /Application specification/.test(document.querySelector('#main').textContent), null, { timeout: 20_000 });
   await fetch(`${main.url}api/runs/${id}/cancel`, { method: 'POST' });
 
   // Deselecting AppPort with a reason: the run records the exception and a stack without AppPort.
   const second = await open(main, { hash: '#/' });
-  await second.page.waitForSelector('input[name=stackComponent][value=appport]');
-  await second.page.uncheck('input[name=stackComponent][value=appport]');
+  await second.page.waitForSelector('input[name=appspec-capability][value=appport]');
+  await second.page.uncheck('input[name=appspec-capability][value=appport]');
   await second.page.fill('input[name=appportException]', 'internal batch job with no callers');
   await second.page.fill('textarea[name=idea]', 'An internal batch job');
+  await second.page.waitForFunction(() => /valid/.test(document.querySelector('.appspec-summary').textContent) && !/problem/.test(document.querySelector('.appspec-summary').textContent));
   await second.page.click('button[type=submit]');
   await second.page.waitForFunction(() => /#\/runs\//.test(location.hash), null, { timeout: 20_000 });
   const id2 = (await second.page.evaluate(() => location.hash)).split('/').pop();
@@ -518,7 +521,18 @@ test('New Run: every supported stack component can be selected or deselected; un
   assert.deepEqual(run2.settings.stack, []);
   assert.equal(run2.settings.appportException, 'internal batch job with no callers');
   await fetch(`${main.url}api/runs/${id2}/cancel`, { method: 'POST' });
-  assert.deepEqual([...errors, ...second.errors], []);
+
+  // An existing project uses the same selector: what it has is detected, and the review says what is kept.
+  const third = await open(main, { hash: '#/' });
+  await third.page.waitForSelector('input[name=appspec-data][value=feltdb]');
+  await third.page.check('input[value=local]');
+  await third.page.waitForFunction(() => document.querySelector('#directory-id option[value]'));
+  const label = (await third.page.$$eval('#directory-id option', (os) => os.map((o) => o.textContent))).find((o) => o.startsWith('widgets'));
+  await third.page.selectOption('#directory-id', { label });
+  await third.page.waitForFunction(() => /existing project/.test(document.querySelector('#appspec-mode').textContent) && /Already there \(kept\)\s*JavaScript/.test(document.querySelector('.appspec-review').textContent), null, { timeout: 15_000 });
+  assert.equal(await third.page.isChecked('input[name=appspec-capability][value=appport]'), false, 'an existing project adopts AppPort only when asked');
+  assert.deepEqual([...errors, ...second.errors, ...third.errors], []);
   await page.close();
   await second.page.close();
+  await third.page.close();
 });

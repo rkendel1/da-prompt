@@ -26,6 +26,7 @@ import { RunDiagnostics, instrumentProvider } from './diagnostics.js';
 import { contractWarnings } from './contract.js';
 import { appportException, cleanException, checkAppPortConformance } from './appport.js';
 import { resolveStack, checkStackConformance, stackLabel } from './stack.js';
+import { SPEC_VERSION, SpecError, normalizeSpec, specFromStack, assertValid, stackOf, planReconciliation, observeApplication, validateSpec, specEvidence, verifyCommands, specSummary, MET } from './appspec.js';
 import { launchApp, stopProcess } from './deploy.js';
 import { ProjectRegistry } from './registry.js';
 import { packageDelivery, packageExistingDelivery, writeReport, verdictOf, pushToGit, resolveOutputDir, checkOutputDir, exportProject } from './deliver.js';
@@ -139,13 +140,11 @@ export class Factory {
       // the run) instead of failing before any work is done. Existing projects always need a plan grounded in the project.
       standardPlanOnFailure: !existing && s.standardPlanOnFailure !== false,
     };
-    // New apps are AppPort-native (src/appport.js); a run may opt out only with a stated reason. Existing projects: not applicable.
-    const appportException = existing ? '' : cleanException(s.appportException);
-    if (appportException) settings.appportException = appportException;
-    // The product stack (src/stack.js, templates/stack.json): validated here so an unknown, unsupported or incomplete
-    // selection fails before anything runs. Existing projects keep their own stack.
-    if (existing && s.stack != null) throw new Error('A stack selection applies to new applications only; an existing project keeps its own stack.');
-    if (!existing) settings.stack = resolveStack(s.stack, { exception: appportException });
+    // The application specification (src/appspec.js): validated here, before anything runs. It decides the product stack
+    // (templates/stack.json) a new app is generated on and its AppPort exception, if any.
+    const app = this.resolveSpec(body, { existing, offline: choice.provider === 'offline', idea: inputs.idea });
+    if (app.exception) settings.appportException = app.exception;
+    if (!existing) settings.stack = app.stack;
     const repoUrl = !existing && typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : null;
     if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) throw new Error('repoUrl must be an https:// git URL');
     if (repoUrl && /^https:\/\/[^/?#]*@/.test(repoUrl)) throw new Error('repoUrl must not contain credentials; add a GitHub token in Settings instead');
@@ -173,6 +172,8 @@ export class Factory {
       providerOptions: choice.options,
       roleModels: choice.roleModels,
       retryModel: choice.retryModel,
+      // desired: what was asked for. observed / plan / evidence are filled in as the run establishes them (never assumed).
+      spec: { version: SPEC_VERSION, summary: specSummary(app.spec), desired: app.spec, observed: null, plan: existing ? null : planReconciliation(app.spec, null), evidence: null, diagnostics: app.diagnostics },
       outputDir,
       inputs: Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, redact(v)])),
       settings,
@@ -196,6 +197,28 @@ export class Factory {
     });
     if (choice.provider !== 'offline') this.providers.remember(choice.provider, choice.model);
     return run;
+  }
+
+  /**
+   * The run's application specification: `body.spec` (or a profile), else the earlier `settings.stack` /
+   * `settings.appportException`, which keep their exact behaviour (AppPort implied, the same messages) and become a spec.
+   * Throws a SpecError listing every problem with its resolution. Returns { spec, stack, exception, diagnostics }.
+   */
+  resolveSpec(body, { existing, offline = false, idea = '' }) {
+    const s = body.settings || {};
+    const lifecycle = existing ? 'existing' : 'new';
+    if (existing && s.stack != null) throw new Error('A stack selection applies to new applications only; an existing project keeps its own stack. To add technologies or capabilities to it, send an application spec.');
+    let spec;
+    if (body.spec != null) {
+      if (s.stack != null || s.appportException) throw new SpecError('Give the application either as spec or as settings.stack / settings.appportException, not both.');
+      spec = normalizeSpec(body.spec, { lifecycle, idea });
+    } else {
+      const exception = existing ? '' : cleanException(s.appportException);
+      spec = specFromStack(existing ? [] : resolveStack(s.stack, { exception }), { exception, lifecycle, idea });
+    }
+    const v = assertValid(spec, { offline });
+    const exception = spec.appport.mode === 'exempt' ? spec.appport.reason : '';
+    return { spec, stack: existing ? null : resolveStack(stackOf(spec), { exception }), exception, diagnostics: v.diagnostics };
   }
 
   /** Validate one provider/model pair, filling in discovered defaults. */
@@ -327,7 +350,9 @@ export class Factory {
       provider: old.provider, model: old.model, providerOptions: old.providerOptions, engine: old.engine,
       planner: { provider: old.plannerProvider, model: old.plannerModel, providerOptions: old.plannerOptions || undefined },
       roles: old.roleModels || {}, retryModel: old.retryModel || undefined,
-      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, appportException: s.appportException, stack: s.stack, standardPlanOnFailure: s.standardPlanOnFailure },
+      // The desired application carries over as asked (runs before specifications existed re-derive it from their stack).
+      ...(old.spec?.desired ? { spec: old.spec.desired } : {}),
+      settings: { maxParallel: s.maxParallel, maxAttempts: s.maxAttempts, maxAgentTurns: s.maxAgentTurns, tokenBudget: s.tokenBudget, timeoutMinutes: s.timeoutMinutes, deploy: s.deploy, pax: s.pax, paxSteps: s.paxSteps, ...(old.spec?.desired ? {} : { appportException: s.appportException, stack: s.stack }), standardPlanOnFailure: s.standardPlanOnFailure },
       source,
     });
   }
@@ -407,6 +432,14 @@ export class Factory {
         const reason = cleanException(s.appportException);
         if (reason) next.appportException = reason;
         else delete next.appportException;
+        // The specification is the record of what was asked: an exception given or withdrawn here changes it, validated.
+        if (run.spec?.desired) {
+          const d = run.spec.desired;
+          const desired = { ...d, capabilities: reason ? d.capabilities.filter((c) => c !== 'appport') : [...new Set(['appport', ...d.capabilities])], appport: reason ? { mode: 'exempt', reason } : { mode: 'require' } };
+          assertValid(desired, { offline: run.provider === 'offline' });
+          run.spec = { ...run.spec, desired, plan: run.plan ? run.spec.plan : planReconciliation(desired, null) };
+          next.stack = resolveStack(stackOf(desired), { exception: reason });
+        }
       }
       set('settings', next);
     }
@@ -591,6 +624,21 @@ export class Factory {
         await setStatus('planning');
         await layer('plan', 'active');
         await this.prepareExisting(run, { ws, signal, emit, save });
+      }
+      // Existing applications: what the repository has (observed), checked against what was asked (desired), and the plan to
+      // reconcile them, all before the planner or any agent can modify anything. A gap stops the run here, reported.
+      if (existing && run.spec?.desired && !run.spec.observed && run.project?.inspection) {
+        run.spec.observed = observeApplication(run.project.inspection);
+        const v = validateSpec(run.spec.desired, { observed: run.spec.observed });
+        run.spec.diagnostics = v.diagnostics;
+        emit('spec', { stage: 'observed', technologies: run.spec.observed.technologies.map((t) => t.id), appport: run.spec.observed.appport.declared ? 'declared' : 'absent' });
+        if (!v.ok) {
+          await save();
+          throw new SpecError(`The requested application cannot be reached from what this repository has: ${v.diagnostics.filter((x) => x.level === 'error').map((x) => `${x.message} ${x.resolution}`).join(' ')}`);
+        }
+        run.spec.plan = planReconciliation(run.spec.desired, run.spec.observed);
+        await save();
+        emit('spec', { stage: 'plan', summary: specSummary(run.spec.desired), items: run.spec.plan.items.map(({ id, action }) => ({ id, action })) });
       }
       // A new app's workspace sits inside the factory's data folder. Until it has a package.json, npm walks up and finds the
       // first one above it, so an early `npm test` ran some other project's suite (this repository's, in a default install).
@@ -1013,6 +1061,10 @@ export class Factory {
       items.push({ id: 'deploy', label: 'Deployment', ok: true, state: 'na', detail: 'not requested for this run — nothing was deployed' });
     }
     items.push({ id: 'docs', label: 'Documentation', ok: true, state: 'na', detail: 'only changed when the request or a plan task calls for it' });
+    // The same AppPort contract and gate as a new app, when the specification requires it.
+    if (run.spec?.desired?.capabilities.includes('appport')) items.push(await this.appportItem(run, ws, { allDone, signal, emit }));
+    const specItem = await this.specItem(run, ws, { checklist: items, commands: [] });
+    if (specItem) items.push(specItem);
 
     run.checklist = items;
     run.summary = redact(await writeSummary({ provider, run, signal, track }));
@@ -1289,6 +1341,46 @@ export class Factory {
     return { id: 'stack', label, ok: gate.ok, detail: gate.ok ? `${gate.checks.length} checks passed` : failed.map((c) => `${c.id}: ${c.detail}`).join('; ').slice(0, 600) };
   }
 
+  /** A new app's specification commands (build, typecheck: verifyCommands), run in its workspace once every task is done. */
+  async specCommands(run, ws, { allDone, signal, emit }) {
+    const desired = run.spec?.desired;
+    if (!desired || desired.lifecycle !== 'new' || !allDone || signal.aborted) return [];
+    const out = [];
+    for (const command of verifyCommands(desired)) {
+      const r = await ws.runCommand(command, { timeoutMs: run.settings.commandTimeoutMs, signal });
+      out.push({ command, exitCode: r.exitCode, ok: r.exitCode === 0, durationMs: r.durationMs, output: redact(`${r.stdout}\n${r.stderr}`.trim()).slice(-3000) });
+    }
+    if (out.length) emit('verify', { taskId: '_spec', results: out });
+    return out;
+  }
+
+  /**
+   * The specification checklist item: what verification established for each requested technology. Evidence comes from the
+   * checklist gates, the specification's commands and what is detected in the finished workspace, never from the selection
+   * or a model's summary. An existing app is judged on what was added or required, not on what it already had.
+   */
+  async specItem(run, ws, { checklist, commands }) {
+    const desired = run.spec?.desired;
+    if (!desired) return null;
+    const label = 'The application matches its specification (every requested technology verified)';
+    const existing = desired.lifecycle === 'existing';
+    const observed = observeApplication(await inspectProject(ws));
+    const scope = existing ? new Set((run.spec.plan?.items || []).filter((i) => i.action === 'add' || i.action === 'satisfied').map((i) => i.id)) : null;
+    run.spec.evidence = { ...specEvidence(desired, { checklist, commands, exists: (p) => ws.exists(p), observedAfter: observed, scope }), observed, commands: commands.map(({ command, exitCode, ok, durationMs }) => ({ command, exitCode, ok, durationMs })) };
+    const items = run.spec.evidence.items;
+    if (existing && !items.length) return { id: 'spec', label, ok: true, state: 'na', detail: 'nothing was requested beyond keeping the existing application' };
+    const bad = items.filter((i) => !MET.has(i.state));
+    const count = (st) => items.filter((i) => i.state === st).length;
+    return {
+      id: 'spec',
+      label,
+      ok: bad.length === 0,
+      detail: bad.length
+        ? bad.map((i) => `${i.name}: ${i.state}${i.checks.find((c) => c.state === 'failed' || c.state === 'not-run') ? ` (${i.checks.find((c) => c.state === 'failed' || c.state === 'not-run').check}: ${i.checks.find((c) => c.state === 'failed' || c.state === 'not-run').detail})` : ''}`).join('; ').slice(0, 600)
+        : `${count('verified')} verified, ${count('present')} present (presence-only checks), ${count('nothing-to-verify')} with nothing to verify`,
+    };
+  }
+
   /** The AppPort checklist item of a new app: the conformance gate's verdict, or the run's explicit exception. */
   async appportItem(run, ws, { allDone, signal, emit }) {
     const label = 'Capabilities are AppPort-native (discoverable, authorized, invocable)';
@@ -1298,12 +1390,16 @@ export class Factory {
       return { id: 'appport', label, ok: true, state: 'na', detail: `explicit exception for this run: ${exception}` };
     }
     if (!allDone || signal.aborted) return { id: 'appport', label, ok: false, detail: 'not checked: not all tasks completed' };
-    if (!run.plan.deploy?.start) return { id: 'appport', label, ok: false, detail: 'not checked: the plan has no start command to run the app with' };
+    // An existing application is started only when the run authorized a local preview; otherwise conformance is reported
+    // as not verified (a gap), never assumed from the packages it declares.
+    if (isExisting(run) && !run.settings.deploy) return { id: 'appport', label, ok: false, state: 'skipped', detail: 'not verified: checking AppPort conformance starts the app, and this run did not authorize a local preview. Re-run with "Deploy a live preview" to verify it.' };
+    const deploy = run.plan.deploy?.start ? run.plan.deploy : run.project?.inspection?.deploy?.proposed ? { start: run.project.inspection.deploy.proposed.command, healthPath: run.project.inspection.deploy.proposed.healthPath } : null;
+    if (!deploy) return { id: 'appport', label, ok: false, detail: 'not checked: there is no start command to run the app with' };
     emit('log', { text: 'Checking the AppPort capability boundary' });
     const gate = await checkAppPortConformance({
       ws,
       launch: async (env) => {
-        const r = await launchApp(ws.root, run.plan.deploy, { env: { ...this.appEnv(ws.root, 'appport-gate'), ...env }, timeoutMs: 30_000 });
+        const r = await launchApp(ws.root, deploy, { env: { ...this.appEnv(ws.root, 'appport-gate'), ...env }, timeoutMs: 30_000 });
         return { ok: r.ok, port: r.port, error: r.error, stop: () => r.ok && stopProcess(r.child) };
       },
     });
@@ -1334,6 +1430,9 @@ export class Factory {
     items.push({ id: 'tests', label: 'Full test suite passes', ok: suiteOk && completed === tasks.length, detail: completed === tasks.length ? suiteDetail : `${suiteDetail} (not counted: ${tasks.length - completed} task(s) incomplete)` });
     emit('verify', { taskId: '_final', results: run.finalVerification });
 
+    // The specification's own checks (a Vite app's build, a typecheck), before the preview serves what the build produced.
+    const specCommands = await this.specCommands(run, ws, { allDone, signal, emit });
+
     // Security review.
     run.security = await scanWorkspace(ws);
     const crit = run.security.findings.filter((f) => f.severity === 'critical' || f.severity === 'high');
@@ -1361,6 +1460,10 @@ export class Factory {
     let readme = '';
     if (ws.exists('README.md')) readme = await ws.readFile('README.md');
     items.push({ id: 'docs', label: 'Documentation is updated', ok: readme.trim().length > 200, detail: readme ? `README.md (${readme.length} chars)${docsDeploy ? ', DEPLOY.md' : ''}` : 'README.md missing' });
+
+    // The application matches its specification: evidence per requested technology (src/appspec.js).
+    const specItem = await this.specItem(run, ws, { checklist: items, commands: specCommands });
+    if (specItem) items.push(specItem);
 
     // Final summary.
     run.checklist = items;

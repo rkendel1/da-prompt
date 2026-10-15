@@ -26,6 +26,7 @@ import { describeStack } from './stack.js';
 import { describeInference } from './contract.js';
 import { readRecords, summarizeRun } from './diagnostics.js';
 import { runModelPerformance, aggregatePerformance } from './performance.js';
+import { describeCatalog, normalizeSpec, validateSpec, optionStates, specSummary, planReconciliation, observeApplication, stackOf, SpecError } from './appspec.js';
 import { TerminalManager, TerminalError, SIGNALS as TERM_SIGNALS } from './terminal.js';
 import { writeRecord, removeRecord, liveServer } from './runtime.js';
 import { ProjectError, browseDirectory, pickDirectory, directoryIdForPath, authorizedRoots, listDirectories, resolveDirectory, gitState, publicGit, inspectProject, describeInspection, inspectRemote, isExisting } from './project.js';
@@ -163,6 +164,10 @@ export async function createServer(overrides = {}) {
     if (parts[1] === 'terminal') return terminalApi(req, res, parts, url);
     if (parts[1] === 'engines' && method === 'GET') return json(res, 200, { engines: await engineStatus(cfg), default: cfg.defaultEngine || 'builtin' });
     if (parts[1] === 'stack' && parts.length === 2 && method === 'GET') return json(res, 200, describeStack());
+    // The technology catalog and profiles (templates/catalog.json), and validation of an application specification: the same
+    // checks run creation applies (src/appspec.js), with each option's state for the selector and a plan preview.
+    if (parts[1] === 'catalog' && parts.length === 2 && method === 'GET') return json(res, 200, describeCatalog());
+    if (parts[1] === 'spec' && parts[2] === 'validate' && method === 'POST') return json(res, 200, await checkSpec(await readBody(req)));
     // Track record of every model across stored runs (src/performance.js): observation only.
     if (parts[1] === 'models' && parts[2] === 'performance' && parts.length === 3 && method === 'GET') {
       const runs = [];
@@ -935,6 +940,49 @@ export async function createServer(overrides = {}) {
    * reordering a task never gets here; only this explicit action does. The task is linked to the run and stays
    * in progress until a person decides it is done (the run's own verification is shown, not assumed).
    */
+  /**
+   * Validate a requested application specification for the selector and the CLI. With a local source (or a local project),
+   * the folder is inspected read-only so the review shows what is already there; a GitHub source is observed after it is
+   * cloned, when the run validates again before any change. Never creates or modifies anything.
+   */
+  async function checkSpec(body = {}) {
+    const src = body.source && typeof body.source === 'object' ? body.source : null;
+    const lifecycle = src ? 'existing' : 'new';
+    let spec;
+    try {
+      spec = normalizeSpec(body.spec || {}, { lifecycle, idea: typeof body.idea === 'string' ? body.idea : '' });
+    } catch (err) {
+      if (!(err instanceof SpecError)) throw err;
+      return { ok: false, diagnostics: [{ level: 'error', code: 'shape', selections: [], message: err.message, resolution: 'Fix the specification and try again.' }] };
+    }
+    let observed = null;
+    let observation = lifecycle === 'existing' ? 'after the repository is cloned (the run checks again before any change)' : null;
+    if (src) {
+      let dir = null;
+      if (src.projectId) {
+        const located = await registry.locate(src.projectId, { purpose: 'inspect it' });
+        if (located.project.kind === 'local') dir = located.dir;
+      } else if (src.mode === 'local' && src.directoryId) dir = resolveDirectory(cfg, src.directoryId);
+      if (dir) {
+        observed = observeApplication(await inspectProject(new Workspace(dir.real)));
+        observation = 'inspected now (files and manifests, read-only)';
+      }
+    }
+    const offline = body.provider === 'offline';
+    const v = validateSpec(spec, { observed, offline });
+    return {
+      ok: v.ok,
+      spec,
+      summary: specSummary(spec),
+      diagnostics: v.diagnostics,
+      options: optionStates(spec, { observed, offline }),
+      observed,
+      observation,
+      plan: planReconciliation(spec, observed),
+      stack: v.ok && lifecycle === 'new' ? stackOf(spec) : null,
+    };
+  }
+
   async function startTask(id, body) {
     const task = await tasks.get(id);
     if (!STARTABLE.has(task.status)) throw new HttpError(409, `A ${task.status.replace('_', ' ')} task cannot be started${task.status === 'in_progress' ? ' (it already has a run; mark it blocked or ready first to run it again)' : ''}.`);

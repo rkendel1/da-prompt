@@ -70,7 +70,7 @@ test('the default stack is AppPort; selections are validated with actionable err
   assert.deepEqual(resolveStack('distribution, feltdb'), ['appport', 'feltdb', 'distribution'], 'canonical order, de-duplicated');
   assert.deepEqual(resolveStack(['feltdb'], { exception: 'batch tool' }), ['feltdb'], 'only an explicit AppPort exception leaves AppPort out');
   assert.throws(() => resolveStack(['appport'], { exception: 'x' }), /has an AppPort exception, so the stack cannot include appport/);
-  assert.throws(() => resolveStack(['postgres']), (e) => e instanceof StackError && /Unknown stack component: postgres\. Known: appport, feltdb, distribution, authboundry, services, appboundry/.test(e.message));
+  assert.throws(() => resolveStack(['postgres']), (e) => e instanceof StackError && /Unknown stack component: postgres\. Known: appport, feltdb, distribution, react, vite, typescript, authboundry, services, appboundry/.test(e.message));
   assert.throws(() => resolveStack('authboundry'), /AuthBoundry \(authboundry\) is not supported yet\. Blocker: .*authboundry serve.*never opened its listening port.*Next step: .*sign-in → \/auth\/session → \/auth\/authorize/);
   assert.throws(() => resolveStack('services'), /AppPort Services \(services\) is not supported yet\. Blocker: .*ServiceAuthorizer.*second authorization authority.*Next step: Support AuthBoundry first/);
   assert.throws(() => resolveStack('appboundry'), /AppBoundry \(appboundry\) is not supported yet\. Blocker: Not a broken package: .*contract-driven.*Next step: A separate integration design/);
@@ -91,9 +91,9 @@ test('a stack resolves to exactly its packages, and agents are told what to use 
   assert.match(rules, /Do not add packages of unselected components: .*@distribution-protocol\/protocol.*@authboundry\/core.*@appport\/services.*@appport\/appboundry/);
   assert.doesNotMatch(stackRules(resolveStack()), /createFeltDB/, 'unselected rules are not given');
   const view = describeStack();
-  assert.deepEqual(view.components.map((c) => [c.id, c.status]), [['appport', 'supported'], ['feltdb', 'supported'], ['distribution', 'supported'], ['authboundry', 'unsupported'], ['services', 'unsupported'], ['appboundry', 'unsupported']]);
+  assert.deepEqual(view.components.map((c) => [c.id, c.status]), [['appport', 'supported'], ['feltdb', 'supported'], ['distribution', 'supported'], ['react', 'supported'], ['vite', 'supported'], ['typescript', 'supported'], ['authboundry', 'unsupported'], ['services', 'unsupported'], ['appboundry', 'unsupported']]);
   assert.ok(view.components.filter((c) => c.status === 'unsupported').every((c) => c.blocker && c.next));
-  assert.equal(STACK_IDS.length, 6);
+  assert.equal(STACK_IDS.length, 9);
 });
 
 test('runs record their stack: the default, an explicit selection that survives a rerun, and refusals before anything runs', async () => {
