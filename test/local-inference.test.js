@@ -6,13 +6,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { blockNetwork } from './offline-guard.js';
-import { serve } from './http-stub.js';
+import { serve, completion } from './http-stub.js';
 import { tmpDir } from './helpers.js';
 import { loadConfig } from '../src/config.js';
 import { RunStore } from '../src/store.js';
 import { Factory } from '../src/factory.js';
 import { parseToolCallsFromText, parseLenient, resolveToolName } from '../src/providers/tooltext.js';
-import { fromOpenAIMessage } from '../src/providers/openai.js';
+import { fromOpenAIMessage, OpenAICompatProvider } from '../src/providers/openai.js';
 import { startBridge, fromOpenAIRequest } from '../src/providers/bridge.js';
 import { normalizePlan, planFromText, normalizeToolInput } from '../src/agents.js';
 import { compactHistory, historyBudget } from '../src/providers/history.js';
@@ -308,4 +308,145 @@ test('the fx engine reaches a local model through the bridge: num_ctx, text tool
   assert.notEqual(failed.status, 'completed');
   assert.ok(failed.plan, failed.error);
   assert.match(failed.plan.tasks[0].attempts[0].error, /^Model error: Ollama \(m:7b\): HTTP 400: model requires more system memory/);
+});
+
+// ── Deterministic local smoke tests: no live model, every reply scripted ───────────────────────────────────────────
+
+/** Mock Ollama whose agent never finishes on its own (it keeps writing files), so only the budget or the turn limit stops it. */
+async function busyOllama({ promptTokens = 6000 } = {}) {
+  const srv = await serve((req, body) => {
+    if (req.url === '/api/tags') return [200, { models: [{ name: 'q:7b', details: {} }] }];
+    if (req.url === '/api/show') return [200, { capabilities: ['completion', 'tools'] }];
+    const tools = (body.tools || []).map((t) => t.function.name);
+    const say = (message) => [200, { message: { role: 'assistant', ...message }, done: true, done_reason: 'stop', prompt_eval_count: promptTokens, eval_count: 20 }];
+    if (tools.includes('submit_plan')) {
+      return say({ content: '', tool_calls: [{ function: { name: 'submit_plan', arguments: { product: { name: 'G', summary: 'greeting', successCriteria: ['a.txt exists'] }, tasks: [{ id: 'a', role: 'engineer', title: 'A', description: 'write a.txt', acceptance: ['a.txt exists'], verify: ['test -f a.txt'] }], finalVerify: ['test -f a.txt'] } } }] });
+    }
+    return say({ content: '', tool_calls: [{ function: { name: 'write_file', arguments: { path: `f${body.messages.length}.txt`, content: 'x' } } }] });
+  });
+  servers.push(srv);
+  return srv;
+}
+
+test('Ollama planning requests turn thinking off; every other request and dialect is left alone', async () => {
+  const ollama = await localOllama();
+  const { factory } = factoryFor(ollama);
+  await factory.start((await factory.createRun({ idea: 'a hello file', provider: 'ollama', model: 'qwen3-coder:30b', settings: { deploy: false } })).id);
+  const chats = ollama.log.filter((r) => r.url === '/api/chat');
+  const isPlan = (r) => (r.body.tools || []).some((t) => t.function.name === 'submit_plan');
+  const plans = chats.filter(isPlan);
+  assert.ok(plans.length >= 1 && plans.every((r) => r.body.think === false), 'plan requests carry think:false');
+  assert.ok(plans.every((r) => r.body.tools.some((t) => t.function.name === 'submit_plan')), 'the plan contract (submit_plan tool) is still sent');
+  const others = chats.filter((r) => !isPlan(r));
+  assert.ok(others.length >= 2 && others.every((r) => !('think' in r.body)), 'agent and summary requests do not set think');
+
+  // Other dialects never get the field, planning or not.
+  const openai = await serve((req) => (req.url.endsWith('/chat/completions') ? completion({ content: 'ok' }) : [404, {}]));
+  servers.push(openai);
+  const compat = new OpenAICompatProvider({ id: 'x', label: 'X', baseUrl: `${openai.url}/v1`, model: 'm', dialect: 'openai' });
+  await compat.chat({ system: 's', messages: [{ role: 'user', content: 'go' }], meta: { kind: 'plan' } });
+  await compat.chat({ system: 's', messages: [{ role: 'user', content: 'go' }], meta: { kind: 'task' } });
+  const sent = openai.log.filter((r) => r.url.endsWith('/chat/completions'));
+  assert.equal(sent.length, 2);
+  assert.ok(sent.every((r) => !('think' in r.body) && !('options' in r.body)));
+});
+
+test('native tool calls from Ollama are parsed, and an incomplete plan does not pass', async () => {
+  const srv = await serve(() => [200, { message: { role: 'assistant', content: '', tool_calls: [{ function: { name: 'write_file', arguments: { path: 'src/a.js', content: 'export {}' } } }, { function: { name: 'complete_task', arguments: { summary: 'done', files: ['src/a.js'] } } }] }, done: true, done_reason: 'stop', prompt_eval_count: 11, eval_count: 5 }]);
+  servers.push(srv);
+  const provider = new OpenAICompatProvider({ id: 'ollama', label: 'Ollama', baseUrl: srv.url, model: 'm', dialect: 'ollama' });
+  const tools = NAMES.map((name) => ({ name, description: name, input_schema: { type: 'object' } }));
+  const res = await provider.chat({ system: 's', messages: [{ role: 'user', content: 'go' }], tools, meta: { kind: 'task' } });
+  assert.equal(res.stop_reason, 'tool_use');
+  assert.deepEqual(res.content.filter((c) => c.type === 'tool_use').map((c) => [c.name, c.input]), [['write_file', { path: 'src/a.js', content: 'export {}' }], ['complete_task', { summary: 'done', files: ['src/a.js'] }]]);
+  assert.deepEqual(res.usage, { input_tokens: 11, output_tokens: 5, reported: true });
+
+  const good = { product: { summary: 's', successCriteria: ['c'] }, tasks: [{ id: 'a', role: 'engineer', title: 't', description: 'd', acceptance: ['x'], verify: ['true'] }] };
+  assert.deepEqual(validatePlan(good), []);
+  assert.ok(validatePlan({ ...good, tasks: [] }).length, 'no tasks');
+  assert.ok(validatePlan({ ...good, product: { summary: 's' } }).some((m) => /successCriteria/.test(m)), 'no success criteria');
+  assert.ok(validatePlan({ ...good, tasks: [{ ...good.tasks[0], acceptance: [] }] }).some((m) => /acceptance/.test(m)));
+  assert.ok(validatePlan({ ...good, tasks: [{ ...good.tasks[0], dependsOn: ['ghost'] }] }).some((m) => /unknown task/.test(m)));
+  assert.ok(validatePlan({ ...good, tasks: [{ ...good.tasks[0], verify: 'true' }] }).some((m) => /verify/.test(m)), 'verify must be a list');
+});
+
+test('a model that never returns a plan cannot complete a run (the standard plan tasks escalate)', async () => {
+  const mute = await serve((req) => (req.url === '/api/chat' ? [200, { message: { role: 'assistant', content: 'I will think about it.' }, done: true, done_reason: 'stop' }] : req.url === '/api/tags' ? [200, { models: [{ name: 'q:7b', details: {} }] }] : [200, { capabilities: ['completion', 'tools'] }]));
+  servers.push(mute);
+  const { store, factory } = factoryFor(mute);
+  const run = await factory.start((await factory.createRun({ idea: 'x', provider: 'ollama', model: 'q:7b', settings: { deploy: false } })).id);
+  assert.notEqual(run.status, 'completed');
+  assert.equal(run.status, 'needs_attention');
+  assert.ok((await store.events(run.id)).some((e) => e.type === 'plan' && e.source !== 'model'), 'the plan is recorded as not coming from the model');
+  assert.ok(!(run.plan?.tasks || []).some((t) => t.status === 'completed'));
+});
+
+test('the bridge charges the budget per model request, refuses once it is spent, and keeps cancellation apart from errors', async () => {
+  let used = 0;
+  const track = { check() { if (used >= 100) throw new Error('token budget exhausted'); }, add(u) { used += (u.input_tokens || 0) + (u.output_tokens || 0); } };
+  let calls = 0;
+  const provider = { model: 'm', chat: async () => { calls++; return { content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn', usage: { input_tokens: 80, output_tokens: 20 } }; } };
+  const bridge = await startBridge(provider, { track });
+  servers.push(bridge);
+  const post = (body = {}) => fetch(`${bridge.baseUrl}/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${bridge.token}` }, body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], ...body }) });
+  assert.equal((await post()).status, 200);
+  assert.equal(used, 100, 'usage is charged when the request is answered, not when a turn ends');
+  assert.equal(bridge.budget(), null);
+  assert.equal((await post()).status, 502, 'the next request is refused');
+  assert.equal(calls, 1, 'and never reaches the model');
+  assert.match(bridge.budget().message, /token budget exhausted/);
+
+  // A hung-up request is a cancellation: no error is recorded and nothing is charged.
+  let seenSignal;
+  const slow = { model: 'm', chat: ({ signal }) => new Promise((_, rej) => { seenSignal = signal; signal.addEventListener('abort', () => rej(new Error('cancelled'))); }) };
+  let spent = 0;
+  const b2 = await startBridge(slow, { track: { check() {}, add: (u) => { spent += u.input_tokens || 0; } } });
+  servers.push(b2);
+  const ac = new AbortController();
+  const pending = fetch(`${b2.baseUrl}/chat/completions`, { method: 'POST', signal: ac.signal, headers: { authorization: `Bearer ${b2.token}` }, body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }] }) }).catch(() => null);
+  await new Promise((r) => setTimeout(r, 100));
+  ac.abort();
+  await pending;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(seenSignal.aborted, true, 'the provider call is cancelled');
+  assert.equal(b2.lastError(), null);
+  assert.equal(spent, 0);
+});
+
+test('fx: the budget stops an attempt between model requests, every request is counted, and the run says it is incomplete', async () => {
+  const ollama = await busyOllama({ promptTokens: 6000 });
+  const { factory } = factoryFor(ollama, { engineModules: { fx: httpFx() } });
+  const created = await factory.createRun({ idea: 'a', provider: 'ollama', model: 'q:7b', engine: 'fx', settings: { deploy: false, maxAttempts: 1, tokenBudget: 10_000 } });
+  const run = await factory.start(created.id);
+  const chats = ollama.log.filter((r) => r.url === '/api/chat');
+  const agentRequests = chats.filter((r) => !(r.body.tools || []).some((t) => t.function.name === 'submit_plan')).length;
+  // plan (6020) + one agent request (6020) = 12040 >= 10000: the second agent request is refused before it reaches the model.
+  assert.equal(agentRequests, 1, 'no request is sent once the budget is spent');
+  assert.equal(run.usage.calls, chats.length, 'usage.calls counts model requests, not engine turns');
+  assert.equal(run.usage.input + run.usage.output, chats.length * 6020, 'usage is the sum of what the provider reported');
+  assert.equal(run.status, 'needs_attention');
+  assert.match(run.error, /token budget exhausted \(12040 \/ 10000\)/);
+  assert.notEqual(run.plan.tasks[0].status, 'completed');
+  assert.equal(run.delivery, undefined, 'nothing is delivered as if it were finished');
+});
+
+test('a task whose required verification fails cannot make the run succeed', async () => {
+  const ollama = await serve((req, body) => {
+    if (req.url === '/api/tags') return [200, { models: [{ name: 'q:7b', details: {} }] }];
+    if (req.url === '/api/show') return [200, { capabilities: ['completion', 'tools'] }];
+    const tools = (body.tools || []).map((t) => t.function.name);
+    const call = (name, args) => [200, { message: { role: 'assistant', content: '', tool_calls: [{ function: { name, arguments: args } }] }, done: true, done_reason: 'stop', prompt_eval_count: 30, eval_count: 10 }];
+    if (tools.includes('submit_plan')) return call('submit_plan', { product: { name: 'G', summary: 'greeting', successCriteria: ['works'] }, tasks: [{ id: 'a', role: 'engineer', title: 'A', description: 'write a.txt', acceptance: ['works'], verify: ['test -f never-written.txt'] }], finalVerify: ['true'] });
+    if (tools.includes('complete_task')) return call('complete_task', { summary: 'all done, trust me', files: [] });
+    return [200, { message: { role: 'assistant', content: 'summary' }, done: true, done_reason: 'stop' }];
+  });
+  servers.push(ollama);
+  const { factory } = factoryFor(ollama);
+  const run = await factory.start((await factory.createRun({ idea: 'a', provider: 'ollama', model: 'q:7b', settings: { deploy: false, maxAttempts: 2 } })).id);
+  const t = run.plan.tasks[0];
+  assert.equal(t.status, 'escalated');
+  assert.equal(t.attempts.length, 2);
+  assert.ok(t.attempts.every((a) => a.verification.some((v) => v.ok === false)), 'verification really ran and failed');
+  assert.notEqual(run.status, 'completed');
+  assert.equal(run.checklist.find((c) => c.id === 'tasks')?.ok, false);
 });
