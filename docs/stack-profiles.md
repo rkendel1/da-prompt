@@ -32,8 +32,23 @@ Each package was installed from the npm registry and exercised by running code b
   - The factory sets `FELTDB_TELEMETRY=0` for everything it runs: agent commands, tests, previews and gates.
   - A generated app keeps the package default and documents it in its README and DEPLOY.md, so the choice stays with
     whoever deploys it.
-- **FeltDB writes nothing to disk before the first write**, so a generated app records its schema version (`app_meta`,
-  `id: 'schema'`) at startup. That versions the store and makes its use observable to a gate that never mutates the app.
+- **FeltDB's data model is a `feltdb.flow` file (FlowSpec), but the local runtime does not enforce it.** `@feltdb/core`
+  exports `parseFlowSpec`, `validateFlowSpec`, `compileApplicationContract` and `db.deployFlowSpec`. Deploying a flow into a
+  local store records it as the active model (`db.application.get()` returns its version and contract hash) and refuses a
+  destructive change ("Destructive migration requires explicit approval"). After a deploy, 0.11.9's local runtime still
+  accepts records in an undeclared collection, with missing, ill-typed or undeclared fields, with or without
+  `authorityScope`. Write-time checks exist only in FeltDB's Rust server. A FeltDB app is therefore generated like this:
+  - `feltdb.flow` at the project root is the single declaration of what the store holds; `feltdb validate` passes.
+  - `src/flow.js` loads and validates it (an invalid flow stops the app before anything opens). It deploys the flow when the
+    active contract differs, never with `allowDestructive`, then requires the active contract hash to equal the flow's.
+  - Every record is checked against the parsed flow before it is written: declared collection, declared fields only,
+    required fields present, declared types. A type the check does not know fails closed. This check is the app's own,
+    derived only from the flow, and documented as such.
+  - The deployment is also the store's first durable write. FeltDB writes nothing to disk before one, so this makes the
+    store observable to a gate that never mutates the app.
+- **A stopped app must close idle connections.** `server.close()` waits for keep-alive connections, so without
+  `closeIdleConnections()` a SIGTERM never reached `store.close()`. FeltDB stayed open and the writer lock stayed behind. The
+  shutdown handler of every template now closes idle connections and then the store.
 - **AppPort Services cannot be used without AuthBoundry.** Every consequential effect is authorized by a host-supplied
   AuthBoundry `ServiceAuthorizer`; without one, API-key management fails closed by design. An app-owned substitute
   authorizer would be a second authorization authority, so none is generated.
@@ -89,8 +104,9 @@ The offline agents build each profile through the normal workflow: plan, agents,
 | Profile | Offline app | Capabilities | Authority |
 | --- | --- | --- | --- |
 | **AppPort only** (default) | tracker, or a read-only catalog for catalog-like ideas | `items.*` / `entries.*` | the app's in-memory store |
-| **AppPort + FeltDB** | tracker on FeltDB | `items.list/get/create/update` | FeltDB in `DATA_DIR`: the only store, with the app as the sole writer (its own lock) |
+| **AppPort + FeltDB** | tracker on FeltDB | `items.list/get/create/update` | FeltDB in `DATA_DIR`, under the model in `feltdb.flow`: the only store, with the app as the sole writer (its own lock) |
 | **AppPort + Distribution Protocol** | release service | `releases.publish` (write), `releases.list/get/verify` (reads) | the app's release store; releases signed with `PUBLISHER_PRIVATE_KEY` |
+| **AppPort + FeltDB + Distribution Protocol** | release service on FeltDB | as above | signed releases (manifest, signature and artifact bytes) in FeltDB under `feltdb.flow`; immutable through `putIfAbsent` |
 
 Authority stays as before: client → AppPort → the app's own store functions → authoritative state. The FeltDB tracker uses
 the same `app.js`, `appport.js` and tests as the in-memory one; only `src/store.js` differs. Every call is awaited, so a
@@ -101,9 +117,9 @@ For Distribution Protocol, a valid signature is not enough. A release must be si
 comes only from the environment and never appears in a response, the manifest or the browser. Publishing goes through the
 authorized AppPort capability only; the HTTP API is read-only, plus public verification.
 
-Offline templates cover exactly these profiles. Other combinations of supported components, such as FeltDB +
-Distribution, are valid selections for model-backed agents. With the offline agents they produce an app the stack gate
-correctly fails, rather than a silent downgrade.
+The offline templates cover every combination of the supported components. Template layers are applied in order:
+`releases-feltdb` → `releases` → `feltdb` → base. FeltDB + Distribution therefore reuses the release service's API, AppPort
+boundary and signing, plus FeltDB's `src/flow.js`, and adds only its own store, flow and durability test.
 
 ## 5. The stack gate
 
@@ -116,6 +132,9 @@ A new run's checklist has a **stack** item next to the AppPort one (`checkStackC
 | `feltdb-used` | FeltDB selected, but no `src/` file imports it, or no test reads the state back through it |
 | `feltdb-durable-store` | the app, started with a throwaway `DATA_DIR`, creates no FeltDB state there |
 | `feltdb-sole-writer` | a second instance on the same `DATA_DIR` starts |
+| `feltdb-clean-shutdown` | after SIGTERM, the app does not release `DATA_DIR/.writer.lock` within 5 s |
+| `feltdb-flow` | `feltdb.flow` is missing at the project root, or the app's own `feltdb validate feltdb.flow` fails (checked even when the app does not start) |
+| `feltdb-flow-deployed` | after the app ran, a separate process reads the store's active model (`db.application.get()`) and its contract hash is not the one `feltdb.flow` compiles to; this includes an app that deploys no model or a different one |
 | `distribution-used` | Distribution selected, but no `src/` file imports it, or no test exercises it |
 
 The gate never touches the app's real data: it uses throwaway data folders under the workspace's `.home`, and previews get
@@ -161,7 +180,8 @@ from 3 test runs and 5 starts. Timings are indicative, not a benchmark.
 
 ```bash
 npm run check                                                     # ok
-node --require ./test/setup-env.cjs --test test/stack.test.js     # 10/10
+node --require ./test/setup-env.cjs --test test/stack.test.js     # 12/12
+npm run prove:stack -- --out docs/stack-proof.md                  # the end-to-end proof below
 node --require ./test/setup-env.cjs --test test/appport.test.js   # 10/10 (existing AppPort-native gate, unchanged behaviour)
 npm test                                                          # see the PR for the full result
 ```
@@ -175,17 +195,69 @@ npm test                                                          # see the PR f
     including an update;
   - a restarted app serves the same state;
   - a second instance is refused;
-  - the lock is released on shutdown.
+  - the lock is released on shutdown;
+  - the store's active model is exactly `feltdb.flow`, and each stored record has exactly the declared fields.
 - **AppPort + Distribution:**
   - publish through AppPort;
   - verify independently with the package, pinned to our key, over the bytes the app serves;
   - a tampered manifest, wrong bytes and a validly signed foreign release are rejected;
   - anonymous publishing gets `UNAUTHORIZED` and a repeat publish gets `CONFLICT`;
   - REST publishing gets 405.
+- **AppPort + FeltDB + Distribution:**
+  - every gate check passes;
+  - a release published through AppPort is read from a fresh process: `Release` record with exactly the flow's fields,
+    `verifyRelease` and `verifyArtifactBytes` pass on the stored manifest and bytes, and the active model is the flow;
+  - a restarted app serves and verifies the same release and still answers `CONFLICT` to a republish.
 - **Gate negatives:**
   - an unselected package declared, or installed;
   - a selected package missing, or at an incompatible version;
-  - a FeltDB app without a sole-writer lock, or keeping its state outside `DATA_DIR`.
+  - a FeltDB app without a sole-writer lock, or keeping its state outside `DATA_DIR`;
+  - a FeltDB app whose `feltdb.flow` is missing, or invalid (it also does not start), or that deploys a model other than the
+    one it ships.
+
+Each generated FeltDB app's own `test/feltdb.test.js` also proves the flow: `feltdb validate` passes; the record check
+refuses an undeclared collection, an undeclared field, a wrong type and a missing field; an invalid flow is refused; a
+destructive change keeps the store closed; an additive change becomes model version 2.
+
+### End-to-end proof (`npm run prove:stack`, report in [stack-proof.md](stack-proof.md))
+
+`scripts/prove-stack.mjs` generates *"A release service for our CLI tool that keeps every release"* with all three supported
+components through the normal factory workflow. It then checks the app from outside, independently of the factory's gates.
+The last run had 70 checks, all passing:
+- **Dependencies:** declared and installed packages equal the stack, and the unsupported packages are absent.
+- **The app's own tests** pass.
+- **AppPort:** the official `appport conformance` passes Level 1 (protocol) and Level 2 (discovery). Discovery, the
+  declared capabilities and scopes, invocation, authorization (anonymous, wrong token, reader, writer) and exposure rules
+  hold; REST publishing gets 405.
+- **FeltDB:**
+  - the sole writer is enforced and a clean shutdown releases the lock;
+  - a fresh process reads the release from FeltDB and gets the same view as AppPort and HTTP, with the stored bytes equal
+    to the served bytes;
+  - the release survives a restart and stays immutable.
+- **`feltdb.flow`:**
+  - it is valid by FeltDB's CLI and deployed as the active model, with the contract hashes equal;
+  - stored records have exactly the declared fields;
+  - FeltDB's own local runtime is shown *not* to check records;
+  - app variants with a changed flow (copies; the generated app is untouched) show:
+    - an invalid flow stops the app ("Unsupported field type int");
+    - a flow that no longer declares a written field makes that write fail with nothing stored;
+    - a destructive change stops the app and leaves the store unchanged ("Destructive migration requires explicit
+      approval: Release.content");
+    - an additive change becomes model v2 with the release still served.
+- **Distribution Protocol:**
+  - the package verifies the stored release and its bytes;
+  - a tampered manifest, wrong bytes and a foreign key are rejected, both by the package and by the app's `/api/verify`.
+- **Unsupported components:** selecting AuthBoundry, AppPort Services or AppBoundry together with the three is refused with
+  their blockers.
+
+Screenshots of the New Run stack picker are in [screenshots/stack/](screenshots/stack/):
+1. the default (AppPort only);
+2. all supported components selected;
+3. one deselected;
+4. AppPort deselected, which asks for a reason;
+5. that refused without a reason;
+6. the full form;
+7. the run page showing the stack.
 
 `test/ops-ui.test.js` drives the New Run form:
 - every supported component can be ticked and unticked, and unsupported ones are disabled with their blocker;
@@ -214,8 +286,13 @@ npm test                                                          # see the PR f
   to the first download.
 - The FeltDB profile is single-machine: one process per `DATA_DIR`, as the store requires. The FeltDB server and remote
   modes are not part of this profile.
-- The release service keeps releases in memory. Durable releases mean FeltDB + Distribution, which model-backed agents can
-  build but the offline templates do not cover.
+- Without FeltDB, the release service keeps releases in memory; select FeltDB for durable releases.
+- `feltdb.flow` is the authority by the app's own enforcement (validate, deploy, compare hashes, check every record).
+  FeltDB 0.11.9's local runtime records the deployed model but does not reject records that violate it. Its `unique`
+  indexes and policies are not enforced locally either, so the templates do not declare any. Release immutability comes
+  from `putIfAbsent` on the `name@version` key.
+- The official `appport conformance` Level 3 (capability execution) fails against generated apps. It probably cannot send
+  a credential to these authenticated capabilities; the same behaviour is covered by the client-based checks.
 - The stack gate's `*-used` checks are source supplements. Behaviour is proved by the apps' own tests (run by
   `finalVerify`) and by this repository's tests, not generically for arbitrary model-built apps.
 - No model-backed run was performed for this change; how often real models satisfy the stack rules is unknown.

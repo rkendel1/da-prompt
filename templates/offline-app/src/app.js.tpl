@@ -93,6 +93,12 @@ export function createApp({ store = new ItemStore(), tokens } = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const store = new ItemStore();
+  try {
+    await store.ready; // a durable store opens (and deploys its data model) before the app accepts a request
+  } catch (err) {
+    console.error(`${APP_NAME} cannot start: ${err.message}`);
+    process.exit(1);
+  }
   const server = createApp({ store });
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
   // Stop accepting requests, end idle keep-alive connections (they would hold close() open), then close the store so a

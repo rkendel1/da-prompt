@@ -27,13 +27,15 @@ export function appKind(inputs = {}, stack = STACK.default) {
 /** Template layers, most specific first: files under templates/offline-app/variants/<layer>/ replace the shared ones. */
 const layersOf = (kind, stack) => {
   if (!stack.includes('feltdb')) return [kind];
-  return kind === 'releases' ? ['releases-feltdb', 'releases'] : kind === 'tracker' ? ['feltdb', 'tracker'] : [kind];
+  return kind === 'releases' ? ['releases-feltdb', 'releases', 'feltdb'] : kind === 'tracker' ? ['feltdb', 'tracker'] : [kind];
 };
 
 /** The files each task writes, for this kind and stack. */
 function filesFor(taskId, kind, stack) {
   const files = [...(TASK_FILES[taskId] || [])];
   if (taskId === 'core' && kind === 'releases') files.splice(files.length - 1, 0, ['src/signing.js', 'src/signing.js.tpl']);
+  // A FeltDB store's data model: feltdb.flow, deployed and enforced by src/flow.js (written before the store that uses it).
+  if (taskId === 'core' && stack.includes('feltdb') && kind !== 'catalog') files.splice(2, 0, ['feltdb.flow', 'feltdb.flow.tpl'], ['src/flow.js', 'src/flow.js.tpl']);
   if (taskId === 'tests') {
     files.unshift(['test/helpers.js', 'test/helpers.js.tpl']);
     if (stack.includes('feltdb') && kind !== 'catalog') files.push(['test/feltdb.test.js', 'test/feltdb.test.js.tpl']);
@@ -170,7 +172,7 @@ const SUMMARIES = {
     fix: 'Fixed: closed the unterminated object literal in ReleaseStore.stats().',
   },
 };
-const FELTDB_SUMMARY = ' State is stored durably in FeltDB (@feltdb/core) with the app as the sole writer of its DATA_DIR.';
+const FELTDB_SUMMARY = ' State is stored durably in FeltDB (@feltdb/core) under the model in feltdb.flow (deployed at startup, every record checked against it), with the app as the sole writer of its DATA_DIR.';
 
 export class OfflineProvider {
   constructor({ faults = 'on', delayMs = Number(process.env.FACTORY_OFFLINE_DELAY_MS ?? 350) } = {}) {
@@ -410,7 +412,7 @@ function templateVars(inputs = {}, { faulty, stack = STACK.default, kind = appKi
     STACK_LABEL: stack.map((id) => STACK.components[id]?.label || id).join(' + '),
     ...(stack.includes('feltdb')
       ? {
-          STACK_NOTES: '\nState is stored durably in [FeltDB](https://www.npmjs.com/package/@feltdb/core) (`@feltdb/core`) under `DATA_DIR`\n(default `./data`). This process is the only writer of that folder: it holds `DATA_DIR/.writer.lock` and a second instance\nrefuses to start. Back the folder up; do not open it for writing from another process.\n\n@feltdb/core sends anonymous usage events (event type, random install id, version, runtime, OS) to feltdb.com by default;\nset `FELTDB_TELEMETRY=0` to turn that off.\n',
+          STACK_NOTES: '\nState is stored durably in [FeltDB](https://www.npmjs.com/package/@feltdb/core) (`@feltdb/core`) under `DATA_DIR`\n(default `./data`). This process is the only writer of that folder: it holds `DATA_DIR/.writer.lock` and a second instance\nrefuses to start. Back the folder up; do not open it for writing from another process.\n\nWhat the store may hold is declared in `feltdb.flow` (FeltDB FlowSpec; check it with `npx feltdb validate feltdb.flow`). At startup the\napp validates it, deploys it as the store\'s active model and requires the active contract to be exactly this file; every record is\nchecked against it before it is written (`src/flow.js`; FeltDB 0.11.9\'s local runtime does not check records itself). Change the\nmodel in `feltdb.flow`: an additive change (a new collection or optional field) becomes the next model version, a destructive one\n(removing a collection or field) is refused and the app does not start.\n\n@feltdb/core sends anonymous usage events (event type, random install id, version, runtime, OS) to feltdb.com by default;\nset `FELTDB_TELEMETRY=0` to turn that off.\n',
           STORE_LINE: 'FeltDB-backed store with validation (the single source of truth)',
           STORE_NEXT: '',
           RELEASE_STORE_LINE: 'Releases in FeltDB (durable, immutable) and their rules',
