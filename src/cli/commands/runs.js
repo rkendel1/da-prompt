@@ -46,6 +46,7 @@ export const RUN_OPTIONS = {
   'no-pax': { type: 'boolean', description: 'Do not collect PAX observations.' },
   'pax-steps': { type: 'string', valueName: 'LIST', description: 'Comma-separated PAX steps (info,doctor,reality,drift,graph,test-plan,test).' },
   deploy: { type: 'boolean', description: 'Authorize a local preview of the result.' },
+  stack: { type: 'string', valueName: 'IDS', description: 'New apps only: product stack components, comma-separated (AppPort is always included), e.g. feltdb or distribution. See: da-prompt stack' },
   'appport-exception': { type: 'string', valueName: 'REASON', description: 'New apps only: do not require an AppPort capability boundary, for the stated reason (recorded in the run).' },
   'allow-install': { type: 'boolean', description: 'Allow dependency installs (they run project scripts).' },
   'auto-apply': { type: 'boolean', description: 'Local directory runs: apply the result to your directory automatically when it is verified and ready.' },
@@ -80,6 +81,10 @@ export async function startRun(ctx, { forceNew = false } = {}) {
   if (opts['no-pax']) settings.pax = false;
   if (opts['pax-steps']) settings.paxSteps = opts['pax-steps'].split(',').map((s) => s.trim()).filter(Boolean);
   if (opts.deploy) settings.deploy = true;
+  if (opts.stack !== undefined) {
+    if (source) throw usageError('--stack only applies to new applications (--new); an existing project keeps its own stack.');
+    settings.stack = opts.stack.split(',').map((x) => x.trim()).filter(Boolean);
+  }
   if (opts['appport-exception'] !== undefined) {
     if (source) throw usageError('--appport-exception only applies to new applications (--new).');
     if (!opts['appport-exception'].trim()) throw usageError('--appport-exception needs a reason.');
@@ -632,7 +637,7 @@ export default [
   { path: ['runs', 'follow'], summary: 'Watch a run live; reconnect after a disconnect.', args: '<run-id>', minArgs: 1, options: { ...follow, tail: { type: 'string', valueName: 'N', description: 'History lines shown first (default 15).' } }, run: followCmd },
   { path: ['runs', 'cancel'], summary: 'Cancel an executing run.', args: '<run-id>', minArgs: 1, options: { wait: { type: 'string', valueName: 'SECONDS', description: 'How long to wait for it to stop (default 30).' } }, run: cancel },
   { path: ['runs', 'update'], summary: 'Change a stopped run (provider, model, engine, limits, a note to the agents) and optionally resume it.', args: '<run-id>', minArgs: 1, options: { ...follow, provider: RUN_OPTIONS.provider, model: RUN_OPTIONS.model, 'planner-provider': RUN_OPTIONS['planner-provider'], 'planner-model': RUN_OPTIONS['planner-model'], engine: RUN_OPTIONS.engine, budget: RUN_OPTIONS.budget, attempts: RUN_OPTIONS.attempts, parallel: RUN_OPTIONS.parallel, turns: RUN_OPTIONS.turns, 'allow-install': RUN_OPTIONS['allow-install'], note: { type: 'string', valueName: 'TEXT', description: 'A note added to the agents\' prompt as the newest instruction.' }, interrupt: { type: 'boolean', description: 'Stop the run first if it is still executing.' }, resume: { type: 'boolean', description: 'Continue the run right after saving.' } }, run: update },
-  { path: ['runs', 'rerun'], summary: 'Start a new run from an earlier one (same request, model and project).', args: '<run-id>', minArgs: 1, options: { ...follow, 'allow-install': RUN_OPTIONS['allow-install'] }, run: rerun },
+  { path: ['runs', 'rerun'], summary: 'Start a new run from an earlier one (same request, model, settings and stack or project).', args: '<run-id>', minArgs: 1, options: { ...follow, 'allow-install': RUN_OPTIONS['allow-install'] }, run: rerun },
   { path: ['runs', 'resume'], summary: 'Continue a stopped, interrupted or cancelled run.', args: '<run-id>', minArgs: 1, options: follow, run: (c) => control(c, 'resume', {}, 'resumed') },
   { path: ['runs', 'retry'], summary: 'Retry an escalated task with a fresh set of attempts.', args: '<run-id> <task-id>', minArgs: 2, options: { description: { type: 'string', valueName: 'TEXT', description: 'Replace the task spec first.' }, verify: { type: 'string', multiple: true, valueName: 'CMD', description: 'Replace the verify commands (repeatable).' }, ...follow }, run: (c) => control({ ...c, args: [c.args[0]] }, `tasks/${encodeURIComponent(c.args[1])}/retry`, { description: c.opts.description, verify: c.opts.verify }, 'retried') },
   { path: ['runs', 'skip'], summary: 'Skip an escalated task and continue.', args: '<run-id> <task-id>', minArgs: 2, options: follow, run: (c) => control({ ...c, args: [c.args[0]] }, `tasks/${encodeURIComponent(c.args[1])}/skip`, {}, 'continued') },

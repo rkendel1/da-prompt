@@ -2,7 +2,7 @@
 
 {{IDEA}}
 
-Built and verified by the da-prompt software factory.
+Built and verified by the da-prompt software factory. Stack: {{STACK_LABEL}}.
 
 ## Quick start
 ```bash

@@ -164,6 +164,7 @@ function renderNew({ project: preselect = '' } = {}) {
   const picker = mountModelPicker($('#model-picker'), api);
   const project = mountProjectPicker(form, { preselect });
   mountNewRunExtras(form, picker, project);
+  const stack = mountStackPicker(form, project);
   form.allowInstall.checked = Boolean(config.defaults.allowInstall);
   form.maxParallel.value = config.defaults.maxParallel;
   form.maxAttempts.value = config.defaults.maxAttempts;
@@ -176,7 +177,7 @@ function renderNew({ project: preselect = '' } = {}) {
     const err = $('#form-error');
     err.hidden = true;
     const btn = form.querySelector('button[type=submit]');
-    const missing = project.validate(new FormData(form));
+    const missing = project.validate(new FormData(form)) || (project.mode() === 'new' ? stack.validate() : '');
     if (missing) {
       err.textContent = missing;
       err.hidden = false;
@@ -201,6 +202,7 @@ function renderNew({ project: preselect = '' } = {}) {
         tokenBudget: Number(fd.get('tokenBudget')),
         deploy: fd.get('deploy') === 'on',
         pax: fd.get('pax') === 'on',
+        ...(project.mode() === 'new' ? stack.settings() : {}),
       },
     };
     try {
@@ -288,6 +290,46 @@ function mountNewRunExtras(form, picker, project) {
 
 // Project section: new project | local directory | GitHub repository. Paths never come from the browser:
 // local directories are picked from the server's authorized list and referenced by opaque id.
+/**
+ * The product stack of a new app (GET /api/stack, templates/stack.json). Every supported component can be ticked or unticked;
+ * unsupported ones are shown with their blocker instead of being selectable. AppPort is on by default: unticking it needs a
+ * reason, sent as the run's AppPort exception (the factory refuses a new app without AppPort and without a reason).
+ */
+function mountStackPicker(form, project) {
+  const box = $('#stack-opt');
+  const choices = $('#stack-choices');
+  const reason = $('#appport-reason');
+  const appportOn = () => choices.querySelector('input[name=stackComponent][value=appport]')?.checked !== false;
+  const sync = () => {
+    box.hidden = project.mode() !== 'new';
+    reason.hidden = appportOn();
+  };
+  form.addEventListener('change', sync);
+  sync();
+  api('api/stack')
+    .then(({ components, default: defaults }) => {
+      choices.innerHTML = components
+        .map((c) => {
+          const on = c.required || defaults.includes(c.id);
+          const disabled = c.status !== 'supported';
+          const pkgs = Object.entries(c.packages || {}).map(([k, v]) => `${k}@${v}`).join(', ');
+          const note = c.status === 'supported' ? (c.required ? 'on by default; unticking it needs a reason' : '') : `not supported yet: ${c.blocker} Next: ${c.next}`;
+          return `<label class="field check stack-choice${c.status === 'supported' ? '' : ' unsupported'}" title="${esc(pkgs)}"><input type="checkbox" name="stackComponent" value="${esc(c.id)}"${on ? ' checked' : ''}${disabled ? ' disabled' : ''}> <span><b>${esc(c.label)}</b> — ${esc(c.summary)}${note ? ` <small class="muted">${esc(note)}</small>` : ''}</span></label>`;
+        })
+        .join('');
+      sync();
+    })
+    .catch(() => {
+      choices.textContent = 'The stack options could not be loaded; the default stack (AppPort) will be used.';
+    });
+  const selected = () => [...choices.querySelectorAll('input[name=stackComponent]')].filter((i) => i.checked).map((i) => i.value);
+  return {
+    selected,
+    validate: () => (!appportOn() && !form.appportException.value.trim() ? 'Say why this app should not expose an AppPort boundary, or tick AppPort again.' : ''),
+    settings: () => (appportOn() ? { stack: selected() } : { stack: selected(), appportException: form.appportException.value.trim() }),
+  };
+}
+
 function mountProjectPicker(form, { preselect = '' } = {}) {
   const cfg = config.projects || {};
   const radios = [...form.querySelectorAll('[name=sourceMode]')];
@@ -589,7 +631,7 @@ function renderRun({ keepTab = false } = {}) {
   root.innerHTML = `
     <div class="run-head">
       <div>
-        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.engine && run.engine !== 'builtin' ? ` · engine ${esc(run.engine)}` : ''}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}${run.projectId ? ` · project <a href="#/projects/${esc(run.projectId)}">${esc(run.projectName || 'project')}</a>` : ''}</p>
+        <p class="eyebrow">run ${esc(run.id)} · ${esc(run.providerLabel || run.provider)} · ${esc(run.model)}${plannerLabel(run)}${run.engine && run.engine !== 'builtin' ? ` · engine ${esc(run.engine)}` : ''}${run.settings?.stack && run.settings.stack.join() !== 'appport' ? ` · stack ${esc(run.settings.stack.join(' + '))}` : ''}${run.source ? ` · ${run.source.mode === 'github' ? 'github' : 'local'} ${esc(run.source.label)}` : ''}${run.projectId ? ` · project <a href="#/projects/${esc(run.projectId)}">${esc(run.projectName || 'project')}</a>` : ''}</p>
         <h1>${esc(run.title)} <span class="pill ${esc(run.status)}">${esc(statusLabel(run.status))}</span></h1>
         <div class="meta">
           <span>${tasks.length ? `${done}/${tasks.length} tasks` : 'planning'}</span>

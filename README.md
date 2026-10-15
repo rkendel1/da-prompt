@@ -871,7 +871,7 @@ capability boundary over its own state and rules, so an agent can discover what 
 manifest with JSON Schemas, read/write effects and required permissions) and call it, instead of reverse-engineering its HTTP
 API. Details, design notes and the measured footprint: [docs/appport-native.md](docs/appport-native.md).
 
-- **Packages:** the published `@appport/*` packages at the exact versions in `templates/appport-packages.json` (core, schema,
+- **Packages:** the published `@appport/*` packages at the exact versions in `templates/stack.json` (core, schema,
   authorization, protocol, server; client and transport-http for the app's tests). They have no third-party dependencies. Agents
   install them with `npm install --no-audit --no-fund --ignore-scripts --prefer-offline`; npm's cache is shared by every run
   of a data dir (`FACTORY_NPM_CACHE`, default `<data dir>/cache/npm`), so after the first download installs are local.
@@ -892,6 +892,24 @@ API. Details, design notes and the measured footprint: [docs/appport-native.md](
 - **Offline agents** build two kinds of app with the same contract: a *tracker* (items with a create/update workflow; delete is
   deliberately not exposed) and, for ideas such as a catalog, directory or glossary, a read-only *catalog* (search/get/categories,
   no write capability). `test/appport.test.js` generates both through the normal workflow and drives them with the client.
+
+### Choosing the stack
+
+A new run also chooses its **product stack** (details, findings and measurements: [docs/stack-profiles.md](docs/stack-profiles.md)).
+AppPort is required and on by default. FeltDB (durable, transactional state) and the Distribution Protocol (signed,
+verifiable releases) are optional. AuthBoundry, AppPort Services and AppBoundry are known but **not supported yet**:
+selecting one fails before the run starts, with the verified blocker and the next step.
+
+```bash
+da-prompt stack                                        # components, pinned packages, status and blockers
+da-prompt run "A habit tracker" --new --stack feltdb   # AppPort + FeltDB (AppPort is implied)
+```
+
+In the browser it is the *Product stack* fieldset on New Run, where each supported component can be ticked or unticked (unticking AppPort asks for the reason that is recorded as the run's AppPort exception); through the API, `settings.stack` (`GET /api/stack` lists the
+options). A new run's checklist has a **stack** item: the selected packages are installed at compatible versions, unselected
+packages are absent, and the selected integrations work (a FeltDB app keeps its state in `DATA_DIR` and refuses a second
+writer; a Distribution app signs and verifies with the package). Reruns keep the selection. The factory runs everything with
+`FELTDB_TELEMETRY=0`; a generated FeltDB app documents FeltDB's default telemetry and the switch.
 
 ## Existing projects
 

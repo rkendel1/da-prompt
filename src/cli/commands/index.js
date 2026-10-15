@@ -5,6 +5,7 @@ import projects from './projects.js';
 import runs from './runs.js';
 import pax from './pax.js';
 import diagnostics from './diagnostics.js';
+import stack from './stack.js';
 
-export const commands = [...system, ...config, ...providers, ...projects, ...runs, ...pax, ...diagnostics];
+export const commands = [...system, ...config, ...providers, ...projects, ...runs, ...pax, ...diagnostics, ...stack];
 export default commands;

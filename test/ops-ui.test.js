@@ -463,3 +463,62 @@ test('keyboard and labels: every operations page can be driven from the keyboard
   }
   await page.close();
 });
+
+test('New Run: every supported stack component can be selected or deselected; unsupported ones show their blocker', async (t) => {
+  if (skip) return t.skip(skip);
+  const { page, errors } = await open(main, { hash: '#/' });
+  await page.waitForSelector('#new-form');
+  await page.waitForSelector('input[name=stackComponent][value=feltdb]');
+  assert.equal(await page.isHidden('#stack-opt'), false, 'shown for a new application');
+  assert.equal(await page.isChecked('input[name=stackComponent][value=appport]'), true, 'AppPort is on by default');
+  for (const id of ['appport', 'feltdb', 'distribution']) assert.equal(await page.isDisabled(`input[name=stackComponent][value=${id}]`), false, `${id} can be toggled`);
+  for (const id of ['authboundry', 'services', 'appboundry']) assert.equal(await page.isDisabled(`input[name=stackComponent][value=${id}]`), true, id);
+  assert.match(await textOf(page, '#stack-opt'), /AuthBoundry .*not supported yet: .*authboundry serve.*Next:/);
+  assert.match(await textOf(page, '#stack-opt'), /AppPort Services .*not supported yet: .*ServiceAuthorizer/);
+  // Choosing an existing project hides the stack: an existing project keeps its own.
+  await page.check('input[value=local]');
+  await page.waitForFunction(() => document.querySelector('#stack-opt').hidden);
+  await page.check('input[value=new]');
+  await page.waitForFunction(() => !document.querySelector('#stack-opt').hidden);
+
+  // Deselecting AppPort asks for the reason; without one nothing starts.
+  assert.equal(await page.isHidden('#appport-reason'), true);
+  await page.uncheck('input[name=stackComponent][value=appport]');
+  await page.waitForSelector('#appport-reason:not([hidden])');
+  await page.fill('textarea[name=idea]', 'An internal batch job');
+  await page.click('button[type=submit]');
+  await page.waitForSelector('#form-error:not([hidden])');
+  assert.match(await textOf(page, '#form-error'), /Say why this app should not expose an AppPort boundary/);
+  // Selecting it again hides the question; selecting FeltDB records both.
+  await page.check('input[name=stackComponent][value=appport]');
+  await page.waitForSelector('#appport-reason', { state: 'hidden' });
+  await page.check('input[name=stackComponent][value=feltdb]');
+  await page.uncheck('input[name=stackComponent][value=feltdb]');
+  await page.check('input[name=stackComponent][value=feltdb]');
+  await page.fill('textarea[name=idea]', 'A habit tracker that keeps its data');
+  await page.click('button[type=submit]');
+  await page.waitForFunction(() => /#\/runs\//.test(location.hash), null, { timeout: 20_000 });
+  const id = (await page.evaluate(() => location.hash)).split('/').pop();
+  const { run } = await (await fetch(`${main.url}api/runs/${id}`)).json();
+  assert.deepEqual(run.settings.stack, ['appport', 'feltdb']);
+  assert.equal('appportException' in run.settings, false);
+  await page.waitForFunction(() => /stack appport \+ feltdb/.test(document.querySelector('#main').textContent), null, { timeout: 20_000 });
+  await fetch(`${main.url}api/runs/${id}/cancel`, { method: 'POST' });
+
+  // Deselecting AppPort with a reason: the run records the exception and a stack without AppPort.
+  const second = await open(main, { hash: '#/' });
+  await second.page.waitForSelector('input[name=stackComponent][value=appport]');
+  await second.page.uncheck('input[name=stackComponent][value=appport]');
+  await second.page.fill('input[name=appportException]', 'internal batch job with no callers');
+  await second.page.fill('textarea[name=idea]', 'An internal batch job');
+  await second.page.click('button[type=submit]');
+  await second.page.waitForFunction(() => /#\/runs\//.test(location.hash), null, { timeout: 20_000 });
+  const id2 = (await second.page.evaluate(() => location.hash)).split('/').pop();
+  const run2 = (await (await fetch(`${main.url}api/runs/${id2}`)).json()).run;
+  assert.deepEqual(run2.settings.stack, []);
+  assert.equal(run2.settings.appportException, 'internal batch job with no callers');
+  await fetch(`${main.url}api/runs/${id2}/cancel`, { method: 'POST' });
+  assert.deepEqual([...errors, ...second.errors], []);
+  await page.close();
+  await second.page.close();
+});

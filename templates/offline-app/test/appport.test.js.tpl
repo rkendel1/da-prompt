@@ -6,10 +6,11 @@ import { AppPort } from '@appport/client';
 import { createHttpTransport } from '@appport/transport-http';
 import { createApp } from '../src/app.js';
 import { ItemStore } from '../src/store.js';
+import { tempDir } from './helpers.js';
 
 const FULL = 'test-full-token-7f3k9q';
 const READ = 'test-read-token-2m8x4w';
-const store = new ItemStore();
+const store = new ItemStore({ path: tempDir() });
 let server;
 let base;
 
@@ -18,7 +19,10 @@ before(async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => new Promise((r) => server.close(r)));
+after(async () => {
+  await new Promise((r) => server.close(r));
+  await store.close();
+});
 
 const connect = (token) => AppPort.discover({ origin: base, ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}), transports: { http: (o) => createHttpTransport(o) } });
 const rejects = (promise, code) => assert.rejects(promise, (e) => e.code === code);
@@ -43,33 +47,33 @@ test('reads and writes go through the store: results match the HTTP API and the 
   const app = await connect(FULL);
   const { item } = await app.call('items.create', { title: '  Ship it  ', notes: 'from an agent' });
   assert.equal(item.title, 'Ship it', 'the store\'s own validation (trim) applied');
-  assert.deepEqual(store.get(item.id), item, 'the store holds exactly what the capability returned');
+  assert.deepEqual((await store.get(item.id)), item, 'the store holds exactly what the capability returned');
   assert.deepEqual((await restItems()).find((i) => i.id === item.id), item, 'and the HTTP API sees it');
 
   const updated = await app.call('items.update', { id: item.id, done: true });
   assert.equal(updated.item.done, true);
-  assert.equal(store.get(item.id).done, true);
+  assert.equal((await store.get(item.id)).done, true);
 
   // A change made through the HTTP API is what the capability reads.
   const viaRest = await (await fetch(`${base}/api/items`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'from the UI' }) })).json();
   const listed = await app.call('items.list', {});
-  assert.deepEqual(listed.items, store.list());
+  assert.deepEqual(listed.items, (await store.list()));
   assert.ok(listed.items.some((i) => i.id === viaRest.item.id));
-  assert.deepEqual((await app.call('items.get', { id: item.id })).item, store.get(item.id));
+  assert.deepEqual((await app.call('items.get', { id: item.id })).item, (await store.get(item.id)));
 });
 
 test('the store\'s rules apply to capabilities: invalid input and unknown ids are refused, nothing changes', async () => {
   const app = await connect(FULL);
-  const before = JSON.stringify(store.list());
+  const before = JSON.stringify((await store.list()));
   await rejects(app.call('items.create', { title: 'x'.repeat(201) }), 'INVALID_INPUT');
   await rejects(app.call('items.create', { title: '' }), 'INVALID_INPUT');
   await rejects(app.call('items.get', { id: 'missing' }), 'NOT_FOUND');
   await rejects(app.call('items.update', { id: 'missing', done: true }), 'NOT_FOUND');
-  assert.equal(JSON.stringify(store.list()), before);
+  assert.equal(JSON.stringify((await store.list())), before);
 });
 
 test('unauthenticated and under-privileged callers are refused, and the state is unchanged', async () => {
-  const before = JSON.stringify(store.list());
+  const before = JSON.stringify((await store.list()));
   const anon = await connect();
   await rejects(anon.call('items.list', {}), 'UNAUTHORIZED');
   await rejects(anon.call('items.create', { title: 'sneaky' }), 'UNAUTHORIZED');
@@ -78,23 +82,25 @@ test('unauthenticated and under-privileged callers are refused, and the state is
   const reader = await connect(READ);
   assert.ok(Array.isArray((await reader.call('items.list', {})).items), 'a read token can read');
   await rejects(reader.call('items.create', { title: 'sneaky' }), 'FORBIDDEN');
-  assert.equal(JSON.stringify(store.list()), before);
+  assert.equal(JSON.stringify((await store.list())), before);
 });
 
 test('operations that are not opted in are not exposed: deleting is not a capability', async () => {
   const app = await connect(FULL);
-  const before = store.list().length;
-  await assert.rejects(app.call('items.remove', { id: store.list()[0].id }), (e) => ['UNKNOWN_CAPABILITY', 'FORBIDDEN'].includes(e.code));
-  assert.equal(store.list().length, before);
+  const before = (await store.list()).length;
+  await assert.rejects(app.call('items.remove', { id: (await store.list())[0].id }), (e) => ['UNKNOWN_CAPABILITY', 'FORBIDDEN'].includes(e.code));
+  assert.equal((await store.list()).length, before);
 });
 
 test('with no token configured nobody can call a capability (fail closed)', async () => {
-  const closed = createApp({ store: new ItemStore(), tokens: [] });
+  const closedStore = new ItemStore({ path: tempDir() });
+  const closed = createApp({ store: closedStore, tokens: [] });
   await new Promise((r) => closed.listen(0, '127.0.0.1', r));
   try {
     const app = await AppPort.discover({ origin: `http://127.0.0.1:${closed.address().port}`, headers: { authorization: 'Bearer anything' }, transports: { http: (o) => createHttpTransport(o) } });
     await rejects(app.call('items.list', {}), 'UNAUTHORIZED');
   } finally {
     await new Promise((r) => closed.close(r));
+    await closedStore.close();
   }
 });

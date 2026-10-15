@@ -99,6 +99,12 @@
           <div id="model-picker" class="model-picker"></div>
           <div class="tag">&lt;/model&gt;</div>
 
+          <fieldset class="stack-opt" id="stack-opt" hidden>
+            <legend>Product stack <em>new apps</em></legend>
+            <div id="stack-choices" class="stack-choices"></div>
+            <label class="field wide" id="appport-reason" hidden><span>Why this app should not expose an AppPort boundary <em>required</em></span><input name="appportException" maxlength="300" placeholder="e.g. an internal batch job with no callers"></label>
+            <p class="muted" id="stack-hint">Tick or untick components. Unselected packages are not installed, and the factory checks that. Building without AppPort needs a reason, which is recorded in the run.</p>
+          </fieldset>
           <fieldset class="pax-opt" id="pax-opt">
             <legend>Observation evidence</legend>
             <label class="field check"><input name="pax" id="pax-check" type="checkbox"> <span id="pax-label">Collect PAX observations after verification</span></label>

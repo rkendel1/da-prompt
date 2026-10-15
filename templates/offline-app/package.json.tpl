@@ -8,8 +8,8 @@
     "start": "node src/app.js",
     "test": "node --test"
   },
-  "dependencies": {{APPPORT_DEPENDENCIES}},
-  "devDependencies": {{APPPORT_DEV_DEPENDENCIES}},
+  "dependencies": {{STACK_DEPENDENCIES}},
+  "devDependencies": {{STACK_DEV_DEPENDENCIES}},
   "engines": {
     "node": ">=20"
   },

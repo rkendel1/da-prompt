@@ -8,6 +8,7 @@ import { redact } from './security.js';
 import { extractJsonValues } from './providers/tooltext.js';
 import { compactHistory, historyBudget } from './providers/history.js';
 import { APPPORT_RULES, appportException } from './appport.js';
+import { stackRules, stackLabel } from './stack.js';
 
 export const ROLE_BRIEFS = {
   product: 'You are the Product agent. Refine requirements, user flows and the PRD. Write crisp, testable acceptance criteria and keep docs accurate to what was actually built.',
@@ -39,7 +40,8 @@ const EXISTING_WORKSPACE_RULES = `Workspace rules (existing project):
 - Finish by calling complete_task with an honest summary. Only claim what you have verified.`;
 
 // New apps are AppPort-native unless the run carries an explicit exception (src/appport.js).
-const newAppRules = (run) => (appportException(run) ? WORKSPACE_RULES : `${WORKSPACE_RULES}\n\n${APPPORT_RULES}`);
+// …and are built on the run's selected stack (src/stack.js): its packages and rules, and none of the unselected packages.
+const newAppRules = (run) => [WORKSPACE_RULES, appportException(run) ? '' : APPPORT_RULES, run.settings?.stack ? stackRules(run.settings.stack) : ''].filter(Boolean).join('\n\n');
 const rulesFor = (run) => (isExisting(run) ? EXISTING_WORKSPACE_RULES : newAppRules(run));
 
 export const AGENT_TOOLS = [
@@ -168,7 +170,7 @@ Planning rules:
 - Include: a product/PRD task, implementation tasks, a UI task if the product has a UI, a QA task that runs the full test suite, a devops task (start command, Dockerfile, DEPLOY.md), and a README task last.
 - finalVerify must run the full test suite. deploy.start must start the app honouring PORT; deploy.healthPath must return 2xx once it is up.
 - Agents only have a local shell and the workspace; do not plan for external services unless the inputs provide access.
-${appportException(run) ? '' : '- The app is AppPort-native (rules below): the implementation task installs the pinned @appport packages and builds src/appport.js over the app\'s own store; the QA task tests it in test/appport.test.js; the README documents the capabilities.\n'}${newAppRules(run)}`;
+${appportException(run) ? '' : '- The app is AppPort-native (rules below): the implementation task installs the pinned @appport packages and builds src/appport.js over the app\'s own store; the QA task tests it in test/appport.test.js; the README documents the capabilities.\n'}${run.settings?.stack?.some((id) => id !== 'appport') ? `- The selected stack is ${stackLabel(run.settings.stack)}: the implementation task builds on every selected component as its rules below say, the QA task writes the tests those rules name, and the README documents the stack.\n` : ''}${newAppRules(run)}`;
 }
 
 export async function runPlanner({ provider, run, signal, track, log }) {
@@ -180,7 +182,7 @@ export async function runPlanner({ provider, run, signal, track, log }) {
     },
   ];
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await call(provider, { system: plannerSystem(run), messages, tools: [planToolFor(run)], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan', project: existing ? run.project : null, source: run.source } }, track);
+    const res = await call(provider, { system: plannerSystem(run), messages, tools: [planToolFor(run)], signal, meta: { kind: 'plan', inputs: run.inputs, forceTool: 'submit_plan', project: existing ? run.project : null, source: run.source, stack: run.settings?.stack } }, track);
     const use = res.content.find((c) => c.type === 'tool_use' && c.name === 'submit_plan');
     messages.push({ role: 'assistant', content: res.content });
     // Local models often write the plan as JSON in their reply instead of calling the tool; take it from there.
@@ -356,7 +358,7 @@ export async function runAgent({ provider, ws, run, task, attempt, maxAttempts, 
 
   for (let turn = 1; turn <= settings.maxAgentTurns; turn++) {
     if (signal?.aborted) return { ok: false, error: 'cancelled' };
-    const res = await call(provider, { system, messages: compactHistory(messages, budget), tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run) } }, track);
+    const res = await call(provider, { system, messages: compactHistory(messages, budget), tools: AGENT_TOOLS, signal, meta: { kind: 'task', task, attempt, totalAttempts: task.attempts?.length || attempt, inputs: run.inputs, existing: isExisting(run), stack: run.settings?.stack } }, track);
     messages.push({ role: 'assistant', content: res.content });
 
     for (const block of res.content) {
