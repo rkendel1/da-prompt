@@ -3,6 +3,7 @@
 {{IDEA}}
 
 Built and verified by the da-prompt software factory. Stack: {{STACK_LABEL}}.
+{{STACK_NOTES}}
 
 ## Quick start
 ```bash
@@ -48,7 +49,7 @@ Publishing is not possible over plain HTTP: it goes through the authorized AppPo
 ## Project layout
 ```
 src/app.js       HTTP server, routing, static files
-src/store.js     Releases (in memory) and their rules
+src/store.js     {{RELEASE_STORE_LINE}}
 src/signing.js   Signing and verification with @distribution-protocol/protocol
 src/appport.js   AppPort capabilities over the store
 src/auth.js      Who may call capabilities: tokens and permissions
@@ -56,5 +57,5 @@ test/            node:test suites (HTTP, AppPort, signing)
 ```
 
 ## Next steps
-- Keep releases durably (select FeltDB in the stack)
+{{RELEASE_NEXT}}
 - Publish the public key where consumers can pin it

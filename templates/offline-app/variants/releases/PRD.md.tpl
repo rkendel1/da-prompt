@@ -22,8 +22,8 @@
 - The app starts with `npm start`, honours `PORT`, and passes a health check once deployed.
 
 ## Out of scope for v1
-Durable storage of releases (select FeltDB), key rotation, multiple publishers.
+Key rotation, multiple publishers.
 
 ## Risks and open questions
 - The publisher key's custody is the operator's.
-- Releases are kept in memory in this stack.
+- Where the releases live is set by the stack: in memory by default, in FeltDB when FeltDB is selected.

@@ -60,7 +60,7 @@ export function createApp({ store = new ReleaseStore(), tokens } = {}) {
       }
       if (parts[1] === 'health' && parts.length === 2) {
         if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
-        return send(res, 200, { ok: true, name: APP_NAME, releases: store.stats(), publisher: { id: store.signer.publisherId, publicKey: store.signer.publicKey, canPublish: store.signer.canSign } });
+        return send(res, 200, { ok: true, name: APP_NAME, releases: await store.stats(), publisher: { id: store.signer.publisherId, publicKey: store.signer.publicKey, canPublish: store.signer.canSign } });
       }
       // Anyone may verify a release (and artifact bytes) against this publisher. Publishing goes through AppPort only.
       if (parts[1] === 'verify' && parts.length === 2) {
@@ -68,18 +68,18 @@ export function createApp({ store = new ReleaseStore(), tokens } = {}) {
         const body = await readJson(req);
         if (!body.release || typeof body.release !== 'object') throw new ValidationError('release is required');
         if (body.content !== undefined && typeof body.content !== 'string') throw new ValidationError('content must be base64');
-        return send(res, 200, store.verify(body.release, body.content));
+        return send(res, 200, await store.verify(body.release, body.content));
       }
       if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
-      if (parts[1] === 'releases' && parts.length === 2) return send(res, 200, { releases: store.list() });
+      if (parts[1] === 'releases' && parts.length === 2) return send(res, 200, { releases: await store.list() });
       if (parts[1] === 'releases' && (parts.length === 4 || parts.length === 5)) {
         const [name, version] = [decodeURIComponent(parts[2]), decodeURIComponent(parts[3])];
-        const release = store.get(name, version);
+        const release = await store.get(name, version);
         if (!release) return send(res, 404, { error: 'release not found' });
         if (parts.length === 4) return send(res, 200, { release });
         if (parts[4] !== 'artifact') return send(res, 404, { error: 'not found' });
         res.writeHead(200, { 'content-type': release.mediaType, 'x-content-type-options': 'nosniff', 'content-disposition': `attachment; filename="${release.artifactId}"` });
-        return res.end(store.artifact(name, version));
+        return res.end(await store.artifact(name, version));
       }
       return send(res, 404, { error: 'not found' });
     } catch (err) {
@@ -95,10 +95,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const store = new ReleaseStore();
   const server = createApp({ store });
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
-  const stop = () => server.close(async () => {
-    await store.close();
-    process.exit(0);
-  });
+  // Stop accepting requests, end idle keep-alive connections (they would hold close() open), then close the store so a
+  // durable store is flushed and its lock released.
+  const stop = () => {
+    server.close(async () => {
+      await store.close();
+      process.exit(0);
+    });
+    server.closeIdleConnections();
+  };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

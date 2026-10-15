@@ -4,9 +4,10 @@ import { createApp } from '../src/app.js';
 import { ReleaseStore } from '../src/store.js';
 import { createSigner, publisherFromEnv } from '../src/signing.js';
 import { newPublisherPem } from './keys.js';
+import { tempDir } from './helpers.js';
 
-const store = new ReleaseStore({ signer: createSigner(publisherFromEnv({ PUBLISHER_PRIVATE_KEY: newPublisherPem() })) });
-const published = store.publish({ name: 'Widget', version: '1.0.0', artifactId: 'widget', content: Buffer.from('widget v1').toString('base64') });
+const store = new ReleaseStore({ path: tempDir(), signer: createSigner(publisherFromEnv({ PUBLISHER_PRIVATE_KEY: newPublisherPem() })) });
+const published = await store.publish({ name: 'Widget', version: '1.0.0', artifactId: 'widget', content: Buffer.from('widget v1').toString('base64') });
 let server;
 let base;
 
@@ -15,7 +16,10 @@ before(async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => new Promise((r) => server.close(r)));
+after(async () => {
+  await new Promise((r) => server.close(r));
+  await store.close();
+});
 
 const json = async (method, path, body) => {
   const res = await fetch(base + path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });

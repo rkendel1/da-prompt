@@ -60,7 +60,7 @@ export function capabilities(store) {
       name: 'releases.verify', version: 1, effect: 'observation', authorization: ['releases.read'],
       description: 'Verify a signed release envelope against this publisher, and optionally artifact bytes (base64 `content`) against its signed digest. Answers { valid, reason }; a tampered manifest, a foreign key or wrong bytes are invalid.',
       input: s.object({ release: envelope, content: s.optional(s.string()) }), output: s.object({ valid: s.boolean(), reason: s.nullable(s.string()) }),
-      handler: async ({ release: r, content }) => store.verify(r, content),
+      handler: async ({ release: r, content }) => await store.verify(r, content),
     }),
   ];
 }

@@ -95,10 +95,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const store = new ItemStore();
   const server = createApp({ store });
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
-  const stop = () => server.close(async () => {
-    await store.close();
-    process.exit(0);
-  });
+  // Stop accepting requests, end idle keep-alive connections (they would hold close() open), then close the store so a
+  // durable store is flushed and its lock released.
+  const stop = () => {
+    server.close(async () => {
+      await store.close();
+      process.exit(0);
+    });
+    server.closeIdleConnections();
+  };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

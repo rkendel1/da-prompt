@@ -514,7 +514,6 @@ export class Factory {
     };
     for (const text of contractWarnings(run, this.providers)) emit('log', { level: 'warn', text });
     if (appportException(run)) emit('log', { level: 'warn', text: `AppPort contract not required for this run (explicit exception): ${appportException(run)}` });
-    if (run.settings.stack) emit('log', { text: `Stack: ${stackLabel(run.settings.stack)}` });
     const track = {
       check: () => {
         const used = run.usage.input + run.usage.output;
@@ -542,6 +541,7 @@ export class Factory {
         await layer('plan', 'active');
         const desc = plannerProvider.describe();
         emit('log', { text: `Planning with ${desc.label || desc.name} · ${desc.plannerModel || desc.model}…` });
+        if (run.settings.stack) emit('log', { text: `Stack: ${stackLabel(run.settings.stack)}` });
         const plan = await runPlanner({ provider: plannerProvider, run, signal, track, log: (text) => emit('log', { level: 'warn', text }) });
         const depth = levels(plan.tasks);
         plan.tasks = plan.tasks.map((t) => ({ ...t, status: 'pending', attempts: [], level: depth[t.id] }));
