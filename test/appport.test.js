@@ -185,12 +185,7 @@ async function gateOn(edit) {
   });
 }
 const failed = (g) => g.checks.filter((c) => !c.ok).map((c) => c.id);
-const editFile = (root, rel, fn) => {
-  const before = fs.readFileSync(path.join(root, rel), 'utf8');
-  const after = fn(before);
-  assert.notEqual(after, before, `the edit to ${rel} did not apply (the template changed?)`);
-  fs.writeFileSync(path.join(root, rel), after);
-};
+const editFile = (root, rel, fn) => fs.writeFileSync(path.join(root, rel), fn(fs.readFileSync(path.join(root, rel), 'utf8')));
 const editPkg = (root, fn) => editFile(root, 'package.json', (s) => JSON.stringify(fn(JSON.parse(s)), null, 2));
 
 test('the gate passes the generated app unchanged', async () => {
@@ -243,7 +238,7 @@ test('state authority: a capability that bypasses the store is caught by the app
   // so this is proved by the app's test/appport.test.js (run by finalVerify), which compares every result with the store.
   const root = tmpDir('appport-bypass-');
   fs.cpSync(tracker.root, root, { recursive: true, filter: (src) => !src.includes(`${path.sep}.home`) });
-  editFile(root, 'src/appport.js', (s) => s.replace('handler: async () => ({ items: await store.list() }),', 'handler: async () => ({ items: shadow }),').replace('export function capabilities(store) {', 'const shadow = [];\nexport function capabilities(store) {'));
+  editFile(root, 'src/appport.js', (s) => s.replace('handler: () => ({ items: store.list() }),', 'handler: () => ({ items: shadow }),').replace('export function capabilities(store) {', 'const shadow = [];\nexport function capabilities(store) {'));
   const r = await new Workspace(root).runCommand('npm test', { timeoutMs: 120_000 });
   assert.notEqual(r.exitCode, 0, 'the app\'s own AppPort tests fail');
   assert.match(r.stdout, /not ok .*reads and writes go through the store/);

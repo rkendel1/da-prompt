@@ -12,14 +12,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
-const STACK = JSON.parse(fs.readFileSync(new URL('../templates/stack.json', import.meta.url), 'utf8'));
-const PINNED = STACK.components.appport;
-/** The published AppPort packages generated apps depend on: exact, mutually compatible versions (templates/stack.json). */
+const PINNED = JSON.parse(fs.readFileSync(new URL('../templates/appport-packages.json', import.meta.url), 'utf8'));
+/** The published AppPort packages generated apps depend on: exact, mutually compatible versions (one release line). */
 export const APPPORT_PACKAGES = { dependencies: PINNED.dependencies, devDependencies: PINNED.devDependencies };
 /** Packages the gate requires at runtime; the rest of APPPORT_PACKAGES.dependencies is recommended. */
 export const REQUIRED_RUNTIME = ['@appport/core', '@appport/server'];
 /** The install command the factory's agents use for a generated app (no lifecycle scripts, cache first). */
-export const INSTALL_COMMAND = STACK.install;
+export const INSTALL_COMMAND = PINNED.install;
 /** The variable a generated app reads for the token that grants full capability access (the gate sets it). */
 export const TOKEN_ENV = 'APP_API_TOKEN';
 export const MAX_EXCEPTION_REASON = 300;

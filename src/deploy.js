@@ -92,7 +92,7 @@ export class PreviewManager {
     return p && p.child.exitCode === null && !p.child.killed ? p : null;
   }
 
-  async start(runId, workspaceRoot, { start, healthPath = '/' }, { timeoutMs = 30_000, env = {} } = {}) {
+  async start(runId, workspaceRoot, { start, healthPath = '/' }, { timeoutMs = 30_000 } = {}) {
     this.stop(runId);
     // Keep resource use bounded: evict the oldest preview.
     while (this.previews.size >= this.max) {
@@ -101,7 +101,6 @@ export class PreviewManager {
     }
     const r = await launchApp(workspaceRoot, { start, healthPath }, {
       timeoutMs,
-      env,
       onSpawn: (entry) => this.previews.set(runId, { ...entry, startedAt: Date.now(), healthPath }),
     });
     if (!r.ok) this.previews.delete(runId);

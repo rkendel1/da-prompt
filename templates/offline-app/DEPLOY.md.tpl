@@ -22,7 +22,7 @@ The image runs as the unprivileged `node` user and includes a `HEALTHCHECK`.
 - Build command: `npm install --omit=dev --ignore-scripts`
 - Start command: `node src/app.js`
 - Health check path: `/api/health`
-{{DEPLOY_DATA}}- Environment: `PORT` is provided by the host. Set `APP_API_TOKEN` (and optionally `APP_READ_TOKEN`) as a secret to let
+- Environment: `PORT` is provided by the host. Set `APP_API_TOKEN` (and optionally `APP_READ_TOKEN`) as a secret to let
   AppPort callers in; without it every protected capability is refused.
 
 ## Operations

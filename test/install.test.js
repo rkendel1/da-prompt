@@ -123,12 +123,8 @@ test('re-run with installs allowed starts a NEW run with the same request and le
     const again = (await be.call('GET', `/api/runs/${first.id}`)).body.run;
     assert.equal(again.source.allowInstall, false);
     assert.equal(again.project.baseline[0].status, 'failed', 'the original is exactly as it was');
-    // allowInstall applies to existing projects only; a new app can be re-run with its settings (its stack included).
-    const fresh = await be.call('POST', '/api/runs', { idea: 'A packing list', provider: 'offline', settings: { deploy: false, stack: ['feltdb'] } });
-    assert.equal((await be.call('POST', `/api/runs/${fresh.body.run.id}/rerun`, { allowInstall: true })).status, 409);
-    const rerun = await be.call('POST', `/api/runs/${fresh.body.run.id}/rerun`, {});
-    assert.ok(rerun.status < 300, JSON.stringify(rerun.body));
-    assert.deepEqual(rerun.body.run.settings.stack, ['appport', 'feltdb']);
-    assert.equal(rerun.body.run.source?.mode ?? 'new', 'new');
+    // Only runs against an existing project can be re-run this way.
+    const fresh = await be.call('POST', '/api/runs', { idea: 'A packing list', provider: 'offline', settings: { deploy: false } });
+    assert.equal((await be.call('POST', `/api/runs/${fresh.body.run.id}/rerun`, {})).status, 409);
   } finally { await be.close(); }
 });

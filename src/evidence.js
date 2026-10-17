@@ -42,14 +42,6 @@ export function buildEvidence(run) {
       baseline: existing ? (run.project?.baseline || []).map((b) => ({ command: b.command, status: b.status, exitCode: b.exitCode, limitation: b.limitation, failing: (b.signature || []).slice(0, 5) })) : [],
       final,
       tasks: taskChecks,
-      // Test-first QA (src/testfirst.js): what the acceptance tests did before implementation, which tests QA sealed, and which
-      // code state each factory-run check applies to.
-      testFirst: run.testContract ? {
-        baseline: (run.testContract.baseline || []).map((b) => ({ taskId: b.taskId, command: b.command, exitCode: b.exitCode, classification: b.classification, reason: b.reason, codeState: b.codeState })),
-        sealedTests: Object.entries(run.testContract.sealed || {}).map(([file, v]) => ({ file, owner: v.owner, sha256: v.sha256 })),
-        qaRounds: run.testContract.qaRounds || {},
-        checks: (run.testContract.evidence || []).map((e) => ({ taskId: e.taskId, command: e.command, exitCode: e.exitCode, codeState: e.codeState, at: e.at })),
-      } : null,
       checklist: run.checklist || [],
       security: run.security ? { blocking: run.security.blocking, findings: run.security.findings.length } : null,
     },

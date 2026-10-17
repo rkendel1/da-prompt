@@ -7,7 +7,6 @@
 import crypto from 'node:crypto';
 import { redact } from '../security.js';
 import { AGENT_TOOLS, BudgetError, agentSystem, completionFields, taskBrief, execTool, summarizeInput, normalizeToolInput } from '../agents.js';
-import { sealedWriteGuard } from '../testfirst.js';
 import { startBridge } from '../providers/bridge.js';
 import { loadEngineModule, fxEndpoint, EngineError } from './index.js';
 
@@ -52,7 +51,7 @@ export function makeFxRunner(cfg) {
       }
     };
     try {
-      bridge = await startBridge(provider, { token, track, meta: { task, attempt, inputs: run.inputs, stack: run.settings?.stack } });
+      bridge = await startBridge(provider, { token, meta: { task, attempt, inputs: run.inputs } });
       const model = await fx.createFxModel({ baseUrl: bridge.baseUrl, model: ep.model, apiKeyEnv: envName });
       const stop = () => queueMicrotask(() => state.turn?.cancel());
       const tools = AGENT_TOOLS.map((t) => ({
@@ -73,7 +72,7 @@ export function makeFxRunner(cfg) {
             return 'The token budget is exhausted. Stop.';
           }
           input = normalizeToolInput(t.name, input);
-          const out = await execTool(ws, { name: t.name, input }, { settings, signal: ctx.signal || signal, deny: sealedWriteGuard(run, task) });
+          const out = await execTool(ws, { name: t.name, input }, { settings, signal: ctx.signal || signal });
           if (t.name === 'write_file' && !out.isError) state.files.add(out.path);
           if (t.name === 'run_command') state.commands.push({ command: input?.command, exitCode: out.exitCode });
           emit('tool', { taskId: task.id, role: task.role, tool: t.name, input: summarizeInput({ name: t.name, input }), ok: !out.isError, output: redact(out.preview || '').slice(0, 4000), exitCode: out.exitCode, durationMs: out.durationMs });
@@ -111,7 +110,6 @@ export function makeFxRunner(cfg) {
         } catch (e) {
           record(cur, { err: e, retries: malformed });
           if (signal?.aborted) return { ok: false, error: 'cancelled' };
-          if (bridge?.budget()) break; // the bridge refused a request: stopped by the budget, not a model failure
           if (e.kind === 'malformed_tool_call' && malformed < MAX_MALFORMED_RETRIES) {
             malformed++;
             state.recovering = true;
@@ -125,11 +123,10 @@ export function makeFxRunner(cfg) {
           return { ok: false, error: redact(`FX model error${e.kind || e.code ? ` (${e.kind || e.code})` : ''}: ${String(e.message || e).split('\n')[0]}`).slice(0, 600) };
         }
         record(cur, { result, retries: malformed });
-        // Usage is charged per request by the bridge (above), not here.
+        track?.add({ input_tokens: result?.usage?.inputTokens || 0, output_tokens: result?.usage?.outputTokens || 0 });
         lastStop = result?.stopReason;
         if (lastStop === 'max_turn_requests' && !state.completion) break;
       }
-      if (!state.budget && bridge.budget()) state.budget = bridge.budget();
       if (state.budget) throw state.budget instanceof BudgetError ? state.budget : new BudgetError(String(state.budget.message));
       if (signal?.aborted) return { ok: false, error: 'cancelled' };
       if (!state.completion) return { ok: false, error: `agent did not finish within ${settings.maxAgentTurns} turns` };

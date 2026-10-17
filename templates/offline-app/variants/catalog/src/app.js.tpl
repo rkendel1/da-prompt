@@ -68,10 +68,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT) || 3000;
   const server = createApp();
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
-  const stop = () => {
-    server.close(() => process.exit(0));
-    server.closeIdleConnections(); // idle keep-alive connections would hold close() open
-  };
+  const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

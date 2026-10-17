@@ -15,8 +15,6 @@ import { parseArgs, parseToolCallsFromText, jsonToolInstructions, stripThinking,
 
 // Remember models that rejected native tools so we don't pay for the failure every call.
 const JSON_MODE_MODELS = new Set();
-// Servers (LM Studio) that only accept the string forms of tool_choice, not the OpenAI object that names a function.
-const STRING_TOOL_CHOICE = new Set();
 
 const NO_TOOLS_ERROR = /does not support tools|tools? (are|is) not supported|tool[_ ]?(use|calling|choice).*not supported|unsupported.*tool|unrecognized.*tools|Extra inputs.*tools|function calling is not/i;
 
@@ -71,8 +69,6 @@ export class OpenAICompatProvider {
     let raw;
     if (this.dialect === 'ollama') {
       const body = { model, messages: msgs, stream: false, options: { num_predict: limit } };
-      // Planning needs a structured answer inside the output budget; a thinking model otherwise spends it reasoning.
-      if (meta.kind === 'plan') body.think = false;
       if (this.numCtx) body.options.num_ctx = this.numCtx;
       if (this.temperature != null) body.options.temperature = this.temperature;
       if (mode === 'native' && tools.length) body.tools = tools.map(toOpenAITool);
@@ -85,27 +81,11 @@ export class OpenAICompatProvider {
     } else {
       const body = { model, messages: msgs, max_tokens: limit };
       if (this.temperature != null) body.temperature = this.temperature;
-      // LM Studio runs thinking models (Qwen) with reasoning on: a plan can reason for an hour. It honours reasoning_effort "none".
-      if (meta.kind === 'plan' && this.name === 'lmstudio') body.reasoning_effort = 'none';
       if (mode === 'native' && tools.length) {
         body.tools = tools.map(toOpenAITool);
-        if (meta.forceTool) body.tool_choice = STRING_TOOL_CHOICE.has(`${this.baseUrl}|${model}`) ? 'required' : { type: 'function', function: { name: meta.forceTool } };
+        if (meta.forceTool) body.tool_choice = { type: 'function', function: { name: meta.forceTool } };
       }
-      const post = () => requestWithRetry(`${this.baseUrl}/chat/completions`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs });
-      let res;
-      for (let attempt = 0; ; attempt++) {
-        try {
-          res = await post();
-          break;
-        } catch (err) {
-          const rejects = (field) => !signal?.aborted && attempt < 2 && err instanceof HttpError && new RegExp(field, 'i').test(String(err.body));
-          if (body.reasoning_effort && rejects('reasoning_effort')) delete body.reasoning_effort; // an LM Studio that does not know the field
-          else if (typeof body.tool_choice === 'object' && rejects('tool_choice')) {
-            STRING_TOOL_CHOICE.add(`${this.baseUrl}|${model}`);
-            body.tool_choice = 'required';
-          } else throw err;
-        }
-      }
+      const res = await requestWithRetry(`${this.baseUrl}/chat/completions`, { method: 'POST', body, signal, headers: this.authHeaders(), timeoutMs: this.timeoutMs });
       const choice = res.choices?.[0] || {};
       raw = {
         message: choice.message || {},
