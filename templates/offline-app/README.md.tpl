@@ -2,8 +2,7 @@
 
 {{IDEA}}
 
-Built and verified by the da-prompt software factory. Stack: {{STACK_LABEL}}.
-{{STACK_NOTES}}
+Built and verified by the da-prompt software factory.
 
 ## Quick start
 ```bash
@@ -63,7 +62,7 @@ discover what the app can do and call it without reverse-engineering the HTTP AP
 ## Project layout
 ```
 src/app.js      HTTP server, routing, static files
-src/store.js    {{STORE_LINE}}
+src/store.js    In-memory store with validation (the single source of truth)
 src/appport.js  AppPort capabilities over the store (what agents can discover and call)
 src/auth.js     Who may call capabilities: tokens and permissions
 public/         Web UI (HTML, CSS, JS)
@@ -73,5 +72,6 @@ DEPLOY.md       Deployment guide
 ```
 
 ## Next steps
-{{STORE_NEXT}}- Add accounts so multiple people can use one deployment
+- Persist items in SQLite or Postgres (implement the `ItemStore` methods)
+- Add accounts so multiple people can use one deployment
 - Add due dates and sorting

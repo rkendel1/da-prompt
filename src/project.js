@@ -6,7 +6,6 @@
 // the committed state of the source) or a working-tree copy ("snapshot": includes uncommitted files,
 // the only option for non-git folders) — and are handed back as a patch, an archive, a branch or a PR.
 
-import { isMissingDependency } from './testfirst.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -14,7 +13,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { runGit, git, explainGitError, GitError, redactUrl, BOT } from './gitutil.js';
 import { redact } from './security.js';
-import { detectionMarkers, planContext } from './appspec.js';
 
 export class ProjectError extends Error {
   constructor(status, message, extra) {
@@ -570,8 +568,6 @@ export async function inspectProject(ws) {
   };
   const manifest = (p, kind) => has(p) && manifests.push({ path: p, kind });
 
-  // Dependency names (not versions): what technology detection (src/appspec.js) reads. Names only, never installed state.
-  const dependencies = { npm: [], python: [] };
   // Node
   if (has('package.json')) {
     ecosystems.push('node');
@@ -592,7 +588,6 @@ export async function inspectProject(ws) {
     commands.nodeStart = scripts.start ? { command: `${pm} start`, source: 'package.json scripts.start' } : null;
     commands.packageManager = pm;
     commands.hasDependencies = Boolean(Object.keys(pkg.dependencies || {}).length || Object.keys(pkg.devDependencies || {}).length);
-    dependencies.npm = [...new Set([...Object.keys(pkg.dependencies || {}), ...Object.keys(pkg.devDependencies || {})])].slice(0, 400);
   }
   // Python
   const pyFiles = files.filter((f) => f.path.endsWith('.py'));
@@ -602,7 +597,6 @@ export async function inspectProject(ws) {
     pyMarkers.forEach((p) => manifest(p, 'python'));
     const pyproject = (await rd(ws, 'pyproject.toml')) || '';
     const cfgText = `${(await rd(ws, 'tox.ini')) || ''}\n${(await rd(ws, 'setup.cfg')) || ''}\n${(await rd(ws, 'requirements.txt')) || ''}\n${(await rd(ws, 'requirements-dev.txt')) || ''}`;
-    dependencies.python = pythonRequirements(`${(await rd(ws, 'requirements.txt')) || ''}\n${(await rd(ws, 'requirements-dev.txt')) || ''}`, pyproject);
     const pytestHint = has('pytest.ini') || /\[tool\.pytest|pytest/i.test(pyproject) || /\[tool:pytest\]|\[pytest\]|^pytest\b/im.test(cfgText) || has('conftest.py');
     const testFiles = pyFiles.filter((f) => /(^|\/)(test_[^/]*|[^/]*_test)\.py$/.test(f.path));
     if (pytestHint) add('test', 'python3 -m pytest -q', 'pytest configuration');
@@ -711,28 +705,9 @@ export async function inspectProject(ws) {
     sample,
     instructions,
     readme: readme ? redact(clip(readme.trim(), 1500)) : null,
-    dependencies,
-    markers: detectionMarkers(files.map((f) => f.path)),
     deploy,
     ci: workflows,
   };
-}
-
-/** Python distribution names from requirements files and pyproject.toml ([project] dependencies and Poetry tables). */
-export function pythonRequirements(requirements = '', pyproject = '') {
-  const names = new Set();
-  const name = (spec) => String(spec).trim().match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1]?.toLowerCase().replace(/_/g, '-');
-  for (const line of requirements.split('\n')) {
-    const t = line.replace(/#.*/, '').trim();
-    if (t && !t.startsWith('-')) names.add(name(t));
-  }
-  const list = pyproject.match(/^dependencies\s*=\s*\[([\s\S]*?)\]/m)?.[1] || '';
-  for (const m of list.matchAll(/["']([^"']+)["']/g)) names.add(name(m[1]));
-  for (const table of pyproject.matchAll(/^\[tool\.poetry\.(?:dev-)?dependencies\]\s*\n([\s\S]*?)(?=^\[|(?![\s\S]))/gm)) {
-    for (const m of table[1].matchAll(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=/gm)) if (m[1].toLowerCase() !== 'python') names.add(name(m[1]));
-  }
-  names.delete(undefined);
-  return [...names].slice(0, 400);
 }
 
 /** One line for the UI and logs. */
@@ -819,7 +794,7 @@ export async function runChecks(ws, commands, { timeoutMs, signal, onResult, ins
       status: r.exitCode === 0 ? 'passed' : r.exitCode === 126 && /^blocked:/m.test(r.stderr) ? 'blocked' : r.exitCode === 127 ? 'unavailable' : r.timedOut ? 'timeout' : 'failed',
       output: text.slice(-4000),
       signature: r.exitCode === 0 ? [] : failureSignature(text),
-      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) && isMissingDependency(text) ? (installsAllowed ? 'dependencies or tools are still missing after the automatic install (see the install results above)' : 'dependencies or tools are missing in the workspace, and installing them is off for this run — re-run with dependency installs allowed') : null,
+      limitation: r.exitCode !== 0 && MISSING_DEPS.test(text) ? (installsAllowed ? 'dependencies or tools are still missing after the automatic install (see the install results above)' : 'dependencies or tools are missing in the workspace, and installing them is off for this run — re-run with dependency installs allowed') : null,
     };
     out.push(entry);
     onResult?.(entry);
@@ -1053,8 +1028,6 @@ export function plannerContext(run, maxChars = 16_000) {
   }
   if (src.snapshotNote) L.push(`Note: ${src.snapshotNote}`);
   L.push(`Deployment: ${i.deploy.proposed ? `a local preview could run \`${i.deploy.proposed.command}\`` : 'no start command detected'}${i.deploy.external.length ? `; external targets present (${i.deploy.external.join(', ')}) are never run by the factory` : ''}. Deployment is ${run.settings.deploy ? 'AUTHORIZED for a local preview' : 'NOT requested: omit the deploy field'}.`);
-  const spec = run.spec?.plan ? planContext(run.spec.desired, run.spec.plan) : '';
-  if (spec) L.push(`\n## Application specification (reconcile; do not regenerate)\n${spec}`);
   L.push('Structure (top level): ' + i.top.join(', '));
   L.push('Sample of files (shallow first, bounded):\n' + i.sample.slice(0, 160).join('\n'));
   if (i.instructions.length || i.readme) {

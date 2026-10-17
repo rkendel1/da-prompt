@@ -59,25 +59,25 @@ export function createApp({ store = new ItemStore(), tokens } = {}) {
         return await serveStatic(res, url.pathname);
       }
       if (parts[1] === 'health' && parts.length === 2) {
-        return send(res, 200, { ok: true, name: APP_NAME, items: await store.stats() });
+        return send(res, 200, { ok: true, name: APP_NAME, items: store.stats() });
       }
       if (parts[1] === 'items' && parts.length === 2) {
-        if (req.method === 'GET') return send(res, 200, { items: await store.list() });
-        if (req.method === 'POST') return send(res, 201, { item: await store.create(await readJson(req)) });
+        if (req.method === 'GET') return send(res, 200, { items: store.list() });
+        if (req.method === 'POST') return send(res, 201, { item: store.create(await readJson(req)) });
         return send(res, 405, { error: 'method not allowed' });
       }
       if (parts[1] === 'items' && parts.length === 3) {
         const id = decodeURIComponent(parts[2]);
         if (req.method === 'GET') {
-          const item = await store.get(id);
+          const item = store.get(id);
           return item ? send(res, 200, { item }) : send(res, 404, { error: 'item not found' });
         }
         if (req.method === 'PATCH') {
-          const item = await store.update(id, await readJson(req));
+          const item = store.update(id, await readJson(req));
           return item ? send(res, 200, { item }) : send(res, 404, { error: 'item not found' });
         }
         if (req.method === 'DELETE') {
-          return (await store.remove(id)) ? send(res, 204) : send(res, 404, { error: 'item not found' });
+          return store.remove(id) ? send(res, 204) : send(res, 404, { error: 'item not found' });
         }
         return send(res, 405, { error: 'method not allowed' });
       }
@@ -92,24 +92,9 @@ export function createApp({ store = new ItemStore(), tokens } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
-  const store = new ItemStore();
-  try {
-    await store.ready; // a durable store opens (and deploys its data model) before the app accepts a request
-  } catch (err) {
-    console.error(`${APP_NAME} cannot start: ${err.message}`);
-    process.exit(1);
-  }
-  const server = createApp({ store });
+  const server = createApp();
   server.listen(port, () => console.log(`${APP_NAME} listening on http://localhost:${port}`));
-  // Stop accepting requests, end idle keep-alive connections (they would hold close() open), then close the store so a
-  // durable store is flushed and its lock released.
-  const stop = () => {
-    server.close(async () => {
-      await store.close();
-      process.exit(0);
-    });
-    server.closeIdleConnections();
-  };
+  const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

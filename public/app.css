@@ -369,7 +369,6 @@ table.plain td, table.plain th { text-align: left; padding: 4px 6px; border-bott
 .paxstep { border-top: 1px solid var(--line); padding: 10px 0; } .paxstep p { margin: 4px 0; } .paxform fieldset { border: 1px dashed var(--line-2); border-radius: 10px; padding: 10px 14px; display: grid; gap: 6px; } .paxform legend { font: 12px var(--mono); color: var(--ink-2); padding: 0 6px; }
 .fail-dl { display: grid; grid-template-columns: 190px 1fr; gap: 6px 14px; margin: 8px 0 0; } .fail-dl dt { font: 12px var(--mono); color: var(--muted); } .fail-dl dd { margin: 0; }
 .scope { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; background: var(--paper); font: 13px/1.55 var(--mono); } .scope h3 { margin: 0 0 6px; font-size: 13px; } .scope li { margin: 3px 0; }
-.stack-opt { border: 0; padding: 0; margin: 0; } .stack-opt legend { font: 12px var(--mono); color: var(--ink-2); padding: 0; margin-bottom: 6px; } .stack-opt legend em { font-style: normal; color: var(--ink-3, var(--ink-2)); }
 .pax-opt { border: 0; padding: 0; margin: 0; } .pax-opt legend { font: 12px var(--mono); color: var(--ink-2); padding: 0; margin-bottom: 6px; }
 .nexts li { margin: 6px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .filters { grid-template-columns: 1fr 1fr; } .fail-dl { grid-template-columns: 1fr; } }
@@ -600,52 +599,3 @@ dialog.edit-run { width: min(820px, 96vw); max-height: 92vh; overflow: auto; }
 .edit-run .task-form { display: grid; gap: 10px; }
 .edit-run p { margin: 0; }
 .edit-run .task-form { gap: 8px; }
-
-/* Model routing (New run / Edit run) and the run's Models tab */
-.routing { margin: 12px 0 4px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
-.routing > summary { cursor: pointer; font-weight: 600; }
-.routing > summary em { font-style: normal; font-weight: 400; color: var(--muted); margin-left: 6px; }
-.route-grid { margin-top: 8px; }
-.route-grid .field { min-width: 0; }
-.route-grid select { width: 100%; }
-.hint.track { display: block; margin-top: 4px; }
-.warn-text { color: var(--warn); }
-.pill.tag { text-transform: none; letter-spacing: 0; font-weight: 500; }
-.table-scroll { overflow-x: auto; }
-.models-table td, .models-table th, .task-models td, .task-models th { vertical-align: top; white-space: nowrap; }
-.models-table td:first-child, .models-table td:nth-child(2), .task-models td:first-child, .task-models td:last-child { white-space: normal; }
-.models-table td:nth-child(2) { min-width: 140px; }
-.grid-2 > .card { min-width: 0; }
-.attempt-chip { font: 12px var(--mono); padding: 3px 0; overflow-wrap: anywhere; }
-.attempt-chip.ok { color: var(--ok); }
-.attempt-chip.bad { color: var(--bad); }
-.attempt-chip em { font-style: normal; color: var(--muted); }
-.small { font-size: 12px; }
-
-/* Application selector (public/appspec.js) */
-.appspec .appspec-profiles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
-.appspec .chip.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-.appspec-summary { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); margin-bottom: 10px; overflow-wrap: anywhere; }
-.appspec-summary.ok { border-color: var(--ok); }
-.appspec-summary.bad { border-color: var(--bad); }
-.appspec-search { margin-bottom: 6px; }
-.appspec-cat { margin: 12px 0 0; }
-.appspec-cat h4 { margin: 0 0 6px; font-size: 13px; }
-.appspec-cat h4 em { font-style: normal; font-weight: 400; color: var(--muted); margin-left: 6px; }
-.appspec-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 6px; }
-.appspec .opt { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; cursor: pointer; min-width: 0; }
-.appspec .opt:has(input:checked) { border-color: var(--accent); background: var(--run-soft); }
-.appspec .opt.st-unavailable, .appspec .opt.st-incompatible { opacity: .62; cursor: not-allowed; }
-.appspec .opt.detected { border-style: dashed; }
-.appspec .opt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.appspec .opt-body small { color: var(--muted); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
-.appspec .pill.st-supported { background: var(--ok-soft); color: var(--ok); }
-.appspec .pill.st-constrained { background: var(--warn-soft); color: var(--warn); }
-.appspec .pill.st-planned { background: var(--line); color: var(--muted); }
-.appspec .pill.st-detected { background: var(--run-soft); color: var(--run); }
-.appspec-review { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
-.appspec-review h4 { margin: 0 0 6px; }
-.appspec-review .bad, .spec-card .bad { color: var(--bad); }
-.appspec-more { margin-top: 6px; font-size: 12px; }
-.appspec-more > summary { cursor: pointer; color: var(--muted); overflow-wrap: anywhere; }
-.appspec-more li { margin: 4px 0; overflow-wrap: anywhere; }

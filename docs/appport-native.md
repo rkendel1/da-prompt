@@ -75,7 +75,7 @@ own registry, authorizer, binding and client do the work.
 ## 2. The contract
 
 The single source is `src/appport.js` (`APPPORT_RULES`, given to every agent building a new app) together with
-`templates/stack.json` (the pins, shared with the offline templates):
+`templates/appport-packages.json` (the pins, shared with the offline templates):
 
 - **Packages:** the published packages at the pinned versions. Install with
   `npm install --no-audit --no-fund --ignore-scripts --prefer-offline`. No `file:`, `link:` or git dependencies, and no copied
